@@ -3,98 +3,103 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
-import type { AccountData, AgentState, KpiSnapshot, UserStatusCounts, ActiveCall, Thresholds } from '@/lib/types'
+import type { AccountData, Thresholds, DataSourceConfig } from '@/lib/types'
 import {
-  DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
-  calcAbandonRate, extractPercent, formatTime, formatSeconds,
-  isDataStale, parseDurationToSeconds,
+  DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
+  extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds,
   getKpiColorClass, getStatusPillClass,
   loadKpiThresholds, saveKpiThresholds,
   loadStatusThresholds, saveStatusThresholds,
+  loadDataSource, saveDataSource,
   type StatusThresholds
 } from '@/lib/utils'
 
 type Page = 'dashboard' | 'overview'
 
 interface BreachRow {
-  entity: string
-  metric: string
-  value: string
-  threshold: string
+  entity: string; metric: string; value: string; threshold: string
   severity: 'warning' | 'critical'
 }
 
-// ── Pure breach builder — accepts thresholds as params ────────────────────────
-function buildBreachesForAccount(
-  accId: string,
-  accountData: AccountData | undefined,
-  agentTimers: Record<string, number>,
-  kpiTh: Thresholds,
-  statusTh: StatusThresholds
+// ── Read a value from a row using the configured column name ──────────────────
+function col(row: Record<string, any> | null, colName: string): string {
+  if (!row || !colName) return ''
+  return String(row[colName] ?? '')
+}
+
+// ── Build breaches for one account ────────────────────────────────────────────
+function buildBreaches(
+  accountId: string, accountData: AccountData | undefined,
+  agentTimers: Record<string, number>, kpiTh: Thresholds,
+  statusTh: StatusThresholds, ds: DataSourceConfig
 ): BreachRow[] {
   if (!accountData) return []
   const rows: BreachRow[] = []
-  const kpi = accountData.kpi
 
-  if (kpi) {
-    const slaNum  = extractPercent(kpi.sla)
-    const waitNum = parseInt(kpi.calls_waiting ?? '0')
-    const ahtSecs = parseDurationToSeconds(kpi.time_to_answer)
-    const ahtMins = Math.round(ahtSecs / 60)
-    const abnStr  = calcAbandonRate(kpi)
-    const abnNum  = extractPercent(abnStr)
-
-    const checkKpi = (num: number, th: Thresholds[keyof Thresholds], entity: string, metric: string, value: string, thLabel: string) => {
-      if (isNaN(num)) return
-      const isBad = th.direction === 'desc' ? (n: number) => n <= th.crit : (n: number) => n >= th.crit
-      const isWarn = th.direction === 'desc' ? (n: number) => n <= th.warn : (n: number) => n >= th.warn
-      if (isBad(num))       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical' })
-      else if (isWarn(num)) rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning' })
-    }
-
-    checkKpi(slaNum,  kpiTh.sla,  'Global KPI', 'SLA',          (kpi.sla ?? '').replace(/\s+/g,''),  `≥${kpiTh.sla.targ}%`)
-    if (!isNaN(waitNum) && waitNum >= 0) checkKpi(waitNum, kpiTh.wait, 'Queue', 'Queue depth', String(waitNum), String(kpiTh.wait.targ))
-    if (!isNaN(ahtMins) && ahtMins > 0) checkKpi(ahtMins, kpiTh.aht, 'Global KPI', 'ASA', kpi.time_to_answer ?? '', `<${kpiTh.aht.targ}m`)
-    if (!isNaN(abnNum)  && abnNum > 0)  checkKpi(abnNum,  kpiTh.abn, 'Global KPI', 'Abandon Rate', abnStr, `<${kpiTh.abn.targ}%`)
+  const checkKpi = (
+    num: number, th: Thresholds[keyof Thresholds],
+    entity: string, metric: string, value: string, thLabel: string
+  ) => {
+    if (isNaN(num)) return
+    const isCrit = th.direction === 'desc' ? num <= th.crit : num >= th.crit
+    const isWarn = th.direction === 'desc' ? num <= th.warn : num >= th.warn
+    if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical' })
+    else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning'  })
   }
 
+  // KPI breaches — works for both single-row and multi-row
+  const kpiRows = accountData.kpiRows.length > 0 ? accountData.kpiRows :
+                  accountData.kpi ? [accountData.kpi] : []
+
+  kpiRows.forEach(row => {
+    const groupName = ds.kpiGroupCol ? (col(row, ds.kpiGroupCol) || 'KPI') : 'Global KPI'
+    const slaNum    = extractPercent(col(row, ds.kpiSlaCol))
+    const queueNum  = parseInt(col(row, ds.kpiQueueCol) || '0')
+    const ahtRaw    = col(row, ds.kpiAsaCol)
+    const ahtMins   = Math.round(parseDurationToSeconds(ahtRaw) / 60)
+
+    checkKpi(slaNum,  kpiTh.sla,  groupName, 'SLA',   col(row, ds.kpiSlaCol).replace(/\s+/g,''), `≥${kpiTh.sla.targ}%`)
+    if (!isNaN(queueNum)) checkKpi(queueNum, kpiTh.wait, groupName, 'Queue', String(queueNum), String(kpiTh.wait.targ))
+    if (!isNaN(ahtMins) && ahtMins > 0) checkKpi(ahtMins, kpiTh.aht, groupName, 'ASA', ahtRaw, `<${kpiTh.aht.targ}m`)
+  })
+
+  // Agent status breaches
   accountData.agents.forEach(a => {
-    const st   = a.status ?? ''
-    const thSt = statusTh[st]
+    const status = String(a[ds.agentStatusCol] ?? '')
+    const thSt   = statusTh[status]
     if (!thSt || thSt.crit >= 999) return
-    const key  = `${accId}:${a.agent_name}`
-    const secs = agentTimers[key] ?? parseDurationToSeconds(a.duration)
-    const mins = secs / 60
-    if (mins >= thSt.crit)      rows.push({ entity: a.agent_name, metric: `${st} Duration`, value: formatSeconds(secs), threshold: `${thSt.crit}m`, severity: 'critical' })
-    else if (mins >= thSt.warn) rows.push({ entity: a.agent_name, metric: `${st} Duration`, value: formatSeconds(secs), threshold: `${thSt.warn}m`, severity: 'warning'  })
+    const name  = String(a[ds.agentNameCol] ?? '')
+    const key   = `${accountId}:${name}`
+    const secs  = agentTimers[key] ?? parseDurationToSeconds(String(a[ds.agentDurationCol] ?? ''))
+    const mins  = secs / 60
+    const dur   = formatSeconds(secs)
+    if (mins >= thSt.crit)       rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical' })
+    else if (mins >= thSt.warn)  rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning'  })
   })
 
   return rows
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
+// ── Main Dashboard component ──────────────────────────────────────────────────
 export default function Dashboard() {
   const [isDark, setIsDark]                 = useState(false)
   const [currentPage, setCurrentPage]       = useState<Page>('overview')
   const [accounts, setAccounts]             = useState<string[]>([])
-  const [currentAccount, setCurrentAccount] = useState<string>('')
+  const [currentAccount, setCurrentAccount] = useState('')
   const [data, setData]                     = useState<Record<string, AccountData>>({})
   const [alertAcked, setAlertAcked]         = useState(false)
-  const [syncing, setSyncing]               = useState(false)
   const [agentTimers, setAgentTimers]       = useState<Record<string, number>>({})
   const [settingsOpen, setSettingsOpen]     = useState(false)
   const [mounted, setMounted]               = useState(false)
 
-  // Per-account thresholds
   const [kpiThresholds, setKpiThresholds]       = useState<Record<string, Thresholds>>({})
   const [statusThresholds, setStatusThresholds] = useState<Record<string, StatusThresholds>>({})
+  const [dataSources, setDataSources]           = useState<Record<string, DataSourceConfig>>({})
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // ── Mark client-mounted (for portal) ──────────────────────────────────────
   useEffect(() => { setMounted(true) }, [])
 
-  // ── Theme ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     const saved = localStorage.getItem('wfm_theme')
     if (saved === 'dark') setIsDark(true)
@@ -104,71 +109,126 @@ export default function Dashboard() {
     setIsDark(d => { localStorage.setItem('wfm_theme', !d ? 'dark' : 'light'); return !d })
   }
 
-  // ── Fetch one account ──────────────────────────────────────────────────────
-  const fetchAccount = useCallback(async (accId: string) => {
-    setData(prev => ({ ...prev, [accId]: { ...(prev[accId] ?? { kpi: null, agents: [], status: null, calls: [] }), syncing: true } }))
-    const [kpiRes, agentsRes, statusRes, callsRes] = await Promise.all([
-      supabase.from('wfm_kpi_snapshots').select('*').eq('account_id', accId).single(),
-      supabase.from('wfm_agent_states').select('*').eq('account_id', accId).order('status').order('agent_name'),
-      supabase.from('wfm_user_status_counts').select('*').eq('account_id', accId).single(),
-      supabase.from('wfm_active_calls').select('*').eq('account_id', accId).order('updated_at', { ascending: false }),
-    ])
+  // ── Fetch account using its configured data source ─────────────────────────
+  const fetchAccount = useCallback(async (accId: string, ds?: DataSourceConfig) => {
+    const src = ds ?? loadDataSource(accId)
     setData(prev => ({
       ...prev,
-      [accId]: {
-        kpi:    kpiRes.data    as KpiSnapshot     | null,
-        agents: (agentsRes.data as AgentState[]   ) ?? [],
-        status: statusRes.data as UserStatusCounts | null,
-        calls:  (callsRes.data  as ActiveCall[]   ) ?? [],
-        syncing: false,
-      }
+      [accId]: { ...(prev[accId] ?? { kpi: null, kpiRows: [], agents: [], status: null, calls: [] }), syncing: true }
     }))
-    const agents = (agentsRes.data as AgentState[]) ?? []
-    setAgentTimers(prev => {
-      const next = { ...prev }
-      agents.forEach(a => { next[`${accId}:${a.agent_name}`] = parseDurationToSeconds(a.duration) })
-      return next
-    })
+
+    try {
+      const isMultiRow = !!src.kpiGroupCol
+
+      // KPI fetch
+      const kpiQuery = supabase.from(src.kpiTable as any).select('*').eq(src.kpiAccountCol, accId)
+      const kpiRes   = isMultiRow
+        ? await kpiQuery.order(src.kpiGroupCol)
+        : await kpiQuery.single()
+
+      // Agent fetch
+      const agentRes = await supabase
+        .from(src.agentTable as any).select('*').eq(src.agentAccountCol, accId)
+        .order(src.agentStatusCol).order(src.agentNameCol)
+
+      const kpiRows    = isMultiRow ? ((kpiRes.data as any[]) ?? []) : []
+      const kpiSingle  = !isMultiRow ? (kpiRes.data as Record<string, any> | null) : null
+
+      // Also try to get the updated_at from any row
+      const anyKpiRow  = kpiSingle ?? kpiRows[0] ?? null
+
+      setData(prev => ({
+        ...prev,
+        [accId]: {
+          kpi:     kpiSingle,
+          kpiRows: kpiRows,
+          agents:  (agentRes.data as any[]) ?? [],
+          status:  null,
+          calls:   [],
+          syncing: false
+        }
+      }))
+
+      // Update agent timers
+      const agents = (agentRes.data as any[]) ?? []
+      setAgentTimers(prev => {
+        const next = { ...prev }
+        agents.forEach(a => {
+          const key  = `${accId}:${String(a[src.agentNameCol] ?? '')}`
+          const secs = src.agentDurationSecs
+            ? (parseInt(String(a[src.agentDurationSecs] ?? '0')) || 0)
+            : parseDurationToSeconds(String(a[src.agentDurationCol] ?? ''))
+          next[key] = secs
+        })
+        return next
+      })
+    } catch (err) {
+      console.error(`[${accId}] fetch error:`, err)
+      setData(prev => ({
+        ...prev,
+        [accId]: { ...(prev[accId] ?? { kpi: null, kpiRows: [], agents: [], status: null, calls: [] }), syncing: false }
+      }))
+    }
   }, [])
 
-  // ── Initial load — also loads thresholds from localStorage ─────────────────
+  // ── Discover accounts from all known tables ────────────────────────────────
   useEffect(() => {
     async function init() {
-      setSyncing(true)
-      const { data: rows } = await supabase.from('wfm_kpi_snapshots').select('account_id').order('account_id')
-      const ids: string[] = rows ? [...new Set((rows as { account_id: string }[]).map(r => r.account_id))] : []
+      // Gather account IDs from both Aircall and Talkdesk tables
+      const [aircallRes, talkdeskRes] = await Promise.all([
+        supabase.from('wfm_kpi_snapshots').select('account_id'),
+        supabase.from('talkdesk_lob_kpis').select('account_id'),
+      ])
+      const allIds = new Set<string>()
+      ;(aircallRes.data ?? []).forEach((r: any) => allIds.add(r.account_id))
+      ;(talkdeskRes.data ?? []).forEach((r: any) => allIds.add(r.account_id))
+      const ids = [...allIds].sort()
+
       setAccounts(ids)
 
-      // Load per-account thresholds from localStorage
+      // Load per-account config from localStorage
       const kpiMap: Record<string, Thresholds>        = {}
       const statusMap: Record<string, StatusThresholds> = {}
+      const dsMap: Record<string, DataSourceConfig>   = {}
       ids.forEach(id => {
         kpiMap[id]    = loadKpiThresholds(id)
         statusMap[id] = loadStatusThresholds(id)
+        dsMap[id]     = loadDataSource(id)
       })
       setKpiThresholds(kpiMap)
       setStatusThresholds(statusMap)
+      setDataSources(dsMap)
 
       const savedAcc = localStorage.getItem('wfm_current_account')
       const first = savedAcc && ids.includes(savedAcc) ? savedAcc : (ids[0] ?? '')
       setCurrentAccount(first)
-      await Promise.all(ids.map(fetchAccount))
-      setSyncing(false)
+
+      // Fetch all accounts
+      await Promise.all(ids.map(id => fetchAccount(id, dsMap[id])))
     }
     init()
   }, [fetchAccount])
 
-  // ── Realtime ───────────────────────────────────────────────────────────────
+  // ── Realtime — re-fetch on any change ─────────────────────────────────────
   useEffect(() => {
-    const refetch = (id: string | undefined) => { if (id) fetchAccount(id) }
+    const refetch = (table: string, accId: string | undefined) => {
+      if (accId) {
+        const ds = dataSources[accId]
+        fetchAccount(accId, ds)
+      }
+    }
     const ch = supabase.channel('wfm-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_kpi_snapshots' },      p => refetch((p.new as KpiSnapshot)?.account_id      ?? (p.old as KpiSnapshot)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_agent_states' },       p => refetch((p.new as AgentState)?.account_id       ?? (p.old as AgentState)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_user_status_counts' }, p => refetch((p.new as UserStatusCounts)?.account_id  ?? (p.old as UserStatusCounts)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_active_calls' },       p => refetch((p.new as ActiveCall)?.account_id        ?? (p.old as ActiveCall)?.account_id))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_kpi_snapshots' },
+          p => refetch('wfm_kpi_snapshots', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_agent_states' },
+          p => refetch('wfm_agent_states', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'talkdesk_lob_kpis' },
+          p => refetch('talkdesk_lob_kpis', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'talkdesk_agent_states' },
+          p => refetch('talkdesk_agent_states', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
       .subscribe()
     return () => { supabase.removeChannel(ch) }
-  }, [fetchAccount])
+  }, [fetchAccount, dataSources])
 
   // ── Live agent timers ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -182,43 +242,52 @@ export default function Dashboard() {
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [])
 
-  // ── All breaches — uses per-account thresholds ────────────────────────────
+  // ── All breaches ───────────────────────────────────────────────────────────
   const allBreaches = useMemo(() => {
     const map: Record<string, BreachRow[]> = {}
     accounts.forEach(id => {
-      const kpiTh    = kpiThresholds[id]    ?? DEFAULT_THRESHOLDS
-      const statusTh = statusThresholds[id] ?? DEFAULT_STATUS_THRESHOLDS
-      map[id] = buildBreachesForAccount(id, data[id], agentTimers, kpiTh, statusTh)
+      map[id] = buildBreaches(
+        id, data[id], agentTimers,
+        kpiThresholds[id] ?? DEFAULT_THRESHOLDS,
+        statusThresholds[id] ?? DEFAULT_STATUS_THRESHOLDS,
+        dataSources[id] ?? DEFAULT_DATA_SOURCE
+      )
     })
     return map
-  }, [accounts, data, agentTimers, kpiThresholds, statusThresholds])
+  }, [accounts, data, agentTimers, kpiThresholds, statusThresholds, dataSources])
 
-  // ── Save settings for current account ─────────────────────────────────────
-  const handleSaveSettings = (kpi: Thresholds, status: StatusThresholds) => {
+  // ── Save settings ──────────────────────────────────────────────────────────
+  const handleSaveSettings = (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig) => {
     saveKpiThresholds(currentAccount, kpi)
     saveStatusThresholds(currentAccount, status)
+    saveDataSource(currentAccount, ds)
     setKpiThresholds(prev => ({ ...prev, [currentAccount]: kpi }))
     setStatusThresholds(prev => ({ ...prev, [currentAccount]: status }))
+    setDataSources(prev => ({ ...prev, [currentAccount]: ds }))
+    // Re-fetch with new data source
+    fetchAccount(currentAccount, ds)
   }
-
-  const currentData = data[currentAccount]
-  const breaches    = allBreaches[currentAccount] ?? []
-  const stale       = isDataStale(currentData?.kpi?.updated_at)
 
   const switchAccount = (id: string) => {
     setCurrentAccount(id); localStorage.setItem('wfm_current_account', id); setAlertAcked(false)
   }
   const navigate = (page: Page) => { setCurrentPage(page); setAlertAcked(false) }
 
+  const currentData = data[currentAccount]
+  const currentDs   = dataSources[currentAccount] ?? DEFAULT_DATA_SOURCE
+  const breaches    = allBreaches[currentAccount] ?? []
+  const anyRow      = currentData?.kpiRows[0] ?? currentData?.kpi
+  const stale       = isDataStale(anyRow ? col(anyRow, currentDs.kpiUpdatedAt) : undefined)
+
   return (
     <div id="layout-wrapper" className={isDark ? 'dark' : ''}>
 
-      {/* Settings Modal — rendered via portal at document.body to escape overflow:hidden */}
       {settingsOpen && mounted && currentAccount && (
         <SettingsModal
           accountId={currentAccount}
           kpiThresholds={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
           statusThresholds={statusThresholds[currentAccount] ?? DEFAULT_STATUS_THRESHOLDS}
+          dataSource={dataSources[currentAccount] ?? DEFAULT_DATA_SOURCE}
           onSave={handleSaveSettings}
           onClose={() => setSettingsOpen(false)}
         />
@@ -226,7 +295,7 @@ export default function Dashboard() {
 
       {/* Sidebar */}
       <div className="sidebar">
-        <div className="sidebar-brand"><i className="bx bx-pulse" /> WFM Live V2</div>
+        <div className="sidebar-brand"><i className="bx bx-pulse" /> WFM Live</div>
         <div className="sidebar-section">
           <label>Active Account</label>
           <select value={currentAccount} onChange={e => switchAccount(e.target.value)}>
@@ -252,18 +321,14 @@ export default function Dashboard() {
       <div className="main-content">
         <div className="topbar">
           <div className="topbar-left">
-            <div className={`sync-dot${syncing ? ' syncing' : stale ? ' stale' : ''}`} title={stale ? 'Data stale' : syncing ? 'Syncing…' : 'Live'} />
+            <div className={`sync-dot${stale ? ' stale' : ' live'}`} />
             <div>
               <div className="topbar-title">
                 {currentPage === 'dashboard'
                   ? `${currentAccount ? currentAccount.toUpperCase() : '—'} — Real-Time Dashboard`
                   : 'All Accounts Overview'}
               </div>
-              <div className="topbar-sub">
-                {currentPage === 'dashboard' && currentData?.kpi
-                  ? `Last updated: ${formatTime(currentData.kpi.updated_at)}${stale ? ' ⚠ Data may be stale' : ''}`
-                  : 'Live'}
-              </div>
+              <div className="topbar-sub">{stale ? '⚠ Data may be stale' : 'Live'}</div>
             </div>
           </div>
           <div className="topbar-right">
@@ -273,7 +338,7 @@ export default function Dashboard() {
             <button className="btn-icon" onClick={toggleTheme} title="Toggle theme">
               <i className={`bx ${isDark ? 'bx-sun' : 'bx-moon'}`} />
             </button>
-            <button className="btn-icon" onClick={() => accounts.forEach(fetchAccount)} title="Refresh all">
+            <button className="btn-icon" onClick={() => accounts.forEach(id => fetchAccount(id, dataSources[id]))} title="Refresh">
               <i className="bx bx-refresh" />
             </button>
           </div>
@@ -289,6 +354,7 @@ export default function Dashboard() {
               onAck={() => setAlertAcked(true)}
               agentTimers={agentTimers}
               kpiTh={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
+              ds={currentDs}
             />
           )}
           {currentPage === 'overview' && (
@@ -298,6 +364,7 @@ export default function Dashboard() {
               agentTimers={agentTimers}
               allBreaches={allBreaches}
               kpiThresholds={kpiThresholds}
+              dataSources={dataSources}
             />
           )}
         </div>
@@ -307,26 +374,26 @@ export default function Dashboard() {
 }
 
 // ── Dashboard Page ─────────────────────────────────────────────────────────────
-function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, agentTimers, kpiTh }: {
+function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, agentTimers, kpiTh, ds }: {
   accountId: string; accountData: AccountData | undefined; breaches: BreachRow[]
   alertAcked: boolean; onAck: () => void; agentTimers: Record<string, number>
-  kpiTh: Thresholds
+  kpiTh: Thresholds; ds: DataSourceConfig
 }) {
-  if (!accountData && !accountId) return <div className="no-data">No accounts found. Check that the scraper is running.</div>
-
-  const kpi     = accountData?.kpi
-  const agents  = accountData?.agents ?? []
-  const hasCrit = breaches.some(b => b.severity === 'critical')
+  const agents     = accountData?.agents ?? []
+  const hasCrit    = breaches.some(b => b.severity === 'critical')
+  const isMultiRow = !!ds.kpiGroupCol
+  const kpiRows    = isMultiRow ? (accountData?.kpiRows ?? []) : (accountData?.kpi ? [accountData.kpi] : [])
+  const firstRow   = kpiRows[0] ?? null
 
   return (
     <>
       {breaches.length > 0 && !alertAcked && (
         <div className={`alert-banner ${hasCrit ? 'critical' : 'warning'}`}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: 1 }}>
-            <i className={`bx ${hasCrit ? 'bx-error-circle' : 'bx-error'}`} style={{ fontSize: 20, marginTop: 1 }} />
+            <i className={`bx ${hasCrit ? 'bx-error-circle' : 'bx-error'}`} style={{ fontSize: 20 }} />
             <ul>
               {breaches.slice(0, 5).map((b, i) => (
-                <li key={i}><strong>{b.entity}</strong> — {b.metric}: <strong>{b.value}</strong> (threshold: {b.threshold})</li>
+                <li key={i}><strong>{b.entity}</strong> — {b.metric}: <strong>{b.value}</strong> ({b.threshold})</li>
               ))}
               {breaches.length > 5 && <li>…and {breaches.length - 5} more</li>}
             </ul>
@@ -335,19 +402,29 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
         </div>
       )}
 
-      <div className="kpi-section-title">Global Metrics</div>
-      <div className="kpi-grid">
-        <KpiTile label="SLA"           value={(kpi?.sla ?? 'N/A').replace(/\s+/g,'')} numValue={extractPercent(kpi?.sla)}                                    target={`Target: ≥${kpiTh.sla.targ}%`}   th={kpiTh.sla}  showBar />
-        <KpiTile label="Calls Waiting" value={kpi?.calls_waiting ?? '0'}              numValue={parseInt(kpi?.calls_waiting ?? '0')}                          target="Calls in queue"                    th={kpiTh.wait} />
-        <KpiTile label="ASA"           value={kpi?.time_to_answer ?? 'N/A'}           numValue={Math.round(parseDurationToSeconds(kpi?.time_to_answer) / 60)} target={`Target: <${kpiTh.aht.targ}m`}   th={kpiTh.aht}  />
-        <KpiTile label="Abandon Rate"  value={calcAbandonRate(kpi ?? null)}           numValue={extractPercent(calcAbandonRate(kpi ?? null))}                  target={`Target: <${kpiTh.abn.targ}%`}   th={kpiTh.abn}  />
-        {kpi?.total_calls     && <KpiTile label="Total Calls" value={kpi.total_calls}      numValue={NaN} target="Today"        th={kpiTh.sla} plain />}
-        {kpi?.available_users && <KpiTile label="Available"   value={kpi.available_users}   numValue={NaN} target="Agents ready" th={kpiTh.sla} plain />}
-      </div>
+      {/* KPI tiles — one set per LOB when multi-row, one global set otherwise */}
+      {isMultiRow ? (
+        <>
+          <div className="kpi-section-title">KPIs by {ds.kpiGroupCol}</div>
+          {kpiRows.map(row => (
+            <div key={col(row, ds.kpiGroupCol)} style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase' }}>
+                {col(row, ds.kpiGroupCol)}
+              </div>
+              <KpiGrid row={row} kpiTh={kpiTh} ds={ds} />
+            </div>
+          ))}
+        </>
+      ) : (
+        <>
+          <div className="kpi-section-title">Global Metrics</div>
+          <KpiGrid row={firstRow} kpiTh={kpiTh} ds={ds} />
+        </>
+      )}
 
       <div className="tables-row">
         <div className="table-card">
-          <div className="table-card-header red"><i className="bx bx-error-circle" style={{ marginRight: 6, fontSize: 15 }} />Breach / Anomalies</div>
+          <div className="table-card-header red"><i className="bx bx-error-circle" style={{ marginRight: 6 }} />Breach / Anomalies</div>
           <div className="table-card-body">
             <table className="dash-table">
               <thead><tr><th>Queue / Agent</th><th>Metric</th><th>Value</th><th>Threshold</th></tr></thead>
@@ -369,20 +446,21 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
         </div>
 
         <div className="table-card">
-          <div className="table-card-header green"><i className="bx bx-user-check" style={{ marginRight: 6, fontSize: 15 }} />Agent Status</div>
+          <div className="table-card-header green"><i className="bx bx-user-check" style={{ marginRight: 6 }} />Agent Status</div>
           <div className="table-card-body">
             <table className="dash-table">
               <thead><tr><th>Agent</th><th>Status</th><th>Duration</th></tr></thead>
               <tbody>
                 {agents.length === 0
                   ? <tr><td colSpan={3} className="no-data">No agent data</td></tr>
-                  : agents.map(a => {
-                    const key  = `${accountId}:${a.agent_name}`
-                    const secs = agentTimers[key] ?? parseDurationToSeconds(a.duration)
+                  : agents.map((a, i) => {
+                    const name  = String(a[ds.agentNameCol] ?? '')
+                    const key   = `${accountId}:${name}`
+                    const secs  = agentTimers[key] ?? parseDurationToSeconds(String(a[ds.agentDurationCol] ?? ''))
                     return (
-                      <tr key={a.id}>
-                        <td style={{ fontWeight: 600 }}>{a.agent_name}</td>
-                        <td><span className={getStatusPillClass(a.status)}>{a.status ?? '—'}</span></td>
+                      <tr key={i}>
+                        <td style={{ fontWeight: 600 }}>{name}</td>
+                        <td><span className={getStatusPillClass(String(a[ds.agentStatusCol] ?? ''))}>{String(a[ds.agentStatusCol] ?? '—')}</span></td>
                         <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
                       </tr>
                     )
@@ -397,29 +475,47 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
   )
 }
 
-// ── KPI Tile ───────────────────────────────────────────────────────────────────
+// ── KPI Grid (reused for both single and multi-row) ───────────────────────────
+function KpiGrid({ row, kpiTh, ds }: {
+  row: Record<string, any> | null; kpiTh: Thresholds; ds: DataSourceConfig
+}) {
+  const slaVal  = row ? col(row, ds.kpiSlaCol).replace(/\s+/g,'') : '--'
+  const qVal    = row ? col(row, ds.kpiQueueCol) : '0'
+  const asaVal  = row ? col(row, ds.kpiAsaCol) : '--'
+  const agtVal  = row ? col(row, ds.kpiAgentsCol) : '--'
+
+  return (
+    <div className="kpi-grid">
+      <KpiTile label="SLA"    value={slaVal} numValue={extractPercent(slaVal)}         target={`Target ≥${kpiTh.sla.targ}%`}  th={kpiTh.sla}  showBar />
+      <KpiTile label="Queue"  value={qVal}   numValue={parseInt(qVal)}                 target="Calls in queue"                  th={kpiTh.wait} />
+      <KpiTile label="ASA"    value={asaVal} numValue={Math.round(parseDurationToSeconds(asaVal)/60)} target={`Target <${kpiTh.aht.targ}m`} th={kpiTh.aht}  />
+      <KpiTile label="Agents" value={agtVal} numValue={NaN}                            target="Logged in"                       th={kpiTh.sla}  plain />
+    </div>
+  )
+}
+
 function KpiTile({ label, value, numValue, target, th, showBar, plain }: {
   label: string; value: string; numValue: number; target: string
   th: { warn: number; crit: number; direction: 'asc' | 'desc' }; showBar?: boolean; plain?: boolean
 }) {
   const colorClass = plain ? 'text-main' : getKpiColorClass(numValue, th)
-  const barWidth = showBar && !isNaN(numValue) ? Math.min(100, Math.max(0, numValue)) : 0
+  const barW = showBar && !isNaN(numValue) ? Math.min(100, Math.max(0, numValue)) : 0
   const barColor = colorClass === 'text-success' ? 'var(--success)' : colorClass === 'text-warning' ? 'var(--warning)' : 'var(--danger)'
   return (
     <div className="kpi-tile">
       <div className="kpi-label">{label}</div>
       <div className={`kpi-value ${colorClass}`}>{value}</div>
-      {showBar && <div className="kpi-bar"><div className="kpi-bar-fill" style={{ width: `${barWidth}%`, background: barColor }} /></div>}
+      {showBar && <div className="kpi-bar"><div className="kpi-bar-fill" style={{ width: `${barW}%`, background: barColor }} /></div>}
       <div className="kpi-target">{target}</div>
     </div>
   )
 }
 
 // ── Overview Page ──────────────────────────────────────────────────────────────
-function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds }: {
+function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
-  kpiThresholds: Record<string, Thresholds>
+  kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
 }) {
   return (
     <>
@@ -429,16 +525,18 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds 
           <div className="ov-sub">Real-time summary across all configured accounts</div>
         </div>
       </div>
-      <OverviewMasonry accounts={accounts} data={data} agentTimers={agentTimers} allBreaches={allBreaches} kpiThresholds={kpiThresholds} />
+      <OverviewMasonry
+        accounts={accounts} data={data} agentTimers={agentTimers}
+        allBreaches={allBreaches} kpiThresholds={kpiThresholds} dataSources={dataSources}
+      />
     </>
   )
 }
 
-// ── Overview Masonry ───────────────────────────────────────────────────────────
-function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds }: {
+function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
-  kpiThresholds: Record<string, Thresholds>
+  kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
 }) {
   const [layout, setLayout] = useState<{ top: number; left: number; width: number }[]>([])
   const [gridH, setGridH]   = useState(0)
@@ -458,9 +556,9 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
       cardRefs.current.forEach(card => {
         if (!card) { positions.push({ top: 0, left: 0, width: colW }); return }
         card.style.width = `${colW}px`
-        const minH = Math.min(...colHeights); const col = colHeights.indexOf(minH)
-        positions.push({ top: minH, left: col * (colW + gap), width: colW })
-        colHeights[col] += card.offsetHeight + gap
+        const minH = Math.min(...colHeights); const cIdx = colHeights.indexOf(minH)
+        positions.push({ top: minH, left: cIdx * (colW + gap), width: colW })
+        colHeights[cIdx] += card.offsetHeight + gap
       })
       setLayout(positions)
       setGridH(Math.max(...colHeights, 0) - gap)
@@ -485,6 +583,7 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
             agentTimers={agentTimers}
             breaches={allBreaches[accId] ?? []}
             kpiTh={kpiThresholds[accId] ?? DEFAULT_THRESHOLDS}
+            ds={dataSources[accId] ?? DEFAULT_DATA_SOURCE}
           />
         </div>
       ))}
@@ -493,23 +592,16 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
 }
 
 // ── Overview Card ─────────────────────────────────────────────────────────────
-function OverviewCard({ accId, accountData, agentTimers, breaches, kpiTh }: {
+function OverviewCard({ accId, accountData, agentTimers, breaches, kpiTh, ds }: {
   accId: string; accountData: AccountData | undefined
   agentTimers: Record<string, number>; breaches: BreachRow[]
-  kpiTh: Thresholds
+  kpiTh: Thresholds; ds: DataSourceConfig
 }) {
-  const kpi    = accountData?.kpi
-  const status = accountData?.status
-  const agents = accountData?.agents ?? []
-  const stale  = isDataStale(kpi?.updated_at)
-  const hasCrit = breaches.some(b => b.severity === 'critical')
-
-  const slaNum  = extractPercent(kpi?.sla)
-  const waitNum = parseInt(kpi?.calls_waiting ?? '0')
-  const ahtSecs = parseDurationToSeconds(kpi?.time_to_answer)
-  const ahtMins = Math.round(ahtSecs / 60)
-  const abnStr  = calcAbandonRate(kpi ?? null)
-  const abnNum  = extractPercent(abnStr)
+  const isMultiRow = !!ds.kpiGroupCol
+  const kpiRows    = isMultiRow ? (accountData?.kpiRows ?? []) : (accountData?.kpi ? [accountData.kpi] : [])
+  const anyRow     = kpiRows[0] ?? null
+  const stale      = isDataStale(anyRow ? col(anyRow, ds.kpiUpdatedAt) : undefined)
+  const hasCrit    = breaches.some(b => b.severity === 'critical')
 
   return (
     <>
@@ -520,11 +612,8 @@ function OverviewCard({ accId, accountData, agentTimers, breaches, kpiTh }: {
         </div>
         <div className="overview-card-header-right">
           {breaches.length > 0 && (
-            <i
-              className="bx bxs-alarm ov-siren-icon"
-              style={{ color: hasCrit ? 'var(--danger)' : 'var(--warning)', animation: 'ov-siren-pulse 1s infinite' }}
-              title="Active breach detected"
-            />
+            <i className="bx bxs-alarm ov-siren-icon"
+              style={{ color: hasCrit ? 'var(--danger)' : 'var(--warning)', animation: 'ov-siren-pulse 1s infinite' }} />
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
             <span className="ov-live-dot" />
@@ -543,20 +632,52 @@ function OverviewCard({ accId, accountData, agentTimers, breaches, kpiTh }: {
             </div>
           </div>
         )}
-        <div className="ov-section-label">Global</div>
-        <div className="ov-kpi-tiles">
-          <OvKpiTile label="SLA %"    value={(kpi?.sla ?? '—').replace(/\s+/g,'')} sublabel={`Target ${kpiTh.sla.targ}%`}  colorClass={getKpiColorClass(slaNum,  kpiTh.sla)}  />
-          <OvKpiTile label="Awaiting" value={kpi?.calls_waiting ?? '0'}            sublabel="Calls/Chats"                  colorClass={getKpiColorClass(waitNum, kpiTh.wait)} />
-          <OvKpiTile label="ASA"      value={kpi?.time_to_answer ?? '—'}           sublabel="Handle time"                  colorClass={getKpiColorClass(ahtMins, kpiTh.aht)}  />
-          <OvKpiTile label="ABN %"    value={abnStr}                               sublabel={`Target <${kpiTh.abn.targ}%`} colorClass={getKpiColorClass(abnNum,  kpiTh.abn)}  />
-        </div>
+
+        {/* KPI tiles — single global or per-LOB */}
+        {isMultiRow ? (
+          <div>
+            <div className="ov-section-label">{ds.kpiGroupCol.toUpperCase()}</div>
+            {kpiRows.map(row => {
+              const groupName = col(row, ds.kpiGroupCol)
+              const slaVal    = col(row, ds.kpiSlaCol).replace(/\s+/g,'')
+              const qVal      = col(row, ds.kpiQueueCol)
+              const ahtVal    = col(row, ds.kpiAsaCol)
+              const slaNum    = extractPercent(slaVal)
+              const qNum      = parseInt(qVal) || 0
+              return (
+                <div key={groupName} style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
+                    {groupName}
+                  </div>
+                  <div className="ov-kpi-tiles">
+                    <OvKpiTile label="SLA"   value={slaVal} sublabel={`Target ${kpiTh.sla.targ}%`}  colorClass={getKpiColorClass(slaNum, kpiTh.sla)}  />
+                    <OvKpiTile label="Queue" value={qVal}   sublabel="In queue"                      colorClass={getKpiColorClass(qNum,  kpiTh.wait)} />
+                    <OvKpiTile label="AHT"   value={ahtVal} sublabel="Handle time"                   colorClass="text-main" />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <>
+            <div className="ov-section-label">Global</div>
+            <div className="ov-kpi-tiles">
+              {kpiRows[0] && (
+                <>
+                  <OvKpiTile label="SLA %"   value={col(kpiRows[0], ds.kpiSlaCol).replace(/\s+/g,'')} sublabel={`Target ${kpiTh.sla.targ}%`}  colorClass={getKpiColorClass(extractPercent(col(kpiRows[0], ds.kpiSlaCol)), kpiTh.sla)}  />
+                  <OvKpiTile label="Awaiting" value={col(kpiRows[0], ds.kpiQueueCol)}                  sublabel="Calls/Chats"                  colorClass={getKpiColorClass(parseInt(col(kpiRows[0], ds.kpiQueueCol))||0, kpiTh.wait)} />
+                  <OvKpiTile label="ASA"      value={col(kpiRows[0], ds.kpiAsaCol)}                    sublabel="Handle time"                  colorClass="text-main" />
+                  <OvKpiTile label="Agents"   value={col(kpiRows[0], ds.kpiAgentsCol)}                 sublabel="Available"                    colorClass="text-main" />
+                </>
+              )}
+            </div>
+          </>
+        )}
       </div>
 
+      {/* Breach table */}
       <div className="ov-breach-section">
-        <div className="ov-breach-header">
-          <i className="bx bx-error-circle" />
-          Breach / Anomalies
-        </div>
+        <div className="ov-breach-header"><i className="bx bx-error-circle" /> Breach / Anomalies</div>
         <table className="ov-breach-table">
           <thead><tr><th>Queue/Agent</th><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr></thead>
           <tbody>
@@ -572,7 +693,7 @@ function OverviewCard({ accId, accountData, agentTimers, breaches, kpiTh }: {
                 <td style={{ fontWeight: 500 }}>{b.entity}</td>
                 <td>{b.metric}</td>
                 <td><span className={`ov-breach-value ${b.severity}`}>{b.value}</span></td>
-                <td><span style={{ color: 'var(--text-muted)' }}>{b.threshold}</span></td>
+                <td style={{ color: 'var(--text-muted)' }}>{b.threshold}</td>
                 <td><span className={`ov-status-badge ${b.severity}`}>{b.severity === 'critical' ? 'Critical' : 'Warning'}</span></td>
               </tr>
             ))}
@@ -582,7 +703,7 @@ function OverviewCard({ accId, accountData, agentTimers, breaches, kpiTh }: {
 
       <div className="overview-card-footer">
         <i className="bx bx-time-five" />
-        Updated: {kpi ? formatTime(kpi.updated_at) : 'Waiting for data...'}
+        Updated: {anyRow ? formatTime(col(anyRow, ds.kpiUpdatedAt)) : 'Waiting for data...'}
         {stale && <span style={{ color: 'var(--danger)', marginLeft: 6, fontWeight: 600 }}>⚠ Stale</span>}
       </div>
     </>
@@ -595,7 +716,7 @@ function OvKpiTile({ label, value, sublabel, colorClass }: {
   return (
     <div className="ov-kpi-tile">
       <div className="ov-kpi-tile-label">{label}</div>
-      <div className={`ov-kpi-tile-value ${colorClass}`}>{value}</div>
+      <div className={`ov-kpi-tile-value ${colorClass}`}>{value || '--'}</div>
       <div className="ov-kpi-tile-sublabel">{sublabel}</div>
     </div>
   )
