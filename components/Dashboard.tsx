@@ -226,7 +226,7 @@ export default function Dashboard() {
 
       {/* Sidebar */}
       <div className="sidebar">
-        <div className="sidebar-brand"><i className="bx bx-pulse" /> WFM Live v2</div>
+        <div className="sidebar-brand"><i className="bx bx-pulse" /> WFM Live V2</div>
         <div className="sidebar-section">
           <label>Active Account</label>
           <select value={currentAccount} onChange={e => switchAccount(e.target.value)}>
