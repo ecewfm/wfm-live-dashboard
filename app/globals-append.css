@@ -1,0 +1,47 @@
+
+/* ── Overview card breach section ─────────────────────────────────────────── */
+.ov-breach-section {
+  border-top: 1px solid var(--border);
+}
+
+.ov-breach-header {
+  padding: 7px 14px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(100,100,100,0.05);
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+.ov-breach-header.warn { background: rgba(217,158,53,0.08); color: var(--warning); }
+.ov-breach-header.crit { background: rgba(201,92,92,0.08);  color: var(--danger);  }
+
+.ov-no-breach {
+  padding: 10px 14px;
+  font-size: 12px; color: var(--success);
+  display: flex; align-items: center; gap: 6px;
+}
+
+.ov-breach-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+}
+.ov-breach-table thead th {
+  padding: 6px 12px; text-align: left;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+  color: var(--text-muted); border-bottom: 1px solid var(--border);
+  background: var(--bg-card); position: sticky; top: 0;
+}
+.ov-breach-table tbody td {
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.ov-breach-table tbody tr:last-child td { border-bottom: none; }
+.ov-breach-table tbody tr:hover { background: rgba(0,0,0,0.02); }
+.dark .ov-breach-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+
+/* breach count badge in card header */
+.ov-breach-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px;
+}
+.ov-breach-badge.warn { background: rgba(217,158,53,0.2); color: var(--warning); }
+.ov-breach-badge.crit { background: rgba(201,92,92,0.2);  color: var(--danger);  }
