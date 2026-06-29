@@ -225,7 +225,10 @@ interface Props {
   onClose: () => void
 }
 
-// ── Stable column select — React.memo prevents re-render closing the dropdown ──
+// ── ColSelect — React.memo prevents re-render closing the dropdown ────────────
+// CRITICAL: defined at MODULE level, never inside another component.
+// Having components inside render functions causes unmount/remount on every
+// parent render, which closes any open native <select> dropdown.
 // eslint-disable-next-line react/display-name
 const ColSelect = React.memo(({ field, value, cols, onSet }: {
   field: keyof DataSourceConfig, value: string, cols: string[]
@@ -238,20 +241,39 @@ const ColSelect = React.memo(({ field, value, cols, onSet }: {
   >
     <option value="">-- none --</option>
     {cols.map(c => <option key={c} value={c}>{c}</option>)}
-    {value && !cols.includes(value) && (
-      <option value={value}>{value}</option>
-    )}
+    {value && !cols.includes(value) && <option value={value}>{value}</option>}
   </select>
 ), (prev, next) => prev.value === next.value && prev.cols === next.cols && prev.onSet === next.onSet)
 
+// ── TableSelect — also at module level for same reason ────────────────────────
+// eslint-disable-next-line react/display-name
+const TableSelect = React.memo(({ field, value, tables, onSet }: {
+  field: keyof DataSourceConfig, value: string, tables: string[]
+  onSet: (k: keyof DataSourceConfig, v: string) => void
+}) => (
+  <select
+    className="ds-select"
+    value={value}
+    onChange={e => onSet(field, e.target.value)}
+  >
+    <option value="">-- select table --</option>
+    {tables.map(t => <option key={t} value={t}>{t}</option>)}
+    {value && !tables.includes(value) && <option value={value}>{value}</option>}
+  </select>
+), (prev, next) => prev.value === next.value && prev.tables === next.tables && prev.onSet === next.onSet)
+
 // ── Data Sources Tab ──────────────────────────────────────────────────────────
 function DataSourcesTab({
-  accountId, ds, onChange
+  accountId, ds: initialDs, onChange
 }: {
   accountId: string
-  ds: DataSourceConfig
+  ds: DataSourceConfig          // only used for initialization
   onChange: (ds: DataSourceConfig) => void
 }) {
+  // ── LOCAL state — not tied to parent re-renders ───────────────────────────
+  // This prevents parent state updates from cascading into ColSelect/TableSelect
+  // and closing any open native dropdown.
+  const [localDs,   setLocalDs]   = useState<DataSourceConfig>(() => ({ ...initialDs }))
   const [tables,    setTables]    = useState<string[]>([])
   const [kpiCols,   setKpiCols]   = useState<string[]>([])
   const [agentCols, setAgentCols] = useState<string[]>([])
@@ -259,45 +281,43 @@ function DataSourcesTab({
   const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
   const supaKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
-  // Load tables on mount — no loading state (avoids re-render that closes dropdown)
   useEffect(() => {
     fetchPublicTables(supaUrl, supaKey).then(t => setTables(t))
   }, [])
 
-  // Load KPI columns when kpiTable changes — only update if content changed
+  // Watch localDs table fields to reload columns
   useEffect(() => {
-    if (!ds.kpiTable) return
-    fetchTableColumns(supaUrl, supaKey, ds.kpiTable).then(c => {
+    if (!localDs.kpiTable) return
+    fetchTableColumns(supaUrl, supaKey, localDs.kpiTable).then(c => {
       setKpiCols(prev => JSON.stringify(prev) === JSON.stringify(c) ? prev : c)
     })
-  }, [ds.kpiTable])
+  }, [localDs.kpiTable])
 
-  // Load agent columns when agentTable changes
   useEffect(() => {
-    if (!ds.agentTable) return
-    fetchTableColumns(supaUrl, supaKey, ds.agentTable).then(c => {
+    if (!localDs.agentTable) return
+    fetchTableColumns(supaUrl, supaKey, localDs.agentTable).then(c => {
       setAgentCols(prev => JSON.stringify(prev) === JSON.stringify(c) ? prev : c)
     })
-  }, [ds.agentTable])
+  }, [localDs.agentTable])
 
-  // Stable setter — useCallback so ColSelect's React.memo comparison stays stable
+  // ── STABLE setter — functional setState so no dependency on localDs ───────
+  // This is the key: useCallback with [onChange] only.
+  // onChange = setDs from parent = stable React state setter.
+  // Functional setState reads latest state without needing it as a dep.
   const set = useCallback((key: keyof DataSourceConfig, val: string) => {
-    onChange({ ...ds, [key]: val })
-  }, [ds, onChange])
+    setLocalDs(prev => {
+      const next = { ...prev, [key]: val }
+      onChange(next)  // sync to parent
+      return next
+    })
+  }, [onChange])
 
-  const TableSelect = ({ field, value }: {
-    field: keyof DataSourceConfig, value: string
-  }) => (
-    <select
-      className="ds-select"
-      value={value}
-      onChange={e => set(field, e.target.value)}
-    >
-      <option value="">-- select table --</option>
-      {tables.map(t => <option key={t} value={t}>{t}</option>)}
-      {value && !tables.includes(value) && <option value={value}>{value}</option>}
-    </select>
-  )
+  // Preset loader — also stable
+  const loadPreset = useCallback((preset: DataSourceConfig) => {
+    const copy = { ...preset }
+    setLocalDs(copy)
+    onChange(copy)
+  }, [onChange])
 
   return (
     <div>
@@ -308,16 +328,10 @@ function DataSourcesTab({
 
       {/* Presets */}
       <div className="ds-preset-row">
-        <button
-          className="ds-preset-btn aircall"
-          onClick={() => onChange({ ...PRESET_AIRCALL })}
-        >
+        <button className="ds-preset-btn aircall"  onClick={() => loadPreset(PRESET_AIRCALL)}>
           <i className="bx bx-phone" /> Aircall Preset
         </button>
-        <button
-          className="ds-preset-btn talkdesk"
-          onClick={() => onChange({ ...PRESET_TALKDESK })}
-        >
+        <button className="ds-preset-btn talkdesk" onClick={() => loadPreset(PRESET_TALKDESK)}>
           <i className="bx bx-headphone" /> Talkdesk Preset
         </button>
       </div>
@@ -326,11 +340,11 @@ function DataSourcesTab({
       <div className="sm-section-title">KPI DATA SOURCE</div>
       <div className="ds-row">
         <span className="ds-label">Table</span>
-        <TableSelect field="kpiTable" value={ds.kpiTable} />
+        <TableSelect field="kpiTable" value={localDs.kpiTable} tables={tables} onSet={set} />
       </div>
       <div className="ds-row">
         <span className="ds-label">Account ID col</span>
-        <ColSelect field="kpiAccountCol" value={ds.kpiAccountCol} cols={kpiCols} onSet={set} />
+        <ColSelect field="kpiAccountCol" value={localDs.kpiAccountCol} cols={kpiCols} onSet={set} />
       </div>
       <div className="ds-row">
         <span className="ds-label">
@@ -339,23 +353,23 @@ function DataSourcesTab({
             Set for multi-LOB tables (shows per-group tiles)
           </div>
         </span>
-        <ColSelect field="kpiGroupCol" value={ds.kpiGroupCol} cols={kpiCols} onSet={set} />
+        <ColSelect field="kpiGroupCol" value={localDs.kpiGroupCol} cols={kpiCols} onSet={set} />
       </div>
 
       <div style={{ marginTop: 10, marginBottom: 6, fontSize: 11, color: '#687d75', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
         Column Mapping
       </div>
-      {[
-        { field: 'kpiSlaCol'    as keyof DataSourceConfig, label: 'SLA %'         },
-        { field: 'kpiQueueCol'  as keyof DataSourceConfig, label: 'Queue / Waiting'},
-        { field: 'kpiAsaCol'    as keyof DataSourceConfig, label: 'ASA / AHT'     },
-        { field: 'kpiAbnCol'    as keyof DataSourceConfig, label: 'Abandon Rate'  },
-        { field: 'kpiAgentsCol' as keyof DataSourceConfig, label: 'Agents Count'  },
-        { field: 'kpiUpdatedAt' as keyof DataSourceConfig, label: 'Updated At'    },
-      ].map(row => (
-        <div key={row.field} className="ds-row">
-          <span className="ds-label">{row.label}</span>
-          <ColSelect field={row.field} value={ds[row.field]} cols={kpiCols} onSet={set} />
+      {([
+        ['kpiSlaCol',    'SLA %'         ],
+        ['kpiQueueCol',  'Queue / Waiting'],
+        ['kpiAsaCol',    'ASA / AHT'     ],
+        ['kpiAbnCol',    'Abandon Rate'  ],
+        ['kpiAgentsCol', 'Agents Count'  ],
+        ['kpiUpdatedAt', 'Updated At'    ],
+      ] as [keyof DataSourceConfig, string][]).map(([field, label]) => (
+        <div key={field} className="ds-row">
+          <span className="ds-label">{label}</span>
+          <ColSelect field={field} value={localDs[field]} cols={kpiCols} onSet={set} />
         </div>
       ))}
 
@@ -363,33 +377,33 @@ function DataSourcesTab({
       <div className="sm-section-title" style={{ marginTop: 24 }}>AGENT DATA SOURCE</div>
       <div className="ds-row">
         <span className="ds-label">Table</span>
-        <TableSelect field="agentTable" value={ds.agentTable} />
+        <TableSelect field="agentTable" value={localDs.agentTable} tables={tables} onSet={set} />
       </div>
       <div className="ds-row">
         <span className="ds-label">Account ID col</span>
-        <ColSelect field="agentAccountCol" value={ds.agentAccountCol} cols={agentCols} onSet={set} />
+        <ColSelect field="agentAccountCol" value={localDs.agentAccountCol} cols={agentCols} onSet={set} />
       </div>
 
       <div style={{ marginTop: 10, marginBottom: 6, fontSize: 11, color: '#687d75', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
         Column Mapping
       </div>
-      {[
-        { field: 'agentNameCol'      as keyof DataSourceConfig, label: 'Agent Name'       },
-        { field: 'agentStatusCol'    as keyof DataSourceConfig, label: 'Status'           },
-        { field: 'agentDurationCol'  as keyof DataSourceConfig, label: 'Duration (string)'},
-        { field: 'agentDurationSecs' as keyof DataSourceConfig, label: 'Duration (secs)'  },
-      ].map(row => (
-        <div key={row.field} className="ds-row">
-          <span className="ds-label">{row.label}</span>
-          <ColSelect field={row.field} value={ds[row.field]} cols={agentCols} onSet={set} />
+      {([
+        ['agentNameCol',      'Agent Name'       ],
+        ['agentStatusCol',    'Status'           ],
+        ['agentDurationCol',  'Duration (string)'],
+        ['agentDurationSecs', 'Duration (secs)'  ],
+      ] as [keyof DataSourceConfig, string][]).map(([field, label]) => (
+        <div key={field} className="ds-row">
+          <span className="ds-label">{label}</span>
+          <ColSelect field={field} value={localDs[field]} cols={agentCols} onSet={set} />
         </div>
       ))}
 
       <div className="sm-note" style={{ marginTop: 16 }}>
         <i className="bx bx-info-circle" />
         <span>
-          When <strong>Group by</strong> is set, the overview shows one KPI tile row per group value
-          (e.g. one row each for Ashcomm, OOM, Warranty). Leave it empty for a single global KPI row.
+          When <strong>Group by</strong> is set, the overview shows one KPI tile row per group value.
+          Leave it empty for a single global KPI row.
         </span>
       </div>
     </div>
