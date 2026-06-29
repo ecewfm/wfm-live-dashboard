@@ -96,6 +96,7 @@ export default function Dashboard() {
   const [kpiThresholds, setKpiThresholds]       = useState<Record<string, Thresholds>>({})
   const [statusThresholds, setStatusThresholds] = useState<Record<string, StatusThresholds>>({})
   const [dataSources, setDataSources]           = useState<Record<string, DataSourceConfig>>({})
+  const [displayNames, setDisplayNames]         = useState<Record<string, string>>({})
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -127,10 +128,16 @@ export default function Dashboard() {
         ? await kpiQuery.order(src.kpiGroupCol)
         : await kpiQuery.single()
 
-      // Agent fetch
-      const agentRes = await supabase
+      // Agent fetch — try with order first, fall back to no-order if columns don't exist
+      let agentRes = await supabase
         .from(src.agentTable as any).select('*').eq(src.agentAccountCol, accId)
-        .order(src.agentStatusCol).order(src.agentNameCol)
+        .order(src.agentStatusCol || 'id').order(src.agentNameCol || 'id')
+      if (agentRes.error) {
+        // Column names in order() might be wrong — retry without ordering
+        console.warn(`[${accId}] agent order() failed (${agentRes.error.message}) — retrying without order`)
+        agentRes = await supabase
+          .from(src.agentTable as any).select('*').eq(src.agentAccountCol, accId)
+      }
 
       const kpiRows    = isMultiRow ? ((kpiRes.data as any[]) ?? []) : []
       const kpiSingle  = !isMultiRow ? (kpiRes.data as Record<string, any> | null) : null
@@ -178,6 +185,10 @@ export default function Dashboard() {
       // Load accounts from wfm_accounts table (user-managed)
       const accountConfigs = await loadAccounts()
       const ids = accountConfigs.map(a => a.id)
+      // Store display names for use in UI
+      const nameMap: Record<string, string> = {}
+      accountConfigs.forEach(a => { nameMap[a.id] = a.display_name || a.id })
+      setDisplayNames(nameMap)
 
       // Seed wfm_accounts if it's empty (first run — auto-populate from existing data)
       if (accountConfigs.length === 0) {
@@ -240,9 +251,11 @@ export default function Dashboard() {
           p => refetch('talkdesk_agent_states', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
       // Reload settings when another user saves them
       .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_accounts' }, async () => {
-        // Account list changed — reload
         const configs = await loadAccounts()
         setAccounts(configs.map(a => a.id))
+        const nameMap: Record<string, string> = {}
+        configs.forEach(a => { nameMap[a.id] = a.display_name || a.id })
+        setDisplayNames(nameMap)
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_settings' }, async p => {
         const accId = (p.new as any)?.account_id ?? (p.old as any)?.account_id
@@ -341,7 +354,7 @@ export default function Dashboard() {
           <label>Active Account</label>
           <select value={currentAccount} onChange={e => switchAccount(e.target.value)}>
             {accounts.length === 0 && <option>Loading...</option>}
-            {accounts.map(id => <option key={id} value={id}>{id}</option>)}
+            {accounts.map(id => <option key={id} value={id}>{displayNames[id] || id}</option>)}
           </select>
         </div>
         <div className="sidebar-menu">
@@ -406,6 +419,7 @@ export default function Dashboard() {
               allBreaches={allBreaches}
               kpiThresholds={kpiThresholds}
               dataSources={dataSources}
+              displayNames={displayNames}
             />
           )}
         </div>
@@ -553,10 +567,11 @@ function KpiTile({ label, value, numValue, target, th, showBar, plain }: {
 }
 
 // ── Overview Page ──────────────────────────────────────────────────────────────
-function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources }: {
+function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
+  displayNames: Record<string, string>
 }) {
   return (
     <>
@@ -569,15 +584,17 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
       <OverviewMasonry
         accounts={accounts} data={data} agentTimers={agentTimers}
         allBreaches={allBreaches} kpiThresholds={kpiThresholds} dataSources={dataSources}
+        displayNames={displayNames}
       />
     </>
   )
 }
 
-function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources }: {
+function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
+  displayNames: Record<string, string>
 }) {
   const [layout, setLayout] = useState<{ top: number; left: number; width: number }[]>([])
   const [gridH, setGridH]   = useState(0)
@@ -620,6 +637,7 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
         >
           <OverviewCard
             accId={accId}
+            displayName={displayNames[accId] || accId}
             accountData={data[accId]}
             agentTimers={agentTimers}
             breaches={allBreaches[accId] ?? []}
@@ -633,8 +651,8 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
 }
 
 // ── Overview Card ─────────────────────────────────────────────────────────────
-function OverviewCard({ accId, accountData, agentTimers, breaches, kpiTh, ds }: {
-  accId: string; accountData: AccountData | undefined
+function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds }: {
+  accId: string; displayName: string; accountData: AccountData | undefined
   agentTimers: Record<string, number>; breaches: BreachRow[]
   kpiTh: Thresholds; ds: DataSourceConfig
 }) {
@@ -649,7 +667,12 @@ function OverviewCard({ accId, accountData, agentTimers, breaches, kpiTh, ds }: 
       <div className="overview-card-header">
         <div className="overview-card-title">
           <i className="bx bx-buildings" />
-          <span>{accId}</span>
+          <span>{displayName}</span>
+          {displayName !== accId && (
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 4 }}>
+              ({accId})
+            </span>
+          )}
         </div>
         <div className="overview-card-header-right">
           {breaches.length > 0 && (
