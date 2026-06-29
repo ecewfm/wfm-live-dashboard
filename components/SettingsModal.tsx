@@ -404,107 +404,233 @@ function AccountsTab({
   )
 }
 
-// ── ColSelect — React.memo prevents re-render closing the dropdown ────────────
-// CRITICAL: defined at MODULE level, never inside another component.
-// Having components inside render functions causes unmount/remount on every
-// parent render, which closes any open native <select> dropdown.
-// eslint-disable-next-line react/display-name
-const ColSelect = React.memo(({ field, value, cols, onSet }: {
-  field: keyof DataSourceConfig, value: string, cols: string[]
-  onSet: (k: keyof DataSourceConfig, v: string) => void
-}) => (
-  <select
-    className="ds-select"
-    value={value}
-    onChange={e => onSet(field, e.target.value)}
-  >
-    <option value="">-- none --</option>
-    {cols.map(c => <option key={c} value={c}>{c}</option>)}
-    {value && !cols.includes(value) && <option value={value}>{value}</option>}
-  </select>
-), (prev, next) => prev.value === next.value && prev.cols === next.cols && prev.onSet === next.onSet)
+// ── Slot-based DataSourcesTab — mimics PAPAYA GAS DataSourcePicker UX ────────
+// Click a slot card → it pulses. Click a column header in the live preview → mapped.
 
-// ── TableSelect — also at module level for same reason ────────────────────────
+const SLOT_COLORS: Record<string, string> = {
+  kpiSlaCol:       '#d97a35',
+  kpiQueueCol:     '#4b8b9c',
+  kpiAsaCol:       '#846b9a',
+  kpiAbnCol:       '#c95c5c',
+  kpiAgentsCol:    '#3b7a5c',
+  kpiGroupCol:     '#5a7abf',
+  kpiUpdatedAt:    '#888',
+  agentNameCol:    '#3b6c5a',
+  agentStatusCol:  '#4b7a9a',
+  agentDurationCol:'#7a6a9a',
+  agentDurationSecs:'#888',
+}
+
+const KPI_SLOTS = [
+  { key: 'kpiGroupCol',   label: 'Group By',       hint: 'lob_name / skill_name (leave empty for single global row)' },
+  { key: 'kpiSlaCol',     label: 'SLA %',          hint: 'e.g. sla, service_level' },
+  { key: 'kpiQueueCol',   label: 'Queue',          hint: 'e.g. calls_waiting, contacts_in_queue' },
+  { key: 'kpiAsaCol',     label: 'ASA / AHT',      hint: 'e.g. time_to_answer, aht' },
+  { key: 'kpiAgentsCol',  label: 'Agents',         hint: 'e.g. available_users, agents_logged_in' },
+  { key: 'kpiUpdatedAt',  label: 'Updated At',     hint: 'e.g. updated_at' },
+]
+const AGENT_SLOTS = [
+  { key: 'agentNameCol',      label: 'Agent Name',      hint: 'e.g. agent_name, name' },
+  { key: 'agentStatusCol',    label: 'Status',          hint: 'e.g. status, state' },
+  { key: 'agentDurationCol',  label: 'Duration',        hint: 'e.g. duration, time_in_status' },
+  { key: 'agentDurationSecs', label: 'Duration (secs)', hint: 'e.g. duration_secs (or leave empty)' },
+]
+
+// ── Module-level sub-components — MUST be outside DataSourcesTab ─────────────
+// If defined inside, React remounts them on every render → scroll resets.
+
+const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle }: {
+  slotKey: string; label: string; hint: string
+  isActive: boolean; value: string; onToggle: (k: string) => void
+}) => {
+  const color = SLOT_COLORS[slotKey] || '#888'
+  return (
+    <div onClick={() => onToggle(slotKey)}
+      style={{ border: `2px solid ${isActive ? color : 'var(--border,#e1e6e4)'}`,
+        borderRadius: 8, overflow: 'hidden', cursor: 'pointer',
+        animation: isActive ? 'slot-pulse 1s ease-in-out infinite' : 'none',
+        transition: 'border-color 0.15s', background: 'var(--bg-body,#f0f2f1)', minWidth: 0 }}
+      title={hint}>
+      <div style={{ background: color, padding: '5px 10px', color: '#fff',
+        fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span>{label}</span>
+        {value && <i className="bx bx-check" style={{ fontSize: 12 }} />}
+      </div>
+      <div style={{ padding: '6px 10px', fontSize: 12, fontWeight: 600,
+        color: value ? color : 'var(--text-muted,#687d75)',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        background: value ? `${color}12` : 'transparent' }}>
+        {value || (isActive ? '← click a column' : 'Not mapped')}
+      </div>
+    </div>
+  )
+}, (p, n) => p.isActive === n.isActive && p.value === n.value && p.onToggle === n.onToggle)
+
+const DsPreviewTable = React.memo(({ rows, mappedCols, hasActiveSlot, onMap }: {
+  rows: Record<string, any>[]; mappedCols: Record<string, string>
+  hasActiveSlot: boolean; onMap: (col: string) => void
+}) => {
+  if (!rows.length) return (
+    <div style={{ padding:'16px 24px', fontSize:12, color:'var(--text-muted)', textAlign:'center' }}>
+      No preview data — table may be empty
+    </div>
+  )
+  const cols = Object.keys(rows[0])
+  return (
+    <div style={{ overflowX:'auto', overflowY:'auto', maxHeight:200, fontSize:11 }}>
+      <table style={{ borderCollapse:'collapse', width:'100%', minWidth:'max-content' }}>
+        <thead>
+          <tr>
+            {cols.map(col => {
+              const color = mappedCols[col]
+              return (
+                <th key={col} onClick={() => hasActiveSlot && onMap(col)}
+                  style={{ padding:'6px 10px', textAlign:'left', whiteSpace:'nowrap',
+                    position:'sticky', top:0, zIndex:2,
+                    background: color ? `${color}22` : 'var(--bg-body,#f0f2f1)',
+                    color: color || (hasActiveSlot ? '#d97a35' : 'var(--text-muted)'),
+                    fontWeight:700, fontSize:10, textTransform:'uppercase', letterSpacing:'0.5px',
+                    cursor: hasActiveSlot ? 'pointer' : 'default',
+                    borderBottom:`2px solid ${color||(hasActiveSlot?'#d97a35':'var(--border)')}`,
+                    transition:'all 0.15s' }}>
+                  {color && <span style={{ display:'inline-block', width:6, height:6,
+                    borderRadius:'50%', background:color, marginRight:4 }} />}
+                  {col}
+                  {hasActiveSlot && !color && <span style={{ marginLeft:4, color:'#d97a35' }}>←</span>}
+                </th>
+              )
+            })}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr key={ri} style={{ background: ri%2===0 ? 'transparent' : 'rgba(0,0,0,0.02)' }}>
+              {cols.map(col => (
+                <td key={col} onClick={() => hasActiveSlot && onMap(col)}
+                  style={{ padding:'5px 10px', borderBottom:'1px solid var(--border,#e1e6e4)',
+                    cursor: hasActiveSlot ? 'pointer' : 'default', color:'var(--text-main)',
+                    maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+                    background: mappedCols[col] ? `${mappedCols[col]}08` : 'transparent' }}>
+                  {String(row[col] ?? '')}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}, (p, n) => p.rows === n.rows && p.mappedCols === n.mappedCols && p.hasActiveSlot === n.hasActiveSlot && p.onMap === n.onMap)
+
 // eslint-disable-next-line react/display-name
-const TableSelect = React.memo(({ field, value, tables, onSet }: {
-  field: keyof DataSourceConfig, value: string, tables: string[]
-  onSet: (k: keyof DataSourceConfig, v: string) => void
+const DsTableSelector = React.memo(({ field, value, tables, onChange }: {
+  field: string; value: string; tables: string[]
+  onChange: (field: string, val: string) => void
 }) => (
-  <select
-    className="ds-select"
-    value={value}
-    onChange={e => onSet(field, e.target.value)}
-  >
+  <select className="ds-select" value={value}
+    onChange={e => onChange(field, e.target.value)} style={{ minWidth: 200 }}>
     <option value="">-- select table --</option>
     {tables.map(t => <option key={t} value={t}>{t}</option>)}
     {value && !tables.includes(value) && <option value={value}>{value}</option>}
   </select>
-), (prev, next) => prev.value === next.value && prev.tables === next.tables && prev.onSet === next.onSet)
+), (p, n) => p.value === n.value && p.tables === n.tables && p.onChange === n.onChange)
 
-// ── Data Sources Tab ──────────────────────────────────────────────────────────
-function DataSourcesTab({
-  accountId, ds: initialDs, onChange
-}: {
+function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   accountId: string
-  ds: DataSourceConfig          // only used for initialization
+  ds: DataSourceConfig
   onChange: (ds: DataSourceConfig) => void
 }) {
-  // ── LOCAL state — not tied to parent re-renders ───────────────────────────
-  // This prevents parent state updates from cascading into ColSelect/TableSelect
-  // and closing any open native dropdown.
-  const [localDs,   setLocalDs]   = useState<DataSourceConfig>(() => ({ ...initialDs }))
-  const [tables,    setTables]    = useState<string[]>([])
-  const [kpiCols,   setKpiCols]   = useState<string[]>([])
-  const [agentCols, setAgentCols] = useState<string[]>([])
+  const [localDs,     setLocalDs]     = useState<DataSourceConfig>(() => ({ ...initialDs }))
+  const [tables,      setTables]      = useState<string[]>([])
+  const [kpiPreview,  setKpiPreview]  = useState<Record<string, any>[]>([])
+  const [agtPreview,  setAgtPreview]  = useState<Record<string, any>[]>([])
+  const [activeSlot,  setActiveSlot]  = useState<string | null>(null)
+  const [loadingKpi,  setLoadingKpi]  = useState(false)
+  const [loadingAgt,  setLoadingAgt]  = useState(false)
 
   const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
   const supaKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
+  // Load table list
   useEffect(() => {
     fetchPublicTables(supaUrl, supaKey).then(t => setTables(t))
   }, [])
 
-  // Watch localDs table fields to reload columns
-  useEffect(() => {
-    if (!localDs.kpiTable) return
-    fetchTableColumns(supaUrl, supaKey, localDs.kpiTable).then(c => {
-      setKpiCols(prev => JSON.stringify(prev) === JSON.stringify(c) ? prev : c)
-    })
-  }, [localDs.kpiTable])
-
-  useEffect(() => {
-    if (!localDs.agentTable) return
-    fetchTableColumns(supaUrl, supaKey, localDs.agentTable).then(c => {
-      setAgentCols(prev => JSON.stringify(prev) === JSON.stringify(c) ? prev : c)
-    })
-  }, [localDs.agentTable])
-
-  // ── Sync to parent post-render via useEffect (avoids setState-during-render) ─
-  // Calling onChange() inside a setState updater violates React's render rules.
-  // Instead: update local state only in set(), then useEffect syncs to parent.
+  // Sync to parent post-render
   const onChangeRef = useRef(onChange)
   useEffect(() => { onChangeRef.current = onChange }, [onChange])
   useEffect(() => { onChangeRef.current(localDs) }, [localDs])
 
-  // Stable setter — only updates local state, no parent call here
-  const set = useCallback((key: keyof DataSourceConfig, val: string) => {
+  // Fetch KPI preview when table changes
+  useEffect(() => {
+    if (!localDs.kpiTable) { setKpiPreview([]); return }
+    setLoadingKpi(true)
+    fetch(`${supaUrl}/rest/v1/${localDs.kpiTable}?limit=8`, {
+      headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` }
+    }).then(r => r.ok ? r.json() : [])
+      .then(d => setKpiPreview(Array.isArray(d) ? d : []))
+      .catch(() => setKpiPreview([]))
+      .finally(() => setLoadingKpi(false))
+  }, [localDs.kpiTable])
+
+  // Fetch Agent preview when table changes
+  useEffect(() => {
+    if (!localDs.agentTable) { setAgtPreview([]); return }
+    setLoadingAgt(true)
+    fetch(`${supaUrl}/rest/v1/${localDs.agentTable}?limit=8`, {
+      headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` }
+    }).then(r => r.ok ? r.json() : [])
+      .then(d => setAgtPreview(Array.isArray(d) ? d : []))
+      .catch(() => setAgtPreview([]))
+      .finally(() => setLoadingAgt(false))
+  }, [localDs.agentTable])
+
+  const set = useCallback((key: string, val: string) => {
     setLocalDs(prev => ({ ...prev, [key]: val }))
+    setActiveSlot(null)
   }, [])
 
-  // Preset loader
   const loadPreset = useCallback((preset: DataSourceConfig) => {
-    setLocalDs({ ...preset })  // triggers useEffect above to sync to parent
+    setLocalDs({ ...preset })
+    setActiveSlot(null)
   }, [])
+
+  // Click a column header → map to active slot
+  const mapColumn = useCallback((colName: string) => {
+    if (!activeSlot) return
+    setLocalDs(prev => ({ ...prev, [activeSlot]: colName }))
+    setActiveSlot(null)
+  }, [activeSlot])
+
+  const toggleSlot = useCallback((key: string) => {
+    setActiveSlot(prev => prev === key ? null : key)
+  }, [])
+
+  // SlotCard, PreviewTable, TableSelector are at module level — see above DataSourcesTab
 
   return (
     <div>
-      <p className="sm-desc">
-        Configure which Supabase tables and columns this account reads from.
-        Use <strong>Presets</strong> to auto-fill for standard platforms, then customize if needed.
-      </p>
+      <style>{`
+        @keyframes slot-pulse {
+          0%,100% { box-shadow: 0 0 0 0 rgba(217,122,53,0.4); }
+          50%      { box-shadow: 0 0 0 5px rgba(217,122,53,0); }
+        }
+        .ds-section { margin-bottom: 20px; }
+        .ds-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase;
+          letter-spacing: 0.8px; color: var(--text-muted); padding-bottom: 8px;
+          border-bottom: 1px solid var(--border, #e1e6e4); margin-bottom: 12px; }
+        .ds-slot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-bottom: 10px; }
+        .ds-active-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+          background: rgba(217,122,53,0.1); border: 1px solid rgba(217,122,53,0.3);
+          border-radius: 6px; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #d97a35; }
+        .ds-table-header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+        .ds-preview { border: 1px solid var(--border, #e1e6e4); border-radius: 8px; overflow: hidden; margin-top: 8px; }
+        .dark .ds-preview { border-color: #2e2e2e; }
+      `}</style>
 
       {/* Presets */}
-      <div className="ds-preset-row">
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
         <button className="ds-preset-btn aircall"  onClick={() => loadPreset(PRESET_AIRCALL)}>
           <i className="bx bx-phone" /> Aircall Preset
         </button>
@@ -513,79 +639,122 @@ function DataSourcesTab({
         </button>
       </div>
 
-      {/* KPI Data Source */}
-      <div className="sm-section-title">KPI DATA SOURCE</div>
-      <div className="ds-row">
-        <span className="ds-label">Table</span>
-        <TableSelect field="kpiTable" value={localDs.kpiTable} tables={tables} onSet={set} />
-      </div>
-      <div className="ds-row">
-        <span className="ds-label">Account ID col</span>
-        <ColSelect field="kpiAccountCol" value={localDs.kpiAccountCol} cols={kpiCols} onSet={set} />
-      </div>
-      <div className="ds-row">
-        <span className="ds-label">
-          Group by
-          <div style={{ fontSize: 10, color: '#687d75', marginTop: 2 }}>
-            Set for multi-LOB tables (shows per-group tiles)
+      {/* KPI Section */}
+      <div className="ds-section">
+        <div className="ds-section-title">KPI DATA SOURCE</div>
+        <div className="ds-table-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 500 }}>Table</span>
+            <DsTableSelector field="kpiTable" value={localDs.kpiTable} tables={tables}
+              onChange={(f, v) => { setLocalDs(prev => ({ ...prev, [f]: v })); setActiveSlot(null) }} />
           </div>
-        </span>
-        <ColSelect field="kpiGroupCol" value={localDs.kpiGroupCol} cols={kpiCols} onSet={set} />
-      </div>
-
-      <div style={{ marginTop: 10, marginBottom: 6, fontSize: 11, color: '#687d75', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-        Column Mapping
-      </div>
-      {([
-        ['kpiSlaCol',    'SLA %'         ],
-        ['kpiQueueCol',  'Queue / Waiting'],
-        ['kpiAsaCol',    'ASA / AHT'     ],
-        ['kpiAbnCol',    'Abandon Rate'  ],
-        ['kpiAgentsCol', 'Agents Count'  ],
-        ['kpiUpdatedAt', 'Updated At'    ],
-      ] as [keyof DataSourceConfig, string][]).map(([field, label]) => (
-        <div key={field} className="ds-row">
-          <span className="ds-label">{label}</span>
-          <ColSelect field={field} value={localDs[field]} cols={kpiCols} onSet={set} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 500 }}>Account ID col</span>
+            <select className="ds-select" value={localDs.kpiAccountCol}
+              onChange={e => setLocalDs(prev => ({ ...prev, kpiAccountCol: e.target.value }))}>
+              <option value="">-- none --</option>
+              {kpiPreview.length > 0 && Object.keys(kpiPreview[0]).map(c => <option key={c} value={c}>{c}</option>)}
+              {localDs.kpiAccountCol && !kpiPreview.find(r => Object.keys(r).includes(localDs.kpiAccountCol)) && (
+                <option value={localDs.kpiAccountCol}>{localDs.kpiAccountCol}</option>
+              )}
+            </select>
+          </div>
         </div>
-      ))}
 
-      {/* Agent Data Source */}
-      <div className="sm-section-title" style={{ marginTop: 24 }}>AGENT DATA SOURCE</div>
-      <div className="ds-row">
-        <span className="ds-label">Table</span>
-        <TableSelect field="agentTable" value={localDs.agentTable} tables={tables} onSet={set} />
-      </div>
-      <div className="ds-row">
-        <span className="ds-label">Account ID col</span>
-        <ColSelect field="agentAccountCol" value={localDs.agentAccountCol} cols={agentCols} onSet={set} />
-      </div>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+          <strong>Click a slot below</strong> to activate it (it will pulse), then <strong>click a column header</strong> in the preview table to map it.
+        </p>
 
-      <div style={{ marginTop: 10, marginBottom: 6, fontSize: 11, color: '#687d75', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-        Column Mapping
-      </div>
-      {([
-        ['agentNameCol',      'Agent Name'       ],
-        ['agentStatusCol',    'Status'           ],
-        ['agentDurationCol',  'Duration (string)'],
-        ['agentDurationSecs', 'Duration (secs)'  ],
-      ] as [keyof DataSourceConfig, string][]).map(([field, label]) => (
-        <div key={field} className="ds-row">
-          <span className="ds-label">{label}</span>
-          <ColSelect field={field} value={localDs[field]} cols={agentCols} onSet={set} />
+        {/* Slot cards */}
+        <div className="ds-slot-grid">
+          {KPI_SLOTS.map(s => <DsSlotCard key={s.key} slotKey={s.key} label={s.label} hint={s.hint}
+            isActive={activeSlot === s.key} value={(localDs as any)[s.key] || ''} onToggle={toggleSlot} />)}
         </div>
-      ))}
 
-      <div className="sm-note" style={{ marginTop: 16 }}>
-        <i className="bx bx-info-circle" />
-        <span>
-          When <strong>Group by</strong> is set, the overview shows one KPI tile row per group value.
-          Leave it empty for a single global KPI row.
-        </span>
+        {/* Active slot instruction */}
+        {activeSlot && KPI_SLOTS.find(s => s.key === activeSlot) && (
+          <div className="ds-active-bar">
+            <i className="bx bx-crosshair" style={{ animation: 'slot-pulse 1s infinite', fontSize: 16 }} />
+            <strong>{KPI_SLOTS.find(s => s.key === activeSlot)?.label}</strong> is active — click a column header below to map it
+          </div>
+        )}
+
+        {/* Preview table */}
+        {localDs.kpiTable && (
+          <div className="ds-preview">
+            {loadingKpi ? (
+              <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
+                Loading preview...
+              </div>
+            ) : (
+              <DsPreviewTable rows={kpiPreview} hasActiveSlot={!!activeSlot}
+                onMap={mapColumn}
+                mappedCols={KPI_SLOTS.reduce((acc, s) => {
+                  const v = (localDs as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key]||'#888'; return acc
+                }, {} as Record<string, string>)} />
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Agent Section */}
+      <div className="ds-section">
+        <div className="ds-section-title">AGENT DATA SOURCE</div>
+        <div className="ds-table-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 500 }}>Table</span>
+            <DsTableSelector field="agentTable" value={localDs.agentTable} tables={tables}
+              onChange={(f, v) => { setLocalDs(prev => ({ ...prev, [f]: v })); setActiveSlot(null) }} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 500 }}>Account ID col</span>
+            <select className="ds-select" value={localDs.agentAccountCol}
+              onChange={e => setLocalDs(prev => ({ ...prev, agentAccountCol: e.target.value }))}>
+              <option value="">-- none --</option>
+              {agtPreview.length > 0 && Object.keys(agtPreview[0]).map(c => <option key={c} value={c}>{c}</option>)}
+              {localDs.agentAccountCol && !agtPreview.find(r => Object.keys(r).includes(localDs.agentAccountCol)) && (
+                <option value={localDs.agentAccountCol}>{localDs.agentAccountCol}</option>
+              )}
+            </select>
+          </div>
+        </div>
+
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+          <strong>Click a slot below</strong>, then click a column in the preview to map it.
+        </p>
+
+        <div className="ds-slot-grid">
+          {AGENT_SLOTS.map(s => <DsSlotCard key={s.key} slotKey={s.key} label={s.label} hint={s.hint}
+            isActive={activeSlot === s.key} value={(localDs as any)[s.key] || ''} onToggle={toggleSlot} />)}
+        </div>
+
+        {activeSlot && AGENT_SLOTS.find(s => s.key === activeSlot) && (
+          <div className="ds-active-bar">
+            <i className="bx bx-crosshair" style={{ animation: 'slot-pulse 1s infinite', fontSize: 16 }} />
+            <strong>{AGENT_SLOTS.find(s => s.key === activeSlot)?.label}</strong> is active — click a column header below to map it
+          </div>
+        )}
+
+        {localDs.agentTable && (
+          <div className="ds-preview">
+            {loadingAgt ? (
+              <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
+                Loading preview...
+              </div>
+            ) : (
+              <DsPreviewTable rows={agtPreview} hasActiveSlot={!!activeSlot}
+                onMap={mapColumn}
+                mappedCols={AGENT_SLOTS.reduce((acc, s) => {
+                  const v = (localDs as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key]||'#888'; return acc
+                }, {} as Record<string, string>)} />
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
 }
+
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
 function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, onSave, onAccountsChange, onConfigureAccount, onClose }: Props) {

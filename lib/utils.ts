@@ -218,7 +218,7 @@ export function extractPercent(str: string | null | undefined): number {
 
 export function isDataStale(updatedAt: string | null | undefined): boolean {
   if (!updatedAt) return false
-  return Date.now() - new Date(updatedAt).getTime() > 3 * 60 * 1000
+  return Date.now() - new Date(updatedAt).getTime() > 5 * 60 * 1000
 }
 
 export function formatTime(iso: string | null | undefined): string {
