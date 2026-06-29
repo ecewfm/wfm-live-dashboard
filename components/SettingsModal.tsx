@@ -63,7 +63,7 @@ const MODAL_STYLES = `
     from { opacity: 0; transform: scale(0.95) translateY(10px); }
     to   { opacity: 1; transform: scale(1) translateY(0); }
   }
-  .dark .sm-modal { background: #1a1a1a; border-color: #2e2e2e; }
+  .dark .sm-modal { background: #252525; border-color: #333333; }
   .sm-header {
     display: flex; align-items: center; justify-content: space-between;
     padding: 18px 24px;
@@ -259,6 +259,7 @@ const MODAL_STYLES = `
 `
 
 interface Props {
+  isDark?:          boolean
   accountId:        string
   accounts:         AccountConfig[]
   kpiThresholds:    Thresholds
@@ -944,5 +945,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
 // ── Portal wrapper ────────────────────────────────────────────────────────────
 export default function SettingsModal(props: Props) {
   if (typeof document === 'undefined') return null
-  return createPortal(<SettingsContent {...props} />, document.body)
+  // Portal renders outside #layout-wrapper — wrap with dark class so all
+  // .dark .sm-* selectors inside MODAL_STYLES resolve correctly
+  return createPortal(
+    <div className={props.isDark ? 'dark' : ''}>
+      <SettingsContent {...props} />
+    </div>,
+    document.body
+  )
 }

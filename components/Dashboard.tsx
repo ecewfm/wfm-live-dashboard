@@ -42,10 +42,8 @@ function buildBreaches(
     entity: string, metric: string, value: string, thLabel: string
   ) => {
     if (isNaN(num)) return
-    // Low = Bad: strictly below threshold = breach (boundary value = better zone)
-    // High = Bad: at-or-above threshold = breach (boundary value = worse zone)
-    const isCrit = th.direction === 'desc' ? num < th.crit : num >= th.crit
-    const isWarn = th.direction === 'desc' ? num < th.warn : num >= th.warn
+    const isCrit = th.direction === 'desc' ? num <= th.crit : num >= th.crit
+    const isWarn = th.direction === 'desc' ? num <= th.warn : num >= th.warn
     if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical' })
     else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning'  })
   }
@@ -108,6 +106,9 @@ export default function Dashboard() {
     const saved = localStorage.getItem('wfm_theme')
     if (saved === 'dark') setIsDark(true)
   }, [])
+
+  // Sync dark class to <html> so portals (SettingsModal) inherit dark-mode styles
+  useEffect(() => { document.documentElement.classList.toggle('dark', isDark) }, [isDark])
 
   const toggleTheme = () => {
     setIsDark(d => { localStorage.setItem('wfm_theme', !d ? 'dark' : 'light'); return !d })
@@ -335,6 +336,7 @@ export default function Dashboard() {
 
       {settingsOpen && mounted && (
         <SettingsModal
+          isDark={isDark}
           accountId={currentAccount || accounts[0] || ''}
           accounts={accounts.map(id => ({ id, display_name: id, active: true, sort_order: 0 }))}
           kpiThresholds={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
