@@ -42,8 +42,10 @@ function buildBreaches(
     entity: string, metric: string, value: string, thLabel: string
   ) => {
     if (isNaN(num)) return
-    const isCrit = th.direction === 'desc' ? num <= th.crit : num >= th.crit
-    const isWarn = th.direction === 'desc' ? num <= th.warn : num >= th.warn
+    // Low = Bad: strictly below threshold = breach (boundary value = better zone)
+    // High = Bad: at-or-above threshold = breach (boundary value = worse zone)
+    const isCrit = th.direction === 'desc' ? num < th.crit : num >= th.crit
+    const isWarn = th.direction === 'desc' ? num < th.warn : num >= th.warn
     if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical' })
     else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning'  })
   }

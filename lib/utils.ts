@@ -245,10 +245,14 @@ export function getKpiColorClass(
 ): string {
   if (isNaN(value)) return 'text-muted'
   if (th.direction === 'desc') {
-    if (value <= th.crit) return 'text-danger'
-    if (value <= th.warn) return 'text-warning'
+    // Low = Bad: boundary values fall in the BETTER zone
+    // e.g. crit=70, warn=80 → <70=red, 70–79=yellow, ≥80=green
+    if (value < th.crit) return 'text-danger'
+    if (value < th.warn) return 'text-warning'
     return 'text-success'
   } else {
+    // High = Bad: boundary values fall in the WORSE zone
+    // e.g. warn=30, crit=60 → <30=green, 30–59=yellow, ≥60=red
     if (value >= th.crit) return 'text-danger'
     if (value >= th.warn) return 'text-warning'
     return 'text-success'

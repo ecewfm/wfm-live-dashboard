@@ -1,4 +1,5 @@
 // ── Supabase table types ──────────────────────────────────────────────────────
+// this is found at lib/types.ts because it is used by both the dashboard and the API routes.
 
 export interface KpiSnapshot {
   id?: string
