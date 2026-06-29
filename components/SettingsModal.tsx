@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import type { Thresholds, DataSourceConfig } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
@@ -9,8 +9,9 @@ import {
   PRESET_AIRCALL, PRESET_TALKDESK,
   fetchPublicTables, fetchTableColumns
 } from '@/lib/utils'
+import { addAccount, removeAccount, type AccountConfig } from '@/lib/settings'
 
-type Tab = 'kpi' | 'status' | 'datasource'
+type Tab = 'kpi' | 'status' | 'datasource' | 'accounts'
 
 const KPI_ROWS: { key: keyof Thresholds; label: string; sublabel: string; unit: string }[] = [
   { key: 'sla',  label: 'SLA %',         sublabel: 'Service Level Agreement',       unit: '%' },
@@ -187,6 +188,47 @@ const MODAL_STYLES = `
   .ds-preset-btn.talkdesk { background: rgba(75,139,156,0.1); color: #4b8b9c; border-color: rgba(75,139,156,0.3); }
   .ds-preset-btn.talkdesk:hover { background: rgba(75,139,156,0.2); }
   .ds-loading { font-size: 12px; color: var(--text-muted, #687d75); padding: 4px 0; }
+  /* Accounts tab */
+  .acc-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+  .acc-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 8px;
+    background: var(--bg-body, #f0f2f1); border: 1px solid var(--border, #e1e6e4);
+    transition: border-color 0.15s;
+  }
+  .acc-row:hover { border-color: #d97a35; }
+  .dark .acc-row { background: #111; border-color: #2e2e2e; }
+  .acc-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; flex-shrink: 0; }
+  .acc-name { flex: 1; font-size: 13px; font-weight: 600; color: var(--text-main, #2c3b36); }
+  .dark .acc-name { color: #e0e0e0; }
+  .acc-type { font-size: 11px; color: var(--text-muted, #687d75); background: rgba(0,0,0,0.05); padding: 2px 8px; border-radius: 10px; }
+  .dark .acc-type { background: rgba(255,255,255,0.07); }
+  .acc-btn {
+    padding: 5px 10px; border-radius: 6px; font-size: 11px; font-weight: 600;
+    cursor: pointer; border: 1px solid; font-family: inherit; transition: all 0.15s;
+  }
+  .acc-btn-cfg  { background: rgba(217,122,53,0.1); color: #d97a35; border-color: rgba(217,122,53,0.3); }
+  .acc-btn-cfg:hover  { background: rgba(217,122,53,0.2); }
+  .acc-btn-del  { background: rgba(239,68,68,0.1);  color: #ef4444; border-color: rgba(239,68,68,0.3); }
+  .acc-btn-del:hover  { background: rgba(239,68,68,0.2); }
+  .acc-add-form { display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px dashed var(--border, #e1e6e4); border-radius: 8px; }
+  .dark .acc-add-form { border-color: #2e2e2e; }
+  .acc-add-row  { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .acc-add-input {
+    padding: 8px 10px; border-radius: 6px; font-size: 13px;
+    background: var(--bg-body, #f0f2f1); border: 1px solid var(--border, #e1e6e4);
+    color: var(--text-main, #2c3b36); font-family: inherit; outline: none;
+    transition: border-color 0.15s;
+  }
+  .acc-add-input:focus { border-color: #d97a35; }
+  .dark .acc-add-input { background: #111; border-color: #2e2e2e; color: #e0e0e0; }
+  .acc-add-btn {
+    padding: 8px; border-radius: 6px; font-size: 13px; font-weight: 700;
+    background: #d97a35; border: none; color: #fff; cursor: pointer; font-family: inherit; transition: opacity 0.15s;
+  }
+  .acc-add-btn:hover { opacity: 0.88; }
+  .acc-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .acc-empty { text-align: center; padding: 24px; color: var(--text-muted, #687d75); font-size: 13px; }
   /* Footer */
   .sm-footer {
     display: flex; align-items: center; justify-content: space-between;
@@ -217,12 +259,149 @@ const MODAL_STYLES = `
 `
 
 interface Props {
-  accountId: string
-  kpiThresholds: Thresholds
+  accountId:        string
+  accounts:         AccountConfig[]
+  kpiThresholds:    Thresholds
   statusThresholds: StatusThresholds
-  dataSource: DataSourceConfig
-  onSave: (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig) => void
-  onClose: () => void
+  dataSource:       DataSourceConfig
+  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig) => void
+  onAccountsChange: () => void           // called after add/remove
+  onConfigureAccount: (id: string) => void  // switch active account + go to Data Sources
+  onClose:          () => void
+}
+
+
+// ── Accounts Tab ──────────────────────────────────────────────────────────────
+function AccountsTab({
+  accounts, onConfigure, onRefresh
+}: {
+  accounts: AccountConfig[]
+  onConfigure: (id: string) => void
+  onRefresh: () => void
+}) {
+  const [showForm, setShowForm] = useState(false)
+  const [newId,    setNewId]    = useState('')
+  const [newName,  setNewName]  = useState('')
+  const [saving,   setSaving]   = useState(false)
+  const [error,    setError]    = useState('')
+  const [removing, setRemoving] = useState<string | null>(null)
+
+  const handleAdd = async () => {
+    const trimId = newId.trim()
+    if (!trimId) { setError('Account ID is required'); return }
+    setSaving(true)
+    setError('')
+    try {
+      await addAccount(trimId, newName.trim() || undefined)
+      setNewId(''); setNewName(''); setShowForm(false)
+      onRefresh()
+    } catch (e: any) {
+      setError(e.message || 'Failed to add account')
+    }
+    setSaving(false)
+  }
+
+  const handleRemove = async (id: string) => {
+    if (!confirm(`Remove "${id}" from the dashboard? (Supabase data is kept)`)) return
+    setRemoving(id)
+    try {
+      await removeAccount(id)
+      onRefresh()
+    } catch (e: any) {
+      alert(`Failed to remove: ${e.message}`)
+    }
+    setRemoving(null)
+  }
+
+  return (
+    <div>
+      <p className="sm-desc">
+        Manage which accounts appear in the dashboard. Each account reads from its own
+        configured <strong>Data Sources</strong>. Adding an account here does not start scraping —
+        configure the scraper separately.
+      </p>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div className="sm-section-title" style={{ margin: 0 }}>ACTIVE ACCOUNTS ({accounts.length})</div>
+        <button
+          className="acc-btn acc-btn-cfg"
+          style={{ fontSize: 12 }}
+          onClick={() => setShowForm(v => !v)}
+        >
+          {showForm ? '✕ Cancel' : '+ Add Account'}
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="acc-add-form" style={{ marginBottom: 14 }}>
+          <div className="acc-add-row">
+            <div>
+              <div style={{ fontSize: 10, color: '#687d75', marginBottom: 4, fontWeight: 600 }}>ACCOUNT ID *</div>
+              <input
+                className="acc-add-input"
+                style={{ width: '100%' }}
+                placeholder="e.g. perfectserve"
+                value={newId}
+                onChange={e => setNewId(e.target.value.toLowerCase().replace(/\s+/g, '-'))}
+                onKeyDown={e => e.key === 'Enter' && handleAdd()}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: '#687d75', marginBottom: 4, fontWeight: 600 }}>DISPLAY NAME</div>
+              <input
+                className="acc-add-input"
+                style={{ width: '100%' }}
+                placeholder="e.g. PerfectServe F9"
+                value={newName}
+                onChange={e => setNewName(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleAdd()}
+              />
+            </div>
+          </div>
+          <button className="acc-add-btn" disabled={!newId.trim() || saving} onClick={handleAdd}>
+            {saving ? 'Saving...' : '✅ Add Account'}
+          </button>
+          {error && (
+            <div style={{ fontSize: 12, color: '#ef4444', padding: '6px 8px', background: 'rgba(239,68,68,0.08)', borderRadius: 6, border: '1px solid rgba(239,68,68,0.25)' }}>
+              ❌ {error}
+            </div>
+          )}
+          <div className="sm-note" style={{ marginTop: 0 }}>
+            <i className="bx bx-info-circle" />
+            <span>After adding, click <strong>Configure</strong> to set up the Data Sources for this account.</span>
+          </div>
+        </div>
+      )}
+
+      {accounts.length === 0 ? (
+        <div className="acc-empty">
+          No accounts yet — click <strong>+ Add Account</strong> to get started.
+        </div>
+      ) : (
+        <div className="acc-list">
+          {accounts.map(acc => (
+            <div key={acc.id} className="acc-row">
+              <div className="acc-dot" />
+              <div className="acc-name">{acc.display_name || acc.id}</div>
+              {acc.display_name && acc.display_name !== acc.id && (
+                <div style={{ fontSize: 10, color: '#687d75' }}>{acc.id}</div>
+              )}
+              <button className="acc-btn acc-btn-cfg" onClick={() => onConfigure(acc.id)}>
+                <i className="bx bx-cog" style={{ marginRight: 4 }} />Configure
+              </button>
+              <button
+                className="acc-btn acc-btn-del"
+                disabled={removing === acc.id}
+                onClick={() => handleRemove(acc.id)}
+              >
+                {removing === acc.id ? '…' : '✕'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ── ColSelect — React.memo prevents re-render closing the dropdown ────────────
@@ -300,24 +479,22 @@ function DataSourcesTab({
     })
   }, [localDs.agentTable])
 
-  // ── STABLE setter — functional setState so no dependency on localDs ───────
-  // This is the key: useCallback with [onChange] only.
-  // onChange = setDs from parent = stable React state setter.
-  // Functional setState reads latest state without needing it as a dep.
-  const set = useCallback((key: keyof DataSourceConfig, val: string) => {
-    setLocalDs(prev => {
-      const next = { ...prev, [key]: val }
-      onChange(next)  // sync to parent
-      return next
-    })
-  }, [onChange])
+  // ── Sync to parent post-render via useEffect (avoids setState-during-render) ─
+  // Calling onChange() inside a setState updater violates React's render rules.
+  // Instead: update local state only in set(), then useEffect syncs to parent.
+  const onChangeRef = useRef(onChange)
+  useEffect(() => { onChangeRef.current = onChange }, [onChange])
+  useEffect(() => { onChangeRef.current(localDs) }, [localDs])
 
-  // Preset loader — also stable
+  // Stable setter — only updates local state, no parent call here
+  const set = useCallback((key: keyof DataSourceConfig, val: string) => {
+    setLocalDs(prev => ({ ...prev, [key]: val }))
+  }, [])
+
+  // Preset loader
   const loadPreset = useCallback((preset: DataSourceConfig) => {
-    const copy = { ...preset }
-    setLocalDs(copy)
-    onChange(copy)
-  }, [onChange])
+    setLocalDs({ ...preset })  // triggers useEffect above to sync to parent
+  }, [])
 
   return (
     <div>
@@ -411,8 +588,8 @@ function DataSourcesTab({
 }
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, kpiThresholds, statusThresholds, dataSource, onSave, onClose }: Props) {
-  const [tab, setTab]   = useState<Tab>('datasource')
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, onSave, onAccountsChange, onConfigureAccount, onClose }: Props) {
+  const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
   const [ds, setDs]     = useState<DataSourceConfig>(JSON.parse(JSON.stringify(dataSource)))
@@ -459,6 +636,9 @@ function SettingsContent({ accountId, kpiThresholds, statusThresholds, dataSourc
 
           {/* Tabs */}
           <div className="sm-tabs">
+            <button className={`sm-tab${tab === 'accounts' ? ' active' : ''}`} onClick={() => setTab('accounts')}>
+              <i className="bx bx-buildings" /> Accounts
+            </button>
             <button className={`sm-tab${tab === 'datasource' ? ' active' : ''}`} onClick={() => setTab('datasource')}>
               <i className="bx bx-data" /> Data Sources
             </button>
@@ -472,6 +652,14 @@ function SettingsContent({ accountId, kpiThresholds, statusThresholds, dataSourc
 
           {/* Body */}
           <div className="sm-body">
+
+            {tab === 'accounts' && (
+              <AccountsTab
+                accounts={accounts}
+                onConfigure={id => { onConfigureAccount(id); setTab('datasource') }}
+                onRefresh={onAccountsChange}
+              />
+            )}
 
             {tab === 'datasource' && (
               <DataSourcesTab accountId={accountId} ds={ds} onChange={setDs} />
@@ -565,7 +753,7 @@ function SettingsContent({ accountId, kpiThresholds, statusThresholds, dataSourc
 
           {/* Footer */}
           <div className="sm-footer">
-            {tab !== 'datasource' ? (
+            {(tab === 'kpi' || tab === 'status') ? (
               <button className="sm-btn-reset" onClick={handleReset}>
                 <i className="bx bx-reset" /> Reset to Defaults
               </button>

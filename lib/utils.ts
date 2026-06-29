@@ -111,48 +111,69 @@ export function saveDataSource(accountId: string, ds: DataSourceConfig): void {
   try { localStorage.setItem(`wfm_ds_${accountId}`, JSON.stringify(ds)) } catch {}
 }
 
-// ── Supabase schema helpers (called client-side only) ─────────────────────────
+// ── Supabase schema helpers ───────────────────────────────────────────────────
+// Uses two SQL RPC functions (get_public_tables, get_table_columns) that must
+// exist in your Supabase project. See README for the CREATE FUNCTION SQL.
+// Falls back to the OpenAPI spec if the functions don't exist yet.
+
+const RPC = (url: string, key: string, fn: string, args = {}) =>
+  fetch(`${url}/rest/v1/rpc/${fn}`, {
+    method:  'POST',
+    headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body:    JSON.stringify(args),
+  })
+
 export async function fetchPublicTables(supabaseUrl: string, supabaseKey: string): Promise<string[]> {
+  // 1. Try the SQL RPC function (most reliable — auto-discovers all tables)
   try {
-    const res = await fetch(
-      `${supabaseUrl}/rest/v1/information_schema.tables?select=table_name&table_schema=eq.public&table_type=eq.BASE+TABLE&order=table_name`,
-      { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } }
-    )
+    const res = await RPC(supabaseUrl, supabaseKey, 'get_public_tables')
     if (res.ok) {
       const data = await res.json()
-      return data.map((r: any) => r.table_name)
+      if (Array.isArray(data) && data.length > 0) return data as string[]
     }
   } catch {}
-  // Fallback: known tables
-  return [
-    'wfm_kpi_snapshots', 'wfm_agent_states', 'wfm_user_status_counts', 'wfm_active_calls',
-    'talkdesk_lob_kpis', 'talkdesk_agent_states', 'talkdesk_status_counts'
-  ]
+
+  // 2. Fallback: OpenAPI spec
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/`, {
+      headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`,
+                 Accept: 'application/openapi+json' }
+    })
+    if (res.ok) {
+      const spec = await res.json()
+      const tables = Object.keys(spec.paths ?? {})
+        .filter(p => p.startsWith('/') && !p.includes('{') && !p.startsWith('/rpc'))
+        .map(p => p.slice(1)).filter(Boolean).sort()
+      if (tables.length > 0) return tables
+    }
+  } catch {}
+
+  return []
 }
 
 export async function fetchTableColumns(supabaseUrl: string, supabaseKey: string, tableName: string): Promise<string[]> {
   if (!tableName) return []
+
+  // 1. Try the SQL RPC function
   try {
-    const res = await fetch(
-      `${supabaseUrl}/rest/v1/information_schema.columns?select=column_name&table_schema=eq.public&table_name=eq.${encodeURIComponent(tableName)}&order=ordinal_position`,
-      { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } }
-    )
+    const res = await RPC(supabaseUrl, supabaseKey, 'get_table_columns', { p_table: tableName })
     if (res.ok) {
       const data = await res.json()
-      if (data.length > 0) return data.map((r: any) => r.column_name)
+      if (Array.isArray(data) && data.length > 0) return data as string[]
     }
   } catch {}
-  // Fallback: sample row
+
+  // 2. Fallback: sample row
   try {
-    const res = await fetch(
-      `${supabaseUrl}/rest/v1/${tableName}?limit=1`,
-      { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } }
-    )
+    const res = await fetch(`${supabaseUrl}/rest/v1/${tableName}?limit=1`, {
+      headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` }
+    })
     if (res.ok) {
       const data = await res.json()
-      if (data.length > 0) return Object.keys(data[0])
+      if (Array.isArray(data) && data.length > 0) return Object.keys(data[0])
     }
   } catch {}
+
   return []
 }
 
@@ -232,4 +253,23 @@ export function getKpiColorClass(
     if (value >= th.warn) return 'text-warning'
     return 'text-success'
   }
+}
+
+// ── Five9 data source preset ──────────────────────────────────────────────────
+export const PRESET_FIVE9: DataSourceConfig = {
+  kpiTable:      'five9_kpis',
+  kpiAccountCol: 'account_id',
+  kpiGroupCol:   'skill',
+  kpiSlaCol:     'value',
+  kpiQueueCol:   'value',
+  kpiAsaCol:     'value',
+  kpiAbnCol:     '',
+  kpiAgentsCol:  '',
+  kpiUpdatedAt:  'updated_at',
+  agentTable:       'five9_agent_states',
+  agentAccountCol:  'account_id',
+  agentNameCol:     'name',
+  agentStatusCol:   'state',
+  agentDurationCol: 'duration',
+  agentDurationSecs:''
 }

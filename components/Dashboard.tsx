@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
 import type { AccountData, Thresholds, DataSourceConfig } from '@/lib/types'
-import { loadSettings, saveSettings, loadAllSettings } from '@/lib/settings'
+import { loadSettings, saveSettings, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount, type AccountConfig } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds,
@@ -175,15 +175,25 @@ export default function Dashboard() {
   // ── Discover accounts from all known tables ────────────────────────────────
   useEffect(() => {
     async function init() {
-      // Gather account IDs from both Aircall and Talkdesk tables
-      const [aircallRes, talkdeskRes] = await Promise.all([
-        supabase.from('wfm_kpi_snapshots').select('account_id'),
-        supabase.from('talkdesk_lob_kpis').select('account_id'),
-      ])
-      const allIds = new Set<string>()
-      ;(aircallRes.data ?? []).forEach((r: any) => allIds.add(r.account_id))
-      ;(talkdeskRes.data ?? []).forEach((r: any) => allIds.add(r.account_id))
-      const ids = [...allIds].sort()
+      // Load accounts from wfm_accounts table (user-managed)
+      const accountConfigs = await loadAccounts()
+      const ids = accountConfigs.map(a => a.id)
+
+      // Seed wfm_accounts if it's empty (first run — auto-populate from existing data)
+      if (accountConfigs.length === 0) {
+        const [r1, r2] = await Promise.all([
+          supabase.from('wfm_kpi_snapshots').select('account_id'),
+          supabase.from('talkdesk_lob_kpis').select('account_id'),
+        ])
+        const discovered = new Set<string>()
+        ;(r1.data ?? []).forEach((r: any) => discovered.add(r.account_id))
+        ;(r2.data ?? []).forEach((r: any) => discovered.add(r.account_id))
+        if (discovered.size > 0) {
+          await seedAccountsIfEmpty([...discovered])
+          const seeded = await loadAccounts()
+          ids.push(...seeded.map(a => a.id))
+        }
+      }
 
       setAccounts(ids)
 
@@ -229,6 +239,11 @@ export default function Dashboard() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'talkdesk_agent_states' },
           p => refetch('talkdesk_agent_states', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
       // Reload settings when another user saves them
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_accounts' }, async () => {
+        // Account list changed — reload
+        const configs = await loadAccounts()
+        setAccounts(configs.map(a => a.id))
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_settings' }, async p => {
         const accId = (p.new as any)?.account_id ?? (p.old as any)?.account_id
         if (!accId) return
@@ -293,13 +308,28 @@ export default function Dashboard() {
   return (
     <div id="layout-wrapper" className={isDark ? 'dark' : ''}>
 
-      {settingsOpen && mounted && currentAccount && (
+      {settingsOpen && mounted && (
         <SettingsModal
-          accountId={currentAccount}
+          accountId={currentAccount || accounts[0] || ''}
+          accounts={accounts.map(id => ({ id, display_name: id, active: true, sort_order: 0 }))}
           kpiThresholds={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
           statusThresholds={statusThresholds[currentAccount] ?? DEFAULT_STATUS_THRESHOLDS}
           dataSource={dataSources[currentAccount] ?? DEFAULT_DATA_SOURCE}
           onSave={handleSaveSettings}
+          onAccountsChange={async () => {
+            const configs = await loadAccounts()
+            const ids = configs.map(a => a.id)
+            setAccounts(ids)
+            // Load settings for any new accounts
+            const newIds = ids.filter(id => !kpiThresholds[id])
+            if (newIds.length > 0) {
+              const map = await Promise.all(newIds.map(id => loadSettings(id)))
+              setKpiThresholds(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].kpi }); return n })
+              setStatusThresholds(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].status }); return n })
+              setDataSources(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].ds }); return n })
+            }
+          }}
+          onConfigureAccount={id => { switchAccount(id) }}
           onClose={() => setSettingsOpen(false)}
         />
       )}
