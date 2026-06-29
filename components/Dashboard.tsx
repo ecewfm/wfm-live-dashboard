@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
 import type { AccountData, Thresholds, DataSourceConfig } from '@/lib/types'
+import { loadSettings, saveSettings, loadAllSettings } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds,
@@ -186,14 +187,15 @@ export default function Dashboard() {
 
       setAccounts(ids)
 
-      // Load per-account config from localStorage
-      const kpiMap: Record<string, Thresholds>        = {}
+      // Load per-account settings from Supabase (shared) with localStorage fallback
+      const allSettings = await loadAllSettings(ids)
+      const kpiMap: Record<string, Thresholds>          = {}
       const statusMap: Record<string, StatusThresholds> = {}
-      const dsMap: Record<string, DataSourceConfig>   = {}
+      const dsMap: Record<string, DataSourceConfig>     = {}
       ids.forEach(id => {
-        kpiMap[id]    = loadKpiThresholds(id)
-        statusMap[id] = loadStatusThresholds(id)
-        dsMap[id]     = loadDataSource(id)
+        kpiMap[id]    = allSettings[id].kpi
+        statusMap[id] = allSettings[id].status
+        dsMap[id]     = allSettings[id].ds
       })
       setKpiThresholds(kpiMap)
       setStatusThresholds(statusMap)
@@ -226,6 +228,15 @@ export default function Dashboard() {
           p => refetch('talkdesk_lob_kpis', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'talkdesk_agent_states' },
           p => refetch('talkdesk_agent_states', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
+      // Reload settings when another user saves them
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_settings' }, async p => {
+        const accId = (p.new as any)?.account_id ?? (p.old as any)?.account_id
+        if (!accId) return
+        const settings = await loadSettings(accId)
+        setKpiThresholds(prev => ({ ...prev, [accId]: settings.kpi }))
+        setStatusThresholds(prev => ({ ...prev, [accId]: settings.status }))
+        setDataSources(prev => ({ ...prev, [accId]: settings.ds }))
+      })
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [fetchAccount, dataSources])
@@ -256,16 +267,16 @@ export default function Dashboard() {
     return map
   }, [accounts, data, agentTimers, kpiThresholds, statusThresholds, dataSources])
 
-  // ── Save settings ──────────────────────────────────────────────────────────
-  const handleSaveSettings = (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig) => {
-    saveKpiThresholds(currentAccount, kpi)
-    saveStatusThresholds(currentAccount, status)
-    saveDataSource(currentAccount, ds)
+  // ── Save settings — writes to Supabase so all browsers sync ────────────────
+  const handleSaveSettings = async (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig) => {
+    // Update local state immediately (instant UI feedback)
     setKpiThresholds(prev => ({ ...prev, [currentAccount]: kpi }))
     setStatusThresholds(prev => ({ ...prev, [currentAccount]: status }))
     setDataSources(prev => ({ ...prev, [currentAccount]: ds }))
     // Re-fetch with new data source
     fetchAccount(currentAccount, ds)
+    // Persist to Supabase (shared) + localStorage (cache)
+    await saveSettings(currentAccount, kpi, status, ds)
   }
 
   const switchAccount = (id: string) => {
