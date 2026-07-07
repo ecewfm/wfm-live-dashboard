@@ -47,13 +47,21 @@ export function resolveCell(
   groupCol?: string, groupVal?: string
 ): string {
   if (!binding || !binding.valueCol) return ''
+  const hasMatch = !!(binding.matchCol && binding.matchVal !== undefined && binding.matchVal !== '')
+  const byMatch = (arr: Record<string, any>[]) =>
+    hasMatch ? arr.filter(r => String(r[binding.matchCol!] ?? '') === String(binding.matchVal)) : arr
+
   let cands = rows
   if (groupCol && groupVal !== undefined && groupVal !== '') {
     cands = cands.filter(r => String(r[groupCol] ?? '') === String(groupVal))
   }
-  if (binding.matchCol && binding.matchVal !== undefined && binding.matchVal !== '') {
-    cands = cands.filter(r => String(r[binding.matchCol!] ?? '') === String(binding.matchVal))
-  }
+  cands = byMatch(cands)
+
+  // Fallback: if the group filter eliminated everything but the row key is set
+  // (kpi_key/id is unique on its own), resolve by the row key alone. Guards
+  // against a stale/mismatched group value.
+  if (cands.length === 0 && hasMatch) cands = byMatch(rows)
+
   const row = cands[0]
   return row ? String(row[binding.valueCol] ?? '') : ''
 }
