@@ -3,12 +3,12 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
-import type { AccountData, Thresholds, DataSourceConfig } from '@/lib/types'
+import type { AccountData, Thresholds, DataSourceConfig, KpiGroup } from '@/lib/types'
 import { loadSettings, saveSettings, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount, type AccountConfig } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds,
-  getKpiColorClass, getStatusPillClass,
+  getKpiColorClass, getStatusPillClass, resolveCell, getExtraTileColorClass,
   loadKpiThresholds, saveKpiThresholds,
   loadStatusThresholds, saveStatusThresholds,
   loadDataSource, saveDataSource,
@@ -36,9 +36,10 @@ function buildBreaches(
 ): BreachRow[] {
   if (!accountData) return []
   const rows: BreachRow[] = []
+  const kpiRows = accountData.kpiRows ?? []
 
   const checkKpi = (
-    num: number, th: Thresholds[keyof Thresholds],
+    num: number, th: { warn: number; crit: number; direction: 'asc' | 'desc' },
     entity: string, metric: string, value: string, thLabel: string
   ) => {
     if (isNaN(num)) return
@@ -48,20 +49,29 @@ function buildBreaches(
     else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning'  })
   }
 
-  // KPI breaches — works for both single-row and multi-row
-  const kpiRows = accountData.kpiRows.length > 0 ? accountData.kpiRows :
-                  accountData.kpi ? [accountData.kpi] : []
+  // KPI breaches — one pass per manually-defined group
+  ;(ds.groups ?? []).forEach(group => {
+    const g       = group.name || 'KPI'
+    const rc      = (b: any) => resolveCell(kpiRows, b, ds.kpiGroupCol, group.groupVal)
+    const slaRaw  = rc(group.cells.sla)
+    const waitRaw = rc(group.cells.wait)
+    const ahtRaw  = rc(group.cells.aht)
+    const abnRaw  = rc(group.cells.abn)
 
-  kpiRows.forEach(row => {
-    const groupName = ds.kpiGroupCol ? (col(row, ds.kpiGroupCol) || 'KPI') : 'Global KPI'
-    const slaNum    = extractPercent(col(row, ds.kpiSlaCol))
-    const queueNum  = parseInt(col(row, ds.kpiQueueCol) || '0')
-    const ahtRaw    = col(row, ds.kpiAsaCol)
-    const ahtMins   = Math.round(parseDurationToSeconds(ahtRaw) / 60)
+    if (group.cells.sla)  checkKpi(extractPercent(slaRaw), kpiTh.sla, g, ds.kpiLabels.sla, slaRaw.replace(/\s+/g,''), `≥${kpiTh.sla.targ}%`)
+    if (group.cells.wait) { const n = parseInt(waitRaw || '0'); checkKpi(n, kpiTh.wait, g, ds.kpiLabels.wait, String(n), String(kpiTh.wait.targ)) }
+    if (group.cells.aht)  { const m = Math.round(parseDurationToSeconds(ahtRaw) / 60); if (m > 0) checkKpi(m, kpiTh.aht, g, ds.kpiLabels.aht, ahtRaw, `<${kpiTh.aht.targ}m`) }
+    if (group.cells.abn)  checkKpi(extractPercent(abnRaw), kpiTh.abn, g, ds.kpiLabels.abn, abnRaw.replace(/\s+/g,''), `<${kpiTh.abn.targ}%`)
 
-    checkKpi(slaNum,  kpiTh.sla,  groupName, 'SLA',   col(row, ds.kpiSlaCol).replace(/\s+/g,''), `≥${kpiTh.sla.targ}%`)
-    if (!isNaN(queueNum)) checkKpi(queueNum, kpiTh.wait, groupName, 'Queue', String(queueNum), String(kpiTh.wait.targ))
-    if (!isNaN(ahtMins) && ahtMins > 0) checkKpi(ahtMins, kpiTh.aht, groupName, 'ASA', ahtRaw, `<${kpiTh.aht.targ}m`)
+    // Extra custom tiles carry their own thresholds
+    ;(ds.extraTiles ?? []).forEach(t => {
+      if (!group.cells[t.key]) return
+      const raw = rc(group.cells[t.key])
+      const num = extractPercent(raw)
+      if (isNaN(num)) return
+      const dir: 'asc' | 'desc' = t.higherIsBetter ? 'desc' : 'asc'
+      checkKpi(num, { warn: t.warn, crit: t.crit, direction: dir }, g, t.label, raw, String(t.targ))
+    })
   })
 
   // Agent status breaches
@@ -123,18 +133,17 @@ export default function Dashboard() {
     }))
 
     try {
-      const isMultiRow = !!src.kpiGroupCol
-
-      // KPI fetch
-      const kpiQuery = supabase.from(src.kpiTable as any).select('*').eq(src.kpiAccountCol, accId)
-      const kpiRes   = isMultiRow
-        ? await kpiQuery.order(src.kpiGroupCol)
-        : await kpiQuery.single()
+      // KPI fetch — always a list of rows for the account; cell bindings resolve
+      // specific values out of it (handles both wide single-row and tall tables).
+      const kpiRes = src.kpiTable
+        ? await supabase.from(src.kpiTable as any).select('*').eq(src.kpiAccountCol, accId)
+        : { data: [] as any[] }
 
       // Agent fetch — try with order first, fall back to no-order if columns don't exist
-      let agentRes = await supabase
-        .from(src.agentTable as any).select('*').eq(src.agentAccountCol, accId)
-        .order(src.agentStatusCol || 'id').order(src.agentNameCol || 'id')
+      let agentRes: any = src.agentTable
+        ? await supabase.from(src.agentTable as any).select('*').eq(src.agentAccountCol, accId)
+            .order(src.agentStatusCol || 'id').order(src.agentNameCol || 'id')
+        : { data: [] as any[], error: null }
       if (agentRes.error) {
         // Column names in order() might be wrong — retry without ordering
         console.warn(`[${accId}] agent order() failed (${agentRes.error.message}) — retrying without order`)
@@ -142,16 +151,12 @@ export default function Dashboard() {
           .from(src.agentTable as any).select('*').eq(src.agentAccountCol, accId)
       }
 
-      const kpiRows    = isMultiRow ? ((kpiRes.data as any[]) ?? []) : []
-      const kpiSingle  = !isMultiRow ? (kpiRes.data as Record<string, any> | null) : null
-
-      // Also try to get the updated_at from any row
-      const anyKpiRow  = kpiSingle ?? kpiRows[0] ?? null
+      const kpiRows = (kpiRes.data as any[]) ?? []
 
       setData(prev => ({
         ...prev,
         [accId]: {
-          kpi:     kpiSingle,
+          kpi:     kpiRows[0] ?? null,
           kpiRows: kpiRows,
           agents:  (agentRes.data as any[]) ?? [],
           status:  null,
@@ -448,11 +453,10 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
   alertAcked: boolean; onAck: () => void; agentTimers: Record<string, number>
   kpiTh: Thresholds; ds: DataSourceConfig
 }) {
-  const agents     = accountData?.agents ?? []
-  const hasCrit    = breaches.some(b => b.severity === 'critical')
-  const isMultiRow = !!ds.kpiGroupCol
-  const kpiRows    = isMultiRow ? (accountData?.kpiRows ?? []) : (accountData?.kpi ? [accountData.kpi] : [])
-  const firstRow   = kpiRows[0] ?? null
+  const agents  = accountData?.agents ?? []
+  const hasCrit = breaches.some(b => b.severity === 'critical')
+  const kpiRows = accountData?.kpiRows ?? []
+  const groups  = ds.groups ?? []
 
   return (
     <>
@@ -471,25 +475,13 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
         </div>
       )}
 
-      {/* KPI tiles — one set per LOB when multi-row, one global set otherwise */}
-      {isMultiRow ? (
-        <>
-          <div className="kpi-section-title">KPIs by {ds.kpiGroupCol}</div>
-          {kpiRows.map(row => (
-            <div key={col(row, ds.kpiGroupCol)} style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase' }}>
-                {col(row, ds.kpiGroupCol)}
-              </div>
-              <KpiGrid row={row} kpiTh={kpiTh} ds={ds} />
-            </div>
-          ))}
-        </>
-      ) : (
-        <>
-          <div className="kpi-section-title">Global Metrics</div>
-          <KpiGrid row={firstRow} kpiTh={kpiTh} ds={ds} />
-        </>
-      )}
+      {/* KPI tiles — one set per manually-defined group */}
+      {groups.map(group => (
+        <div key={group.id} style={{ marginBottom: 16 }}>
+          <div className="kpi-section-title">{group.name || 'Metrics'}</div>
+          <KpiGrid group={group} rows={kpiRows} kpiTh={kpiTh} ds={ds} />
+        </div>
+      ))}
 
       <div className="tables-row">
         <div className="table-card">
@@ -544,30 +536,40 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
   )
 }
 
-// ── KPI Grid (reused for both single and multi-row) ───────────────────────────
-function KpiGrid({ row, kpiTh, ds }: {
-  row: Record<string, any> | null; kpiTh: Thresholds; ds: DataSourceConfig
+// ── KPI Grid — renders one group's cell-bound tiles ───────────────────────────
+function KpiGrid({ group, rows, kpiTh, ds }: {
+  group: KpiGroup; rows: Record<string, any>[]; kpiTh: Thresholds; ds: DataSourceConfig
 }) {
-  const slaVal  = row ? col(row, ds.kpiSlaCol).replace(/\s+/g,'') : '--'
-  const qVal    = row ? col(row, ds.kpiQueueCol) : '0'
-  const asaVal  = row ? col(row, ds.kpiAsaCol) : '--'
-  const agtVal  = row ? col(row, ds.kpiAgentsCol) : '--'
+  const rc = (b: any) => resolveCell(rows, b, ds.kpiGroupCol, group.groupVal)
+  const slaVal = rc(group.cells.sla).replace(/\s+/g,'')
+  const waitVal = rc(group.cells.wait)
+  const ahtVal  = rc(group.cells.aht)
+  const abnVal  = rc(group.cells.abn)
 
   return (
     <div className="kpi-grid">
-      <KpiTile label="SLA"    value={slaVal} numValue={extractPercent(slaVal)}         target={`Target ≥${kpiTh.sla.targ}%`}  th={kpiTh.sla}  showBar />
-      <KpiTile label="Queue"  value={qVal}   numValue={parseInt(qVal)}                 target="Calls in queue"                  th={kpiTh.wait} />
-      <KpiTile label="ASA"    value={asaVal} numValue={Math.round(parseDurationToSeconds(asaVal)/60)} target={`Target <${kpiTh.aht.targ}m`} th={kpiTh.aht}  />
-      <KpiTile label="Agents" value={agtVal} numValue={NaN}                            target="Logged in"                       th={kpiTh.sla}  plain />
+      <KpiTile label={ds.kpiLabels.sla}  value={slaVal || '--'}  numValue={extractPercent(slaVal)}                        target={`Target ≥${kpiTh.sla.targ}%`}  th={kpiTh.sla}  showBar />
+      <KpiTile label={ds.kpiLabels.wait} value={waitVal || '--'} numValue={parseInt(waitVal)}                            target="Calls in queue"                th={kpiTh.wait} />
+      <KpiTile label={ds.kpiLabels.aht}  value={ahtVal || '--'}  numValue={Math.round(parseDurationToSeconds(ahtVal)/60)} target={`Target <${kpiTh.aht.targ}m`}  th={kpiTh.aht}  />
+      <KpiTile label={ds.kpiLabels.abn}  value={abnVal || '--'}  numValue={extractPercent(abnVal)}                        target={`Target <${kpiTh.abn.targ}%`} th={kpiTh.abn}  />
+      {(ds.extraTiles ?? []).map(t => {
+        const raw = rc(group.cells[t.key])
+        return (
+          <KpiTile key={t.key} label={t.label} value={raw || '--'} numValue={NaN}
+            target={`Target ${t.targ}`} th={kpiTh.sla}
+            colorOverride={getExtraTileColorClass(extractPercent(raw), t)} />
+        )
+      })}
     </div>
   )
 }
 
-function KpiTile({ label, value, numValue, target, th, showBar, plain }: {
+function KpiTile({ label, value, numValue, target, th, showBar, plain, colorOverride }: {
   label: string; value: string; numValue: number; target: string
   th: { warn: number; crit: number; direction: 'asc' | 'desc' }; showBar?: boolean; plain?: boolean
+  colorOverride?: string
 }) {
-  const colorClass = plain ? 'text-main' : getKpiColorClass(numValue, th)
+  const colorClass = colorOverride ?? (plain ? 'text-main' : getKpiColorClass(numValue, th))
   const barW = showBar && !isNaN(numValue) ? Math.min(100, Math.max(0, numValue)) : 0
   const barColor = colorClass === 'text-success' ? 'var(--success)' : colorClass === 'text-warning' ? 'var(--warning)' : 'var(--danger)'
   return (
@@ -670,11 +672,11 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
   agentTimers: Record<string, number>; breaches: BreachRow[]
   kpiTh: Thresholds; ds: DataSourceConfig
 }) {
-  const isMultiRow = !!ds.kpiGroupCol
-  const kpiRows    = isMultiRow ? (accountData?.kpiRows ?? []) : (accountData?.kpi ? [accountData.kpi] : [])
-  const anyRow     = kpiRows[0] ?? null
-  const stale      = isDataStale(anyRow ? col(anyRow, ds.kpiUpdatedAt) : undefined)
-  const hasCrit    = breaches.some(b => b.severity === 'critical')
+  const kpiRows = accountData?.kpiRows ?? []
+  const groups  = ds.groups ?? []
+  const anyRow  = kpiRows[0] ?? null
+  const stale   = isDataStale(anyRow ? col(anyRow, ds.kpiUpdatedAt) : undefined)
+  const hasCrit = breaches.some(b => b.severity === 'critical')
 
   return (
     <>
@@ -711,46 +713,30 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
           </div>
         )}
 
-        {/* KPI tiles — single global or per-LOB */}
-        {isMultiRow ? (
-          <div>
-            <div className="ov-section-label">{ds.kpiGroupCol.toUpperCase()}</div>
-            {kpiRows.map(row => {
-              const groupName = col(row, ds.kpiGroupCol)
-              const slaVal    = col(row, ds.kpiSlaCol).replace(/\s+/g,'')
-              const qVal      = col(row, ds.kpiQueueCol)
-              const ahtVal    = col(row, ds.kpiAsaCol)
-              const slaNum    = extractPercent(slaVal)
-              const qNum      = parseInt(qVal) || 0
-              return (
-                <div key={groupName} style={{ marginBottom: 10 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
-                    {groupName}
-                  </div>
-                  <div className="ov-kpi-tiles">
-                    <OvKpiTile label="SLA"   value={slaVal} sublabel={`Target ${kpiTh.sla.targ}%`}  colorClass={getKpiColorClass(slaNum, kpiTh.sla)}  />
-                    <OvKpiTile label="Queue" value={qVal}   sublabel="In queue"                      colorClass={getKpiColorClass(qNum,  kpiTh.wait)} />
-                    <OvKpiTile label="AHT"   value={ahtVal} sublabel="Handle time"                   colorClass="text-main" />
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        ) : (
-          <>
-            <div className="ov-section-label">Global</div>
-            <div className="ov-kpi-tiles">
-              {kpiRows[0] && (
-                <>
-                  <OvKpiTile label="SLA %"   value={col(kpiRows[0], ds.kpiSlaCol).replace(/\s+/g,'')} sublabel={`Target ${kpiTh.sla.targ}%`}  colorClass={getKpiColorClass(extractPercent(col(kpiRows[0], ds.kpiSlaCol)), kpiTh.sla)}  />
-                  <OvKpiTile label="Awaiting" value={col(kpiRows[0], ds.kpiQueueCol)}                  sublabel="Calls/Chats"                  colorClass={getKpiColorClass(parseInt(col(kpiRows[0], ds.kpiQueueCol))||0, kpiTh.wait)} />
-                  <OvKpiTile label="ASA"      value={col(kpiRows[0], ds.kpiAsaCol)}                    sublabel="Handle time"                  colorClass="text-main" />
-                  <OvKpiTile label="Agents"   value={col(kpiRows[0], ds.kpiAgentsCol)}                 sublabel="Available"                    colorClass="text-main" />
-                </>
-              )}
+        {/* KPI tiles — one set per manually-defined group */}
+        {groups.map(group => {
+          const rc      = (b: any) => resolveCell(kpiRows, b, ds.kpiGroupCol, group.groupVal)
+          const slaVal  = rc(group.cells.sla).replace(/\s+/g,'')
+          const waitVal = rc(group.cells.wait)
+          const ahtVal  = rc(group.cells.aht)
+          const abnVal  = rc(group.cells.abn)
+          return (
+            <div key={group.id} style={{ marginBottom: 10 }}>
+              <div className="ov-section-label">{group.name || 'Global'}</div>
+              <div className="ov-kpi-tiles">
+                {group.cells.sla  && <OvKpiTile label={ds.kpiLabels.sla}  value={slaVal}  sublabel={`Target ${kpiTh.sla.targ}%`}  colorClass={getKpiColorClass(extractPercent(slaVal), kpiTh.sla)} />}
+                {group.cells.wait && <OvKpiTile label={ds.kpiLabels.wait} value={waitVal} sublabel="In queue"                     colorClass={getKpiColorClass(parseInt(waitVal)||0, kpiTh.wait)} />}
+                {group.cells.aht  && <OvKpiTile label={ds.kpiLabels.aht}  value={ahtVal}  sublabel="Handle time"                  colorClass="text-main" />}
+                {group.cells.abn  && <OvKpiTile label={ds.kpiLabels.abn}  value={abnVal}  sublabel={`Target <${kpiTh.abn.targ}%`} colorClass={getKpiColorClass(extractPercent(abnVal), kpiTh.abn)} />}
+                {(ds.extraTiles ?? []).map(t => {
+                  if (!group.cells[t.key]) return null
+                  const raw = rc(group.cells[t.key])
+                  return <OvKpiTile key={t.key} label={t.label} value={raw} sublabel={`Target ${t.targ}`} colorClass={getExtraTileColorClass(extractPercent(raw), t)} />
+                })}
+              </div>
             </div>
-          </>
-        )}
+          )
+        })}
       </div>
 
       {/* Breach table */}

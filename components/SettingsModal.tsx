@@ -2,12 +2,13 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
-  PRESET_AIRCALL, PRESET_TALKDESK,
-  fetchPublicTables, fetchTableColumns
+  PRESET_AIRCALL, PRESET_TALKDESK, PRESET_FIVE9, PRESET_UNITERS,
+  DEFAULT_KPI_LABELS, genId, newGroup,
+  fetchPublicTables
 } from '@/lib/utils'
 import { addAccount, removeAccount, type AccountConfig } from '@/lib/settings'
 
@@ -409,27 +410,22 @@ function AccountsTab({
 // Click a slot card → it pulses. Click a column header in the live preview → mapped.
 
 const SLOT_COLORS: Record<string, string> = {
-  kpiSlaCol:       '#d97a35',
-  kpiQueueCol:     '#4b8b9c',
-  kpiAsaCol:       '#846b9a',
-  kpiAbnCol:       '#c95c5c',
-  kpiAgentsCol:    '#3b7a5c',
-  kpiGroupCol:     '#5a7abf',
-  kpiUpdatedAt:    '#888',
   agentNameCol:    '#3b6c5a',
   agentStatusCol:  '#4b7a9a',
   agentDurationCol:'#7a6a9a',
   agentDurationSecs:'#888',
 }
 
-const KPI_SLOTS = [
-  { key: 'kpiGroupCol',   label: 'Group By',       hint: 'lob_name / skill_name (leave empty for single global row)' },
-  { key: 'kpiSlaCol',     label: 'SLA %',          hint: 'e.g. sla, service_level' },
-  { key: 'kpiQueueCol',   label: 'Queue',          hint: 'e.g. calls_waiting, contacts_in_queue' },
-  { key: 'kpiAsaCol',     label: 'ASA / AHT',      hint: 'e.g. time_to_answer, aht' },
-  { key: 'kpiAgentsCol',  label: 'Agents',         hint: 'e.g. available_users, agents_logged_in' },
-  { key: 'kpiUpdatedAt',  label: 'Updated At',     hint: 'e.g. updated_at' },
+// Core KPI cells that every group binds
+const CORE_KPIS: { key: 'sla' | 'aht' | 'abn' | 'wait'; color: string }[] = [
+  { key: 'sla',  color: '#d97a35' },
+  { key: 'wait', color: '#4b8b9c' },
+  { key: 'aht',  color: '#846b9a' },
+  { key: 'abn',  color: '#c95c5c' },
 ]
+// Palette for extra custom tiles (cycled by index)
+const EXTRA_COLORS = ['#3b7a5c', '#5a7abf', '#b07d3a', '#9a5ba0', '#4b9a8f', '#a05b7a']
+
 const AGENT_SLOTS = [
   { key: 'agentNameCol',      label: 'Agent Name',      hint: 'e.g. agent_name, name' },
   { key: 'agentStatusCol',    label: 'Status',          hint: 'e.g. status, state' },
@@ -537,107 +533,223 @@ const DsTableSelector = React.memo(({ field, value, tables, onChange }: {
   </select>
 ), (p, n) => p.value === n.value && p.tables === n.tables && p.onChange === n.onChange)
 
+// eslint-disable-next-line react/display-name
+const ColSelect = React.memo(({ cols, value, onChange, emptyLabel }: {
+  cols: string[]; value: string; onChange: (v: string) => void; emptyLabel?: string
+}) => (
+  <select className="ds-select" value={value} onChange={e => onChange(e.target.value)} style={{ minWidth: 150 }}>
+    <option value="">{emptyLabel || '-- none --'}</option>
+    {cols.map(c => <option key={c} value={c}>{c}</option>)}
+    {value && !cols.includes(value) && <option value={value}>{value}</option>}
+  </select>
+), (p, n) => p.value === n.value && p.cols === n.cols && p.onChange === n.onChange)
+
 function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   accountId: string
   ds: DataSourceConfig
   onChange: (ds: DataSourceConfig) => void
 }) {
-  const [localDs,     setLocalDs]     = useState<DataSourceConfig>(() => ({ ...initialDs }))
-  const [tables,      setTables]      = useState<string[]>([])
-  const [kpiPreview,  setKpiPreview]  = useState<Record<string, any>[]>([])
-  const [agtPreview,  setAgtPreview]  = useState<Record<string, any>[]>([])
-  const [activeSlot,  setActiveSlot]  = useState<string | null>(null)
-  const [loadingKpi,  setLoadingKpi]  = useState(false)
-  const [loadingAgt,  setLoadingAgt]  = useState(false)
+  const [localDs,    setLocalDs]    = useState<DataSourceConfig>(() => JSON.parse(JSON.stringify(initialDs)))
+  const [tables,     setTables]     = useState<string[]>([])
+  const [kpiPreview, setKpiPreview] = useState<Record<string, any>[]>([])
+  const [agtPreview, setAgtPreview] = useState<Record<string, any>[]>([])
+  const [activeCell, setActiveCell] = useState<{ groupId: string; kpiKey: string } | null>(null)
+  const [activeAgentSlot, setActiveAgentSlot] = useState<string | null>(null)
+  const [loadingKpi, setLoadingKpi] = useState(false)
+  const [loadingAgt, setLoadingAgt] = useState(false)
 
   const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
   const supaKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
-  // Load table list
-  useEffect(() => {
-    fetchPublicTables(supaUrl, supaKey).then(t => setTables(t))
-  }, [])
+  useEffect(() => { fetchPublicTables(supaUrl, supaKey).then(setTables) }, [])
 
-  // Sync to parent post-render
   const onChangeRef = useRef(onChange)
   useEffect(() => { onChangeRef.current = onChange }, [onChange])
   useEffect(() => { onChangeRef.current(localDs) }, [localDs])
 
-  // Fetch KPI preview when table changes
   useEffect(() => {
     if (!localDs.kpiTable) { setKpiPreview([]); return }
     setLoadingKpi(true)
-    fetch(`${supaUrl}/rest/v1/${localDs.kpiTable}?limit=8`, {
-      headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` }
-    }).then(r => r.ok ? r.json() : [])
-      .then(d => setKpiPreview(Array.isArray(d) ? d : []))
-      .catch(() => setKpiPreview([]))
-      .finally(() => setLoadingKpi(false))
+    fetch(`${supaUrl}/rest/v1/${localDs.kpiTable}?limit=50`, { headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` } })
+      .then(r => r.ok ? r.json() : []).then(d => setKpiPreview(Array.isArray(d) ? d : []))
+      .catch(() => setKpiPreview([])).finally(() => setLoadingKpi(false))
   }, [localDs.kpiTable])
 
-  // Fetch Agent preview when table changes
   useEffect(() => {
     if (!localDs.agentTable) { setAgtPreview([]); return }
     setLoadingAgt(true)
-    fetch(`${supaUrl}/rest/v1/${localDs.agentTable}?limit=8`, {
-      headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` }
-    }).then(r => r.ok ? r.json() : [])
-      .then(d => setAgtPreview(Array.isArray(d) ? d : []))
-      .catch(() => setAgtPreview([]))
-      .finally(() => setLoadingAgt(false))
+    fetch(`${supaUrl}/rest/v1/${localDs.agentTable}?limit=8`, { headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` } })
+      .then(r => r.ok ? r.json() : []).then(d => setAgtPreview(Array.isArray(d) ? d : []))
+      .catch(() => setAgtPreview([])).finally(() => setLoadingAgt(false))
   }, [localDs.agentTable])
 
-  const set = useCallback((key: string, val: string) => {
-    setLocalDs(prev => ({ ...prev, [key]: val }))
-    setActiveSlot(null)
-  }, [])
-
   const loadPreset = useCallback((preset: DataSourceConfig) => {
-    setLocalDs({ ...preset })
-    setActiveSlot(null)
+    setLocalDs(JSON.parse(JSON.stringify(preset))); setActiveCell(null); setActiveAgentSlot(null)
+  }, [])
+  const setField = useCallback((key: string, val: string) => { setLocalDs(prev => ({ ...prev, [key]: val })) }, [])
+  const setLabel = useCallback((key: 'sla'|'aht'|'abn'|'wait', val: string) => {
+    setLocalDs(prev => ({ ...prev, kpiLabels: { ...prev.kpiLabels, [key]: val } }))
+  }, [])
+  const addGroup = useCallback(() => {
+    setLocalDs(prev => ({ ...prev, groups: [...prev.groups, newGroup(`Group ${prev.groups.length + 1}`)] }))
+  }, [])
+  const removeGroup = useCallback((id: string) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.filter(g => g.id !== id) }))
+    setActiveCell(cur => (cur && cur.groupId === id ? null : cur))
+  }, [])
+  const renameGroup = useCallback((id: string, name: string) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => g.id === id ? { ...g, name } : g) }))
+  }, [])
+  const setGroupVal = useCallback((id: string, val: string) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => g.id === id ? { ...g, groupVal: val } : g) }))
+  }, [])
+  const clearCell = useCallback((groupId: string, kpiKey: string) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => {
+      if (g.id !== groupId) return g
+      const cells = { ...g.cells }; delete cells[kpiKey]; return { ...g, cells }
+    }) }))
+  }, [])
+  const addExtra = useCallback(() => {
+    setLocalDs(prev => ({ ...prev, extraTiles: [...prev.extraTiles,
+      { key: 'extra_' + genId(), label: `Extra ${prev.extraTiles.length + 1}`, warn: 10, crit: 20, targ: 5, higherIsBetter: false }] }))
+  }, [])
+  const updateExtra = useCallback((key: string, patch: Partial<ExtraTile>) => {
+    setLocalDs(prev => ({ ...prev, extraTiles: prev.extraTiles.map(t => t.key === key ? { ...t, ...patch } : t) }))
+  }, [])
+  const removeExtra = useCallback((key: string) => {
+    setLocalDs(prev => ({
+      ...prev,
+      extraTiles: prev.extraTiles.filter(t => t.key !== key),
+      groups: prev.groups.map(g => { const cells = { ...g.cells }; delete cells[key]; return { ...g, cells } }),
+    }))
+  }, [])
+  const pickCell = useCallback((row: Record<string, any>, colName: string) => {
+    setActiveCell(cur => {
+      if (!cur) return cur
+      setLocalDs(prev => {
+        const binding: CellBinding = { valueCol: colName }
+        // Pin the exact row. Prefer the configured Row key; otherwise auto-detect
+        // a unique identifier column so a single click always binds ONE cell.
+        const cols = Object.keys(row)
+        const rk = prev.kpiRowKeyCol || (cols.includes('kpi_key') ? 'kpi_key' : cols.includes('id') ? 'id' : '')
+        if (rk) { binding.matchCol = rk; binding.matchVal = String(row[rk] ?? '') }
+        return { ...prev, groups: prev.groups.map(g => {
+          if (g.id !== cur.groupId) return g
+          // Pin the group to this row's group value (e.g. skill) so cell picks
+          // in the same group all resolve within the same LOB.
+          const groupVal = prev.kpiGroupCol ? String(row[prev.kpiGroupCol] ?? '') : g.groupVal
+          return { ...g, groupVal, cells: { ...g.cells, [cur.kpiKey]: binding } }
+        }) }
+      })
+      return null
+    })
+  }, [])
+  const mapAgentCol = useCallback((colName: string) => {
+    setActiveAgentSlot(cur => { if (cur) setLocalDs(prev => ({ ...prev, [cur]: colName })); return null })
   }, [])
 
-  // Click a column header → map to active slot
-  const mapColumn = useCallback((colName: string) => {
-    if (!activeSlot) return
-    setLocalDs(prev => ({ ...prev, [activeSlot]: colName }))
-    setActiveSlot(null)
-  }, [activeSlot])
+  const tileColor = (key: string) => {
+    const core = CORE_KPIS.find(c => c.key === key)
+    if (core) return core.color
+    const idx = localDs.extraTiles.findIndex(t => t.key === key)
+    return EXTRA_COLORS[(idx < 0 ? 0 : idx) % EXTRA_COLORS.length]
+  }
+  const tileLabel = (key: string) => {
+    if (key === 'sla' || key === 'aht' || key === 'abn' || key === 'wait') return localDs.kpiLabels[key]
+    return localDs.extraTiles.find(t => t.key === key)?.label || key
+  }
+  const allKpiKeys = ['sla', 'wait', 'aht', 'abn', ...localDs.extraTiles.map(t => t.key)]
+  const kpiCols = kpiPreview.length ? Object.keys(kpiPreview[0]) : []
+  const agtCols = agtPreview.length ? Object.keys(agtPreview[0]) : []
+  const groupVals = localDs.kpiGroupCol
+    ? Array.from(new Set(kpiPreview.map(r => String(r[localDs.kpiGroupCol] ?? '')).filter(Boolean)))
+    : []
 
-  const toggleSlot = useCallback((key: string) => {
-    setActiveSlot(prev => prev === key ? null : key)
-  }, [])
+  // Highlight: a preview cell lights up only when it is the EXACT bound cell —
+  // matched on both the group value (skill/lob) and the row key (metric).
+  const hiBindings = localDs.groups.flatMap(g =>
+    Object.entries(g.cells).map(([k, b]) => ({
+      color:    tileColor(k),
+      valueCol: b.valueCol,
+      groupVal: localDs.kpiGroupCol ? (g.groupVal ?? null) : null,
+      matchCol: b.matchCol || null,
+      matchVal: (b.matchVal !== undefined && b.matchVal !== '') ? b.matchVal : null,
+    }))
+  ).filter(x => x.valueCol)
 
-  // SlotCard, PreviewTable, TableSelector are at module level — see above DataSourcesTab
+  const cellColor = (row: Record<string, any>, colName: string, ri: number): string | undefined => {
+    for (const bd of hiBindings) {
+      if (bd.valueCol !== colName) continue
+      if (bd.groupVal !== null && String(row[localDs.kpiGroupCol] ?? '') !== bd.groupVal) continue
+      if (bd.matchVal !== null) {
+        if (!bd.matchCol || String(row[bd.matchCol] ?? '') !== bd.matchVal) continue
+      } else if (bd.groupVal === null && ri !== 0) {
+        continue  // no constraints at all → only the first row is used
+      }
+      return bd.color
+    }
+    return undefined
+  }
 
   return (
     <div>
       <style>{`
-        @keyframes slot-pulse {
-          0%,100% { box-shadow: 0 0 0 0 rgba(217,122,53,0.4); }
-          50%      { box-shadow: 0 0 0 5px rgba(217,122,53,0); }
-        }
-        .ds-section { margin-bottom: 20px; }
-        .ds-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase;
-          letter-spacing: 0.8px; color: var(--text-muted); padding-bottom: 8px;
-          border-bottom: 1px solid var(--border, #e1e6e4); margin-bottom: 12px; }
-        .ds-slot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-bottom: 10px; }
-        .ds-active-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
-          background: rgba(217,122,53,0.1); border: 1px solid rgba(217,122,53,0.3);
-          border-radius: 6px; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: #d97a35; }
+        @keyframes slot-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(217,122,53,0.4); } 50% { box-shadow: 0 0 0 5px rgba(217,122,53,0); } }
+        .ds-section { margin-bottom: 22px; }
+        .ds-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px;
+          color: var(--text-muted); padding-bottom: 8px; border-bottom: 1px solid var(--border, #e1e6e4); margin-bottom: 12px; }
+        .ds-slot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+        .ds-active-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: rgba(217,122,53,0.1);
+          border: 1px solid rgba(217,122,53,0.3); border-radius: 6px; margin: 8px 0; font-size: 12px; font-weight: 600; color: #d97a35; }
         .ds-table-header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
-        .ds-preview { border: 1px solid var(--border, #e1e6e4); border-radius: 8px; overflow: hidden; margin-top: 8px; }
+        .ds-mini-label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+        .ds-hint { font-size: 11px; color: var(--text-muted); margin: 4px 0 10px; line-height: 1.5; }
+        .ds-preview { border: 1px solid var(--border, #e1e6e4); border-radius: 8px; overflow: hidden; margin-top: 10px; }
         .dark .ds-preview { border-color: #2e2e2e; }
+        .ds-label-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+        .ds-label-field { display: flex; align-items: center; gap: 6px; }
+        .ds-label-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+        .ds-group { border: 1px solid var(--border, #e1e6e4); border-radius: 8px; padding: 10px; margin-bottom: 10px; background: var(--bg-body,#f0f2f1); }
+        .dark .ds-group { border-color: #2e2e2e; background: #1a1a1a; }
+        .ds-group-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .ds-group-name { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border,#e1e6e4);
+          background: var(--bg-card,#fff); color: var(--text-main,#2c3b36); font-family: inherit; font-size: 13px; font-weight: 600; outline: none; }
+        .dark .ds-group-name { background:#111; border-color:#2e2e2e; color:#e0e0e0; }
+        .ds-cellcard { border: 2px solid var(--border,#e1e6e4); border-radius: 8px; overflow: hidden; cursor: pointer; background: var(--bg-card,#fff); min-width: 0; }
+        .dark .ds-cellcard { background:#111; }
+        .ds-cellcard-h { padding: 4px 8px; color: #fff; font-size: 10px; font-weight: 700; text-transform: uppercase;
+          letter-spacing: 0.4px; display: flex; align-items: center; justify-content: space-between; }
+        .ds-cellcard-v { padding: 5px 8px; font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .ds-x { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 15px; padding: 4px 6px; border-radius: 6px; }
+        .ds-x:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
+        .ds-add-btn { display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; margin-top: 2px;
+          border: 1px dashed var(--border,#e1e6e4); background: transparent; color: var(--text-muted); border-radius: 6px;
+          font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
+        .ds-add-btn:hover { border-color: #d97a35; color: #d97a35; }
+        .ds-extra-wrap { margin-top: 14px; }
+        .ds-extra-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+        .ds-extra-name { flex: 1; min-width: 120px; padding: 5px 8px; font-size: 12px; }
+        .ds-extra-num { display: flex; align-items: center; gap: 3px; font-size: 10px; color: var(--text-muted); font-weight: 700; }
+        .ds-extra-num input { width: 48px; padding: 4px 6px; border-radius: 5px; border: 1px solid var(--border,#e1e6e4);
+          background: var(--bg-body,#f0f2f1); color: var(--text-main,#2c3b36); font-family: inherit; font-size: 12px; text-align: center; }
+        .dark .ds-extra-num input { background:#111; border-color:#2e2e2e; color:#e0e0e0; }
+        .ds-hib { padding: 5px 9px; border-radius: 6px; font-size: 10px; font-weight: 700; cursor: pointer; border: 1px solid;
+          background: rgba(75,139,156,0.1); color: #4b8b9c; border-color: rgba(75,139,156,0.3); font-family: inherit; white-space: nowrap; }
+        .ds-hib.on { background: rgba(217,158,53,0.1); color: #d99e35; border-color: rgba(217,158,53,0.3); }
+        .ds-th { padding: 6px 10px; text-align: left; white-space: nowrap; position: sticky; top: 0; z-index: 2;
+          background: var(--bg-body,#f0f2f1); color: var(--text-muted); font-weight: 700; font-size: 10px;
+          text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid var(--border,#e1e6e4); }
+        .dark .ds-th { background:#1a1a1a; }
+        .ds-td { padding: 5px 10px; border-bottom: 1px solid var(--border,#e1e6e4); color: var(--text-main,#2c3b36);
+          max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; outline-offset: -2px; }
       `}</style>
 
       {/* Presets */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        <button className="ds-preset-btn aircall"  onClick={() => loadPreset(PRESET_AIRCALL)}>
-          <i className="bx bx-phone" /> Aircall Preset
-        </button>
-        <button className="ds-preset-btn talkdesk" onClick={() => loadPreset(PRESET_TALKDESK)}>
-          <i className="bx bx-headphone" /> Talkdesk Preset
-        </button>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+        <button className="ds-preset-btn aircall"  onClick={() => loadPreset(PRESET_AIRCALL)}><i className="bx bx-phone" /> Aircall</button>
+        <button className="ds-preset-btn talkdesk" onClick={() => loadPreset(PRESET_TALKDESK)}><i className="bx bx-headphone" /> Talkdesk</button>
+        <button className="ds-preset-btn talkdesk" onClick={() => loadPreset(PRESET_FIVE9)}><i className="bx bx-grid-alt" /> Five9</button>
+        <button className="ds-preset-btn talkdesk" onClick={() => loadPreset(PRESET_UNITERS)}><i className="bx bx-grid-alt" /> Uniters</button>
       </div>
 
       {/* KPI Section */}
@@ -645,109 +757,166 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         <div className="ds-section-title">KPI DATA SOURCE</div>
         <div className="ds-table-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 500 }}>Table</span>
-            <DsTableSelector field="kpiTable" value={localDs.kpiTable} tables={tables}
-              onChange={(f, v) => { setLocalDs(prev => ({ ...prev, [f]: v })); setActiveSlot(null) }} />
+            <span className="ds-mini-label">Table</span>
+            <DsTableSelector field="kpiTable" value={localDs.kpiTable} tables={tables} onChange={(f, v) => setField(f, v)} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 500 }}>Account ID col</span>
-            <select className="ds-select" value={localDs.kpiAccountCol}
-              onChange={e => setLocalDs(prev => ({ ...prev, kpiAccountCol: e.target.value }))}>
-              <option value="">-- none --</option>
-              {kpiPreview.length > 0 && Object.keys(kpiPreview[0]).map(c => <option key={c} value={c}>{c}</option>)}
-              {localDs.kpiAccountCol && !kpiPreview.find(r => Object.keys(r).includes(localDs.kpiAccountCol)) && (
-                <option value={localDs.kpiAccountCol}>{localDs.kpiAccountCol}</option>
-              )}
-            </select>
+            <span className="ds-mini-label">Account col</span>
+            <ColSelect cols={kpiCols} value={localDs.kpiAccountCol} onChange={v => setField('kpiAccountCol', v)} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="ds-mini-label">Group by</span>
+            <ColSelect cols={kpiCols} value={localDs.kpiGroupCol} onChange={v => setField('kpiGroupCol', v)} emptyLabel="(one group)" />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="ds-mini-label">Row key</span>
+            <ColSelect cols={kpiCols} value={localDs.kpiRowKeyCol} onChange={v => setField('kpiRowKeyCol', v)} emptyLabel="(one row)" />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="ds-mini-label">Updated at</span>
+            <ColSelect cols={kpiCols} value={localDs.kpiUpdatedAt} onChange={v => setField('kpiUpdatedAt', v)} />
           </div>
         </div>
 
-        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
-          <strong>Click a slot below</strong> to activate it (it will pulse), then <strong>click a column header</strong> in the preview table to map it.
+        {/* Core KPI label renames */}
+        <div className="ds-label-row">
+          {CORE_KPIS.map(c => (
+            <div key={c.key} className="ds-label-field">
+              <span className="ds-label-dot" style={{ background: c.color }} />
+              <input className="acc-add-input" style={{ padding: '5px 8px', fontSize: 12, width: 130 }}
+                value={localDs.kpiLabels[c.key]} onChange={e => setLabel(c.key, e.target.value)}
+                placeholder={(DEFAULT_KPI_LABELS as any)[c.key]} />
+            </div>
+          ))}
+        </div>
+
+        <p className="ds-hint">
+          <strong>Group by</strong> = the column whose values are your LOBs (e.g. <code>skill</code>); pick each group&apos;s value in its header.
+          <strong> Row key</strong> = the metric column within a group (e.g. <code>label</code>). Then <strong>click a KPI slot</strong> (it pulses) and
+          <strong> click the value cell</strong> — with both set, exactly one cell binds.
         </p>
 
-        {/* Slot cards */}
-        <div className="ds-slot-grid">
-          {KPI_SLOTS.map(s => <DsSlotCard key={s.key} slotKey={s.key} label={s.label} hint={s.hint}
-            isActive={activeSlot === s.key} value={(localDs as any)[s.key] || ''} onToggle={toggleSlot} />)}
+        {/* Groups */}
+        {localDs.groups.map(group => (
+          <div key={group.id} className="ds-group">
+            <div className="ds-group-head">
+              <input className="ds-group-name" value={group.name} onChange={e => renameGroup(group.id, e.target.value)} placeholder="Group name" />
+              {localDs.kpiGroupCol && (
+                <select className="ds-select" style={{ maxWidth: 170 }} value={group.groupVal ?? ''} onChange={e => setGroupVal(group.id, e.target.value)}>
+                  <option value="">{localDs.kpiGroupCol}…</option>
+                  {groupVals.map(v => <option key={v} value={v}>{v}</option>)}
+                  {group.groupVal && !groupVals.includes(group.groupVal) && <option value={group.groupVal}>{group.groupVal}</option>}
+                </select>
+              )}
+              <button className="ds-x" title="Remove group" onClick={() => removeGroup(group.id)}><i className="bx bx-trash" /></button>
+            </div>
+            <div className="ds-slot-grid">
+              {allKpiKeys.map(k => {
+                const b = group.cells[k]
+                const color = tileColor(k)
+                const isActive = !!activeCell && activeCell.groupId === group.id && activeCell.kpiKey === k
+                const disp = b ? (b.matchVal ? `${b.matchVal} → ${b.valueCol}` : b.valueCol) : (isActive ? '← click a cell' : 'not set')
+                return (
+                  <div key={k} className="ds-cellcard"
+                    style={{ borderColor: isActive ? color : 'var(--border,#e1e6e4)', animation: isActive ? 'slot-pulse 1s infinite' : 'none' }}
+                    onClick={() => setActiveCell(cur => (cur && cur.groupId === group.id && cur.kpiKey === k) ? null : { groupId: group.id, kpiKey: k })}>
+                    <div className="ds-cellcard-h" style={{ background: color }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tileLabel(k)}</span>
+                      {b && <i className="bx bx-x" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); clearCell(group.id, k) }} />}
+                    </div>
+                    <div className="ds-cellcard-v" style={{ color: b ? color : 'var(--text-muted)', background: b ? `${color}12` : 'transparent' }}>{disp}</div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+        <button className="ds-add-btn" onClick={addGroup}><i className="bx bx-plus" /> Add Group</button>
+
+        {/* Extra tiles */}
+        <div className="ds-extra-wrap">
+          <div className="ds-section-title">EXTRA KPI TILES</div>
+          {localDs.extraTiles.map((t, i) => (
+            <div key={t.key} className="ds-extra-row">
+              <span className="ds-label-dot" style={{ background: EXTRA_COLORS[i % EXTRA_COLORS.length] }} />
+              <input className="acc-add-input ds-extra-name" value={t.label} onChange={e => updateExtra(t.key, { label: e.target.value })} placeholder="Tile name" />
+              <label className="ds-extra-num">W<input type="number" value={t.warn} onChange={e => updateExtra(t.key, { warn: parseFloat(e.target.value) || 0 })} /></label>
+              <label className="ds-extra-num">C<input type="number" value={t.crit} onChange={e => updateExtra(t.key, { crit: parseFloat(e.target.value) || 0 })} /></label>
+              <label className="ds-extra-num">T<input type="number" value={t.targ} onChange={e => updateExtra(t.key, { targ: parseFloat(e.target.value) || 0 })} /></label>
+              <button className={`ds-hib${t.higherIsBetter ? ' on' : ''}`} onClick={() => updateExtra(t.key, { higherIsBetter: !t.higherIsBetter })}
+                title="Toggle whether high or low values are bad">{t.higherIsBetter ? 'Low = Bad' : 'High = Bad'}</button>
+              <button className="ds-x" onClick={() => removeExtra(t.key)}><i className="bx bx-trash" /></button>
+            </div>
+          ))}
+          <button className="ds-add-btn" onClick={addExtra}><i className="bx bx-plus" /> Add Extra Tile</button>
         </div>
 
-        {/* Active slot instruction */}
-        {activeSlot && KPI_SLOTS.find(s => s.key === activeSlot) && (
-          <div className="ds-active-bar">
-            <i className="bx bx-crosshair" style={{ animation: 'slot-pulse 1s infinite', fontSize: 16 }} />
-            <strong>{KPI_SLOTS.find(s => s.key === activeSlot)?.label}</strong> is active — click a column header below to map it
-          </div>
-        )}
-
-        {/* Preview table */}
+        {/* KPI preview grid — click a cell to bind the active slot */}
         {localDs.kpiTable && (
           <div className="ds-preview">
             {loadingKpi ? (
-              <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
-                Loading preview...
-              </div>
+              <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>Loading preview...</div>
+            ) : kpiPreview.length === 0 ? (
+              <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>No rows in this table</div>
             ) : (
-              <DsPreviewTable rows={kpiPreview} hasActiveSlot={!!activeSlot}
-                onMap={mapColumn}
-                mappedCols={KPI_SLOTS.reduce((acc, s) => {
-                  const v = (localDs as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key]||'#888'; return acc
-                }, {} as Record<string, string>)} />
+              <div style={{ overflow: 'auto', maxHeight: 260, fontSize: 11 }}>
+                <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 'max-content' }}>
+                  <thead><tr>{kpiCols.map(c => <th key={c} className="ds-th">{c}</th>)}</tr></thead>
+                  <tbody>
+                    {kpiPreview.map((row, ri) => (
+                      <tr key={ri} style={{ background: ri % 2 === 0 ? 'transparent' : 'rgba(0,0,0,0.02)' }}>
+                        {kpiCols.map(c => {
+                          const hi = cellColor(row, c, ri)
+                          return (
+                            <td key={c} className="ds-td"
+                              style={{ cursor: activeCell ? 'pointer' : 'default', background: hi ? `${hi}22` : undefined, outline: hi ? `2px solid ${hi}` : 'none' }}
+                              onClick={() => activeCell && pickCell(row, c)}>
+                              {String(row[c] ?? '')}
+                            </td>
+                          )
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         )}
       </div>
 
-      {/* Agent Section */}
+      {/* Agent Section (column-based) */}
       <div className="ds-section">
         <div className="ds-section-title">AGENT DATA SOURCE</div>
         <div className="ds-table-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 500 }}>Table</span>
-            <DsTableSelector field="agentTable" value={localDs.agentTable} tables={tables}
-              onChange={(f, v) => { setLocalDs(prev => ({ ...prev, [f]: v })); setActiveSlot(null) }} />
+            <span className="ds-mini-label">Table</span>
+            <DsTableSelector field="agentTable" value={localDs.agentTable} tables={tables} onChange={(f, v) => { setField(f, v); setActiveAgentSlot(null) }} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 500 }}>Account ID col</span>
-            <select className="ds-select" value={localDs.agentAccountCol}
-              onChange={e => setLocalDs(prev => ({ ...prev, agentAccountCol: e.target.value }))}>
-              <option value="">-- none --</option>
-              {agtPreview.length > 0 && Object.keys(agtPreview[0]).map(c => <option key={c} value={c}>{c}</option>)}
-              {localDs.agentAccountCol && !agtPreview.find(r => Object.keys(r).includes(localDs.agentAccountCol)) && (
-                <option value={localDs.agentAccountCol}>{localDs.agentAccountCol}</option>
-              )}
-            </select>
+            <span className="ds-mini-label">Account col</span>
+            <ColSelect cols={agtCols} value={localDs.agentAccountCol} onChange={v => setField('agentAccountCol', v)} />
           </div>
         </div>
-
-        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
-          <strong>Click a slot below</strong>, then click a column in the preview to map it.
-        </p>
-
+        <p className="ds-hint"><strong>Click a slot</strong>, then click a column header in the preview to map it.</p>
         <div className="ds-slot-grid">
           {AGENT_SLOTS.map(s => <DsSlotCard key={s.key} slotKey={s.key} label={s.label} hint={s.hint}
-            isActive={activeSlot === s.key} value={(localDs as any)[s.key] || ''} onToggle={toggleSlot} />)}
+            isActive={activeAgentSlot === s.key} value={(localDs as any)[s.key] || ''}
+            onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)} />)}
         </div>
-
-        {activeSlot && AGENT_SLOTS.find(s => s.key === activeSlot) && (
+        {activeAgentSlot && (
           <div className="ds-active-bar">
-            <i className="bx bx-crosshair" style={{ animation: 'slot-pulse 1s infinite', fontSize: 16 }} />
-            <strong>{AGENT_SLOTS.find(s => s.key === activeSlot)?.label}</strong> is active — click a column header below to map it
+            <i className="bx bx-crosshair" style={{ fontSize: 16 }} />
+            <strong>{AGENT_SLOTS.find(s => s.key === activeAgentSlot)?.label}</strong> is active — click a column header below
           </div>
         )}
-
         {localDs.agentTable && (
           <div className="ds-preview">
             {loadingAgt ? (
-              <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
-                Loading preview...
-              </div>
+              <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>Loading preview...</div>
             ) : (
-              <DsPreviewTable rows={agtPreview} hasActiveSlot={!!activeSlot}
-                onMap={mapColumn}
-                mappedCols={AGENT_SLOTS.reduce((acc, s) => {
-                  const v = (localDs as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key]||'#888'; return acc
-                }, {} as Record<string, string>)} />
+              <DsPreviewTable rows={agtPreview} hasActiveSlot={!!activeAgentSlot} onMap={mapAgentCol}
+                mappedCols={AGENT_SLOTS.reduce((acc, s) => { const v = (localDs as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key] || '#888'; return acc }, {} as Record<string, string>)} />
             )}
           </div>
         )}

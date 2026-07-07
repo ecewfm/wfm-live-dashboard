@@ -72,20 +72,51 @@ export interface Thresholds {
   abn:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc' }
 }
 
-// ── Data source configuration (per account, stored in localStorage) ───────────
-export interface DataSourceConfig {
-  // KPI data
-  kpiTable:      string   // e.g. "wfm_kpi_snapshots" or "talkdesk_lob_kpis"
-  kpiAccountCol: string   // column that contains account_id
-  kpiGroupCol:   string   // '' = single row; 'lob_name' = multi-row per LOB
-  kpiSlaCol:     string   // column for SLA value
-  kpiQueueCol:   string   // column for queue / calls waiting
-  kpiAsaCol:     string   // column for ASA / AHT
-  kpiAbnCol:     string   // column for abandon rate ('' if N/A)
-  kpiAgentsCol:  string   // column for available/logged-in agent count
-  kpiUpdatedAt:  string   // column for updated_at timestamp
+// ── Data source configuration (per account, stored in wfm_settings + localStorage)
+// Cell-picker model (mirrors the Apps Script DataSourcePicker):
+//   • The KPI table is fetched as rows filtered by account_id.
+//   • You define one or more GROUPS (LOBs) by hand.
+//   • Each group binds each KPI (core + extra tiles) to a CELL:
+//       - valueCol: the column holding the value
+//       - matchCol/matchVal: optionally pin a specific row (tall tables like
+//         five9_kpis where kpiRowKeyCol='kpi_key'); omit for single-row/first-row.
 
-  // Agent data
+export interface CellBinding {
+  valueCol: string    // column holding the value
+  matchCol?: string   // optional: column used to identify a specific row
+  matchVal?: string   // optional: value of matchCol that identifies the row
+}
+
+export interface ExtraTile {
+  key:            string   // stable id, e.g. "extra_1699..."
+  label:          string
+  warn:           number
+  crit:           number
+  targ:           number
+  higherIsBetter: boolean  // true → low values are bad; false → high values are bad
+}
+
+export interface KpiGroup {
+  id:       string
+  name:     string
+  groupVal?: string                    // this group's value in kpiGroupCol (e.g. skill = "Team 1")
+  cells:    Record<string, CellBinding> // key: 'sla'|'aht'|'abn'|'wait'|<extra.key>
+}
+
+export interface DataSourceConfig {
+  version:       number   // 2 = cell-picker model
+
+  // KPI data
+  kpiTable:      string
+  kpiAccountCol: string   // column that contains account_id
+  kpiGroupCol:   string   // '' = single group; else the column whose distinct values are the LOBs (e.g. skill, lob_name)
+  kpiRowKeyCol:  string   // '' = one row per group; else the metric-identifier column within a group (e.g. label, kpi_key)
+  kpiUpdatedAt:  string   // column for updated_at timestamp
+  kpiLabels:     { sla: string; aht: string; abn: string; wait: string }
+  extraTiles:    ExtraTile[]
+  groups:        KpiGroup[]
+
+  // Agent data (column-based — one row per agent already)
   agentTable:       string
   agentAccountCol:  string
   agentNameCol:     string

@@ -9,7 +9,8 @@ import type { StatusThresholds } from './utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   loadKpiThresholds, loadStatusThresholds, loadDataSource,
-  saveKpiThresholds, saveStatusThresholds, saveDataSource
+  saveKpiThresholds, saveStatusThresholds, saveDataSource,
+  migrateDataSource
 } from './utils'
 
 export interface AccountSettings {
@@ -37,7 +38,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
                   ? { ...DEFAULT_STATUS_THRESHOLDS, ...data.status_thresholds }
                   : loadStatusThresholds(accountId),
         ds:     data.data_source
-                  ? { ...DEFAULT_DATA_SOURCE,       ...data.data_source       }
+                  ? migrateDataSource(data.data_source)
                   : loadDataSource(accountId),
       }
       // Refresh localStorage cache

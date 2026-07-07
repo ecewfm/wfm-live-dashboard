@@ -1,4 +1,4 @@
-import type { Thresholds, DataSourceConfig } from './types'
+import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile } from './types'
 
 // ── Status thresholds type ────────────────────────────────────────────────────
 export type StatusThresholds = Record<string, { warn: number; crit: number }>
@@ -27,17 +27,69 @@ export const DEFAULT_STATUS_THRESHOLDS: StatusThresholds = {
   'Offline':           { warn: 999, crit: 999 },
 }
 
-// ── Data source presets ───────────────────────────────────────────────────────
+// ── Data source model helpers ─────────────────────────────────────────────────
+export const DEFAULT_KPI_LABELS = { sla: 'SLA %', aht: 'AHT', abn: 'ABN %', wait: 'Awaiting' }
+
+export function genId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+/** A fresh group with no cell bindings. */
+export function newGroup(name = 'Global'): KpiGroup {
+  return { id: genId(), name, cells: {} }
+}
+
+/** Read a single value from the fetched KPI rows using a cell binding.
+ *  Narrows by the group value (groupCol=groupVal) AND the cell's row match, so
+ *  a 2-D table (skill × metric) resolves to exactly one row. */
+export function resolveCell(
+  rows: Record<string, any>[], binding?: CellBinding,
+  groupCol?: string, groupVal?: string
+): string {
+  if (!binding || !binding.valueCol) return ''
+  let cands = rows
+  if (groupCol && groupVal !== undefined && groupVal !== '') {
+    cands = cands.filter(r => String(r[groupCol] ?? '') === String(groupVal))
+  }
+  if (binding.matchCol && binding.matchVal !== undefined && binding.matchVal !== '') {
+    cands = cands.filter(r => String(r[binding.matchCol!] ?? '') === String(binding.matchVal))
+  }
+  const row = cands[0]
+  return row ? String(row[binding.valueCol] ?? '') : ''
+}
+
+/** Color class for an extra tile given its own thresholds + direction. */
+export function getExtraTileColorClass(value: number, t: ExtraTile): string {
+  if (isNaN(value)) return 'text-muted'
+  if (t.higherIsBetter) {
+    // low = bad
+    if (value <= t.crit) return 'text-danger'
+    if (value <= t.warn) return 'text-warning'
+    return 'text-success'
+  }
+  // high = bad
+  if (value >= t.crit) return 'text-danger'
+  if (value >= t.warn) return 'text-warning'
+  return 'text-success'
+}
+
+// ── Data source presets (cell-picker model) ───────────────────────────────────
+// Presets seed the table + a single "Global" group with best-guess value columns.
+// For multi-LOB / tall tables, set the Row-key column and add groups manually.
 export const PRESET_AIRCALL: DataSourceConfig = {
+  version:       2,
   kpiTable:      'wfm_kpi_snapshots',
   kpiAccountCol: 'account_id',
   kpiGroupCol:   '',
-  kpiSlaCol:     'sla',
-  kpiQueueCol:   'calls_waiting',
-  kpiAsaCol:     'time_to_answer',
-  kpiAbnCol:     '',
-  kpiAgentsCol:  'available_users',
+  kpiRowKeyCol:  '',
   kpiUpdatedAt:  'updated_at',
+  kpiLabels:     { ...DEFAULT_KPI_LABELS },
+  extraTiles:    [],
+  groups:        [{ id: 'global', name: 'Global', cells: {
+    sla:  { valueCol: 'sla' },
+    wait: { valueCol: 'calls_waiting' },
+    aht:  { valueCol: 'time_to_answer' },
+  } }],
   agentTable:       'wfm_agent_states',
   agentAccountCol:  'account_id',
   agentNameCol:     'agent_name',
@@ -47,15 +99,19 @@ export const PRESET_AIRCALL: DataSourceConfig = {
 }
 
 export const PRESET_TALKDESK: DataSourceConfig = {
+  version:       2,
   kpiTable:      'talkdesk_lob_kpis',
   kpiAccountCol: 'account_id',
   kpiGroupCol:   'lob_name',
-  kpiSlaCol:     'sla',
-  kpiQueueCol:   'contacts_in_queue',
-  kpiAsaCol:     'aht',
-  kpiAbnCol:     '',
-  kpiAgentsCol:  'agents_logged_in',
+  kpiRowKeyCol:  '',
   kpiUpdatedAt:  'updated_at',
+  kpiLabels:     { ...DEFAULT_KPI_LABELS },
+  extraTiles:    [],
+  groups:        [{ id: 'global', name: 'Global', cells: {
+    sla:  { valueCol: 'sla' },
+    wait: { valueCol: 'contacts_in_queue' },
+    aht:  { valueCol: 'aht' },
+  } }],
   agentTable:       'talkdesk_agent_states',
   agentAccountCol:  'account_id',
   agentNameCol:     'agent_name',
@@ -64,7 +120,64 @@ export const PRESET_TALKDESK: DataSourceConfig = {
   agentDurationSecs:'duration_secs'
 }
 
-export const DEFAULT_DATA_SOURCE = PRESET_AIRCALL
+export const DEFAULT_DATA_SOURCE: DataSourceConfig = {
+  version:       2,
+  kpiTable:      '',
+  kpiAccountCol: 'account_id',
+  kpiGroupCol:   '',
+  kpiRowKeyCol:  '',
+  kpiUpdatedAt:  'updated_at',
+  kpiLabels:     { ...DEFAULT_KPI_LABELS },
+  extraTiles:    [],
+  groups:        [{ id: 'global', name: 'Global', cells: {} }],
+  agentTable:       '',
+  agentAccountCol:  'account_id',
+  agentNameCol:     'name',
+  agentStatusCol:   'state',
+  agentDurationCol: 'duration',
+  agentDurationSecs:''
+}
+
+/** Convert any stored data-source shape (old column-based or new) to the v2 model. */
+export function migrateDataSource(raw: any): DataSourceConfig {
+  if (!raw || typeof raw !== 'object') return JSON.parse(JSON.stringify(DEFAULT_DATA_SOURCE))
+
+  // Already v2
+  if (raw.version === 2 && Array.isArray(raw.groups)) {
+    return {
+      ...JSON.parse(JSON.stringify(DEFAULT_DATA_SOURCE)),
+      ...raw,
+      kpiLabels:  { ...DEFAULT_KPI_LABELS, ...(raw.kpiLabels || {}) },
+      extraTiles: Array.isArray(raw.extraTiles) ? raw.extraTiles : [],
+      groups:     raw.groups.length ? raw.groups : [newGroup()],
+    }
+  }
+
+  // Legacy column-based → single "Global" group with column value-bindings
+  const cells: Record<string, CellBinding> = {}
+  if (raw.kpiSlaCol)   cells.sla  = { valueCol: raw.kpiSlaCol }
+  if (raw.kpiQueueCol) cells.wait = { valueCol: raw.kpiQueueCol }
+  if (raw.kpiAsaCol)   cells.aht  = { valueCol: raw.kpiAsaCol }
+  if (raw.kpiAbnCol)   cells.abn  = { valueCol: raw.kpiAbnCol }
+
+  return {
+    version:       2,
+    kpiTable:      raw.kpiTable      || '',
+    kpiAccountCol: raw.kpiAccountCol || 'account_id',
+    kpiGroupCol:   raw.kpiGroupCol   || '',
+    kpiRowKeyCol:  '',
+    kpiUpdatedAt:  raw.kpiUpdatedAt  || 'updated_at',
+    kpiLabels:     { ...DEFAULT_KPI_LABELS },
+    extraTiles:    [],
+    groups:        [{ id: 'global', name: 'Global', cells }],
+    agentTable:       raw.agentTable       || '',
+    agentAccountCol:  raw.agentAccountCol  || 'account_id',
+    agentNameCol:     raw.agentNameCol     || 'name',
+    agentStatusCol:   raw.agentStatusCol   || 'state',
+    agentDurationCol: raw.agentDurationCol || 'duration',
+    agentDurationSecs:raw.agentDurationSecs|| '',
+  }
+}
 
 // ── localStorage helpers ──────────────────────────────────────────────────────
 export function loadKpiThresholds(accountId: string): Thresholds {
@@ -102,9 +215,9 @@ export function saveStatusThresholds(accountId: string, th: StatusThresholds): v
 export function loadDataSource(accountId: string): DataSourceConfig {
   try {
     const raw = localStorage.getItem(`wfm_ds_${accountId}`)
-    if (raw) return { ...DEFAULT_DATA_SOURCE, ...JSON.parse(raw) }
+    if (raw) return migrateDataSource(JSON.parse(raw))
   } catch {}
-  return { ...DEFAULT_DATA_SOURCE }
+  return JSON.parse(JSON.stringify(DEFAULT_DATA_SOURCE))
 }
 
 export function saveDataSource(accountId: string, ds: DataSourceConfig): void {
@@ -260,20 +373,30 @@ export function getKpiColorClass(
 }
 
 // ── Five9 data source preset ──────────────────────────────────────────────────
+// five9_kpis is a TALL table (one row per metric: kpi_key, label, skill, value).
+// Set Row-key = 'label' and add a group per skill, pinning each KPI to the row
+// whose label/kpi_key matches (via the cell picker).
 export const PRESET_FIVE9: DataSourceConfig = {
+  version:       2,
   kpiTable:      'five9_kpis',
   kpiAccountCol: 'account_id',
   kpiGroupCol:   'skill',
-  kpiSlaCol:     'value',
-  kpiQueueCol:   'value',
-  kpiAsaCol:     'value',
-  kpiAbnCol:     '',
-  kpiAgentsCol:  '',
+  kpiRowKeyCol:  'label',
   kpiUpdatedAt:  'updated_at',
+  kpiLabels:     { ...DEFAULT_KPI_LABELS },
+  extraTiles:    [],
+  groups:        [{ id: 'global', name: 'Global', cells: {} }],
   agentTable:       'five9_agent_states',
   agentAccountCol:  'account_id',
   agentNameCol:     'name',
   agentStatusCol:   'state',
   agentDurationCol: 'duration',
   agentDurationSecs:''
+}
+
+// Uniters uses its own dedicated tables (same tall shape as Five9).
+export const PRESET_UNITERS: DataSourceConfig = {
+  ...JSON.parse(JSON.stringify(PRESET_FIVE9)),
+  kpiTable:   'uniters_kpis',
+  agentTable: 'uniters_agent_states',
 }
