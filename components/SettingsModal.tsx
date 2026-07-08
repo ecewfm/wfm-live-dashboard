@@ -635,10 +635,13 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         if (rk) { binding.matchCol = rk; binding.matchVal = String(row[rk] ?? '') }
         return { ...prev, groups: prev.groups.map(g => {
           if (g.id !== cur.groupId) return g
-          // Pin the group to this row's group value (e.g. skill) so cell picks
-          // in the same group all resolve within the same LOB.
-          const groupVal = prev.kpiGroupCol ? String(row[prev.kpiGroupCol] ?? '') : g.groupVal
-          return { ...g, groupVal, cells: { ...g.cells, [cur.kpiKey]: binding } }
+          // groupVal is set by hand via the group's dropdown (see setGroupVal) —
+          // it must NOT be auto-overwritten here. Every KPI key in this group
+          // shares g.groupVal for highlight matching, so silently changing it
+          // on each pick would retroactively break previously-bound fields'
+          // highlights (e.g. picking "Awaiting" from a different-skill row than
+          // SLA% was picked from would scramble SLA%'s highlight too).
+          return { ...g, cells: { ...g.cells, [cur.kpiKey]: binding } }
         }) }
       })
       return null
@@ -680,10 +683,16 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const cellColor = (row: Record<string, any>, colName: string, ri: number): string | undefined => {
     for (const bd of hiBindings) {
       if (bd.valueCol !== colName) continue
-      if (bd.groupVal !== null && String(row[localDs.kpiGroupCol] ?? '') !== bd.groupVal) continue
       if (bd.matchVal !== null) {
+        // An exact row-key match is authoritative on its own — it already pins
+        // ONE specific row, so a group filter must not additionally veto it.
+        // This also lets one group mix KPIs from different skills (e.g. SLA
+        // from "Service Level 1", Awaiting from "Queue Counter") as long as
+        // each is pinned by matchVal.
         if (!bd.matchCol || String(row[bd.matchCol] ?? '') !== bd.matchVal) continue
-      } else if (bd.groupVal === null && ri !== 0) {
+      } else if (bd.groupVal !== null) {
+        if (String(row[localDs.kpiGroupCol] ?? '') !== bd.groupVal) continue
+      } else if (ri !== 0) {
         continue  // no constraints at all → only the first row is used
       }
       return bd.color
