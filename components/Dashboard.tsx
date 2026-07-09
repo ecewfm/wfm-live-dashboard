@@ -511,6 +511,80 @@ export default function Dashboard() {
   )
 }
 
+// ── Column filter popup — checkbox list + Select All + Apply/Cancel ──────────
+// A fixed full-screen click-catcher sits behind the popup so clicking anywhere
+// outside it closes without applying (same effect as Cancel).
+function ColumnFilterPopup({ options, selected, onApply, onClose }: {
+  options: string[]; selected: Set<string> | null
+  onApply: (vals: Set<string> | null) => void; onClose: () => void
+}) {
+  const [checked, setChecked] = useState<Set<string>>(() => new Set(selected ?? options))
+  const allChecked = checked.size === options.length
+  const toggleAll = () => setChecked(allChecked ? new Set() : new Set(options))
+  const toggle = (v: string) => setChecked(prev => {
+    const next = new Set(prev)
+    if (next.has(v)) next.delete(v); else next.add(v)
+    return next
+  })
+  return (
+    <>
+      <div style={{ position: 'fixed', inset: 0, zIndex: 200 }} onClick={onClose} />
+      <div onClick={e => e.stopPropagation()} style={{
+        position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 201,
+        background: 'var(--bg-card,#fff)', border: '1px solid var(--border,#e1e6e4)',
+        borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,.3)', width: 200,
+        maxHeight: 280, display: 'flex', flexDirection: 'column', fontSize: 12,
+        textTransform: 'none', fontWeight: 400, color: 'var(--text-main)',
+      }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 10px',
+          borderBottom: '1px solid var(--border,#e1e6e4)', fontWeight: 700, cursor: 'pointer' }}>
+          <input type="checkbox" checked={allChecked} onChange={toggleAll} /> Select All
+        </label>
+        <div style={{ overflowY: 'auto', flex: 1, padding: '4px 0' }}>
+          {options.length === 0 && <div style={{ padding: '8px 10px', color: 'var(--text-muted)' }}>No values</div>}
+          {options.map(v => (
+            <label key={v} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', cursor: 'pointer' }}>
+              <input type="checkbox" checked={checked.has(v)} onChange={() => toggle(v)} /> {v || '(blank)'}
+            </label>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 6, padding: 8, borderTop: '1px solid var(--border,#e1e6e4)' }}>
+          <button onClick={onClose} style={{ flex: 1, padding: '6px 8px', borderRadius: 6,
+            border: '1px solid var(--border,#e1e6e4)', background: 'transparent', color: 'var(--text-main)',
+            cursor: 'pointer', fontSize: 12 }}>Cancel</button>
+          <button onClick={() => { onApply(checked.size === options.length ? null : checked); onClose() }}
+            style={{ flex: 1, padding: '6px 8px', borderRadius: 6, border: 'none', background: '#3b82f6',
+            color: '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>Apply</button>
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ── A <th> that opens a ColumnFilterPopup on click; only one open at a time
+// across the table (managed by the parent via isOpen/onToggle/onClose).
+function FilterableTh({ label, options, filter, isOpen, onToggle, onClose, onApply }: {
+  label: string; options: string[]; filter: Set<string> | null
+  isOpen: boolean; onToggle: () => void; onClose: () => void; onApply: (vals: Set<string> | null) => void
+}) {
+  const active = filter !== null
+  return (
+    // th itself stays untouched — .dash-table thead th is `position: sticky`
+    // via CSS, and an inline position:relative here would silently override
+    // it and break the sticky header while scrolling. The popup anchors off
+    // this inner wrapper instead.
+    <th>
+      <div style={{ position: 'relative', display: 'inline-block' }}>
+        <span onClick={onToggle} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer', userSelect: 'none' }}>
+          {label}
+          <i className="bx bx-filter" style={{ fontSize: 13, color: active ? '#3b82f6' : 'var(--text-muted)' }} />
+        </span>
+        {isOpen && <ColumnFilterPopup options={options} selected={filter} onApply={onApply} onClose={onClose} />}
+      </div>
+    </th>
+  )
+}
+
 // ── Dashboard Page ─────────────────────────────────────────────────────────────
 function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, agentTimers, kpiTh, ds }: {
   accountId: string; accountData: AccountData | undefined; breaches: BreachRow[]
@@ -537,6 +611,17 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
     return map
   }, [agents])
   const showAgentGroupHeaders = agentGroups.size > 1
+
+  // Agent Status column filters — Excel-style: click a header, check/uncheck
+  // values, Apply. null = no filter (show everything) for that column.
+  const [nameFilter,   setNameFilter]   = useState<Set<string> | null>(null)
+  const [statusFilter, setStatusFilter] = useState<Set<string> | null>(null)
+  const [openFilterCol, setOpenFilterCol] = useState<'name' | 'status' | null>(null)
+  const nameOptions   = useMemo(() => Array.from(new Set(agents.map(a => String(a._name   ?? '')))).sort(), [agents])
+  const statusOptions = useMemo(() => Array.from(new Set(agents.map(a => String(a._status ?? '')))).sort(), [agents])
+  const passesAgentFilters = (a: any) =>
+    (!nameFilter   || nameFilter.has(String(a._name   ?? ''))) &&
+    (!statusFilter || statusFilter.has(String(a._status ?? '')))
 
   return (
     <>
@@ -590,35 +675,54 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
           <div className="table-card-header green"><i className="bx bx-user-check" style={{ marginRight: 6 }} />Agent Status</div>
           <div className="table-card-body">
             <table className="dash-table">
-              <thead><tr><th>Agent</th><th>Status</th><th>Duration</th></tr></thead>
+              <thead>
+                <tr>
+                  <FilterableTh label="Agent" options={nameOptions} filter={nameFilter}
+                    isOpen={openFilterCol === 'name'}
+                    onToggle={() => setOpenFilterCol(cur => cur === 'name' ? null : 'name')}
+                    onClose={() => setOpenFilterCol(null)}
+                    onApply={setNameFilter} />
+                  <FilterableTh label="Status" options={statusOptions} filter={statusFilter}
+                    isOpen={openFilterCol === 'status'}
+                    onToggle={() => setOpenFilterCol(cur => cur === 'status' ? null : 'status')}
+                    onClose={() => setOpenFilterCol(null)}
+                    onApply={setStatusFilter} />
+                  <th>Duration</th>
+                </tr>
+              </thead>
               <tbody>
                 {agents.length === 0
                   ? <tr><td colSpan={3} className="no-data">No agent data</td></tr>
-                  : Array.from(agentGroups.entries()).flatMap(([groupName, groupAgents]) => {
-                    const rows = groupAgents.map((a, i) => {
-                      const name = String(a._name ?? '')
-                      const key  = `${accountId}:${name}`
-                      const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
-                      return (
-                        <tr key={`${groupName}-${i}`}>
-                          <td style={{ fontWeight: 600 }}>{name}</td>
-                          <td><span className={getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
-                          <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
-                        </tr>
-                      )
+                  : (() => {
+                    const body = Array.from(agentGroups.entries()).flatMap(([groupName, groupAgents]) => {
+                      const filtered = groupAgents.filter(passesAgentFilters)
+                      if (filtered.length === 0) return []
+                      const rows = filtered.map((a, i) => {
+                        const name = String(a._name ?? '')
+                        const key  = `${accountId}:${name}`
+                        const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+                        return (
+                          <tr key={`${groupName}-${i}`}>
+                            <td style={{ fontWeight: 600 }}>{name}</td>
+                            <td><span className={getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
+                            <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
+                          </tr>
+                        )
+                      })
+                      if (!showAgentGroupHeaders || !groupName) return rows
+                      return [
+                        <tr key={`${groupName}-hdr`}>
+                          <td colSpan={3} style={{
+                            background: 'var(--bg-secondary, rgba(127,127,127,.08))', fontWeight: 700,
+                            fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px',
+                            color: 'var(--text-muted)', padding: '6px 12px',
+                          }}>{groupName}</td>
+                        </tr>,
+                        ...rows,
+                      ]
                     })
-                    if (!showAgentGroupHeaders || !groupName) return rows
-                    return [
-                      <tr key={`${groupName}-hdr`}>
-                        <td colSpan={3} style={{
-                          background: 'var(--bg-secondary, rgba(127,127,127,.08))', fontWeight: 700,
-                          fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px',
-                          color: 'var(--text-muted)', padding: '6px 12px',
-                        }}>{groupName}</td>
-                      </tr>,
-                      ...rows,
-                    ]
-                  })
+                    return body.length > 0 ? body : <tr><td colSpan={3} className="no-data">No agents match the current filter</td></tr>
+                  })()
                 }
               </tbody>
             </table>
