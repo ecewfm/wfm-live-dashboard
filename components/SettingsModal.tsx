@@ -21,19 +21,6 @@ const KPI_ROWS: { key: keyof Thresholds; label: string; sublabel: string; unit: 
   { key: 'wait', label: 'Calls Waiting', sublabel: 'Current Queue Depth',            unit: ''  },
 ]
 
-const STATUS_ROWS: { key: string; label: string }[] = [
-  { key: 'Ringing',         label: 'Ringing'         },
-  { key: 'In call',         label: 'In Call'          },
-  { key: 'After call work', label: 'After Call Work'  },
-  { key: 'On a break',      label: 'On a Break'       },
-  { key: 'Out for lunch',   label: 'Out for Lunch'    },
-  { key: 'Do not disturb',  label: 'Do Not Disturb'   },
-  { key: 'Not available',   label: 'Not Available'    },
-  { key: 'Back office',     label: 'Back Office'      },
-  { key: 'In training',     label: 'In Training'      },
-  { key: 'Other',           label: 'Other'            },
-]
-
 // ── All modal CSS self-contained — no globals.css dependency ──────────────────
 const MODAL_STYLES = `
   .sm-overlay {
@@ -1085,6 +1072,55 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
   const [ds, setDs]     = useState<DataSourceConfig>(JSON.parse(JSON.stringify(dataSource)))
 
+  // ── Dynamic status discovery ────────────────────────────────────────────────
+  // Every CRM/account uses its own status vocabulary (Aircall's "Ringing" vs
+  // ZenBusiness's "15 Minute Break"/"Working Contacts"/"Bathroom Break") — a
+  // fixed hardcoded list can never cover all of them. Instead, query whatever
+  // Agent Data Source(s) this account is actually configured with (same
+  // tables the Dashboard's Agent Status list reads from) and show whichever
+  // status strings genuinely show up, so the list is always right for this
+  // specific account instead of a generic one-size-fits-all set.
+  const statSupaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+  const statSupaKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  const [discoveredStatuses, setDiscoveredStatuses] = useState<string[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    async function discover() {
+      const sources: { table: string; statusCol: string; accountCol: string }[] = []
+      if (ds.agentTable && ds.agentStatusCol) {
+        sources.push({ table: ds.agentTable, statusCol: ds.agentStatusCol, accountCol: ds.agentAccountCol || 'account_id' })
+      }
+      ;(ds.agentSources || []).forEach(s => {
+        if (s.table && s.statusCol) sources.push({ table: s.table, statusCol: s.statusCol, accountCol: s.accountCol || 'account_id' })
+      })
+      if (sources.length === 0) { if (!cancelled) setDiscoveredStatuses([]); return }
+
+      const results = await Promise.all(sources.map(async src => {
+        try {
+          const url = `${statSupaUrl}/rest/v1/${src.table}?select=${encodeURIComponent(src.statusCol)}&${encodeURIComponent(src.accountCol)}=eq.${encodeURIComponent(accountId)}&limit=1000`
+          const res = await fetch(url, { headers: { apikey: statSupaKey, Authorization: `Bearer ${statSupaKey}` } })
+          if (!res.ok) return []
+          const rows = await res.json()
+          return Array.isArray(rows) ? rows.map((r: any) => String(r[src.statusCol] ?? '').trim()).filter(Boolean) : []
+        } catch { return [] }
+      }))
+      if (!cancelled) setDiscoveredStatuses(Array.from(new Set(results.flat())).sort((a, b) => a.localeCompare(b)))
+    }
+    discover()
+    return () => { cancelled = true }
+  }, [ds.agentTable, ds.agentAccountCol, ds.agentStatusCol, JSON.stringify(ds.agentSources), accountId, statSupaUrl, statSupaKey])
+
+  // Rows shown = discovered live statuses, PLUS any status already explicitly
+  // configured (so a prior custom threshold doesn't disappear just because
+  // that status didn't happen to appear in this particular fetch), MINUS the
+  // old generic default keys unless they're also actually live for this
+  // account — otherwise every account would always show the same irrelevant
+  // legacy list underneath the real ones.
+  const legacyDefaultKeys = new Set(Object.keys(DEFAULT_STATUS_THRESHOLDS))
+  const customConfiguredKeys = Object.keys(stat).filter(k => !legacyDefaultKeys.has(k))
+  const statusRows = Array.from(new Set([...discoveredStatuses, ...customConfiguredKeys])).sort((a, b) => a.localeCompare(b))
+
   const updateKpi = (key: keyof Thresholds, field: string, rawVal: string) => {
     const value = field === 'direction' ? rawVal : (parseFloat(rawVal) || 0)
     setKpi(prev => ({ ...prev, [key]: { ...prev[key], [field]: value } }))
@@ -1095,16 +1131,30 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       [key]: { ...prev[key], direction: prev[key].direction === 'asc' ? 'desc' : 'asc' }
     }))
   }
+  // Clearing a field (empty string) reverts that status to "N/A" (999 is the
+  // existing "disabled, never breach" sentinel already used elsewhere in this
+  // codebase, e.g. DEFAULT_STATUS_THRESHOLDS.Offline/Available) — so a newly
+  // discovered status never breaches until someone deliberately sets real
+  // numbers for it.
   const updateStat = (statusKey: string, field: 'warn' | 'crit', rawVal: string) => {
     setStat(prev => ({
       ...prev,
-      [statusKey]: { ...(prev[statusKey] ?? { warn: 15, crit: 30 }), [field]: parseInt(rawVal) || 0 }
+      [statusKey]: {
+        ...(prev[statusKey] ?? { warn: 999, crit: 999 }),
+        [field]: rawVal.trim() === '' ? 999 : (parseInt(rawVal) || 0),
+      }
     }))
   }
 
   const handleReset = () => {
-    if (tab === 'kpi')        setKpi(JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)))
-    if (tab === 'status')     setStat(JSON.parse(JSON.stringify(DEFAULT_STATUS_THRESHOLDS)))
+    if (tab === 'kpi')    setKpi(JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)))
+    if (tab === 'status') {
+      // Reset means "back to N/A for everything currently shown" — not the
+      // old generic list, which usually isn't even relevant for this account.
+      const reset: StatusThresholds = {}
+      statusRows.forEach(key => { reset[key] = { warn: 999, crit: 999 } })
+      setStat(reset)
+    }
   }
 
   return (
@@ -1224,16 +1274,22 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     <tr><th style={{ width: '40%' }}>Status</th><th>Warning (min)</th><th>Critical (min)</th></tr>
                   </thead>
                   <tbody>
-                    {STATUS_ROWS.map(row => {
-                      const th = stat[row.key] ?? { warn: 15, crit: 30 }
+                    {statusRows.length === 0 ? (
+                      <tr><td colSpan={3} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                        No agent statuses discovered yet — set up an Agent Data Source on the Data Sources tab first
+                        (or check back once the scraper has written some data).
+                      </td></tr>
+                    ) : statusRows.map(key => {
+                      const th = stat[key] ?? { warn: 999, crit: 999 }
                       return (
-                        <tr key={row.key}>
-                          <td><div className="sm-metric">{row.label}</div></td>
+                        <tr key={key}>
+                          <td><div className="sm-metric">{key}</div></td>
                           {(['warn','crit'] as const).map(f => (
                             <td key={f}>
                               <div className="sm-input-cell">
-                                <input type="number" className="sm-input" value={th[f]} min={0}
-                                  onChange={e => updateStat(row.key, f, e.target.value)} />
+                                <input type="number" className="sm-input" min={0}
+                                  value={th[f] >= 999 ? '' : th[f]} placeholder="N/A"
+                                  onChange={e => updateStat(key, f, e.target.value)} />
                                 <span className="sm-unit">min</span>
                               </div>
                             </td>
