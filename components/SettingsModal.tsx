@@ -451,23 +451,32 @@ const AGENT_SLOTS = [
 // ── Module-level sub-components — MUST be outside DataSourcesTab ─────────────
 // If defined inside, React remounts them on every render → scroll resets.
 
-const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle }: {
+const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle, onClear }: {
   slotKey: string; label: string; hint: string
-  isActive: boolean; value: string; onToggle: (k: string) => void
+  isActive: boolean; value: string; onToggle: (k: string) => void; onClear?: (k: string) => void
 }) => {
   const color = SLOT_COLORS[slotKey] || '#888'
+  // Empty slot → click arms it for picking (existing behavior). Already-armed
+  // slot → click cancels. Already-mapped, not-armed slot → click clears it —
+  // otherwise there was no way back to "unmapped" short of picking a
+  // different column, which is exactly how a wrong mapping (e.g. Duration
+  // (secs) pointed at a formatted-text column) could get stuck with no fix.
+  const handleClick = () => {
+    if (!isActive && value && onClear) { onClear(slotKey); return }
+    onToggle(slotKey)
+  }
   return (
-    <div onClick={() => onToggle(slotKey)}
+    <div onClick={handleClick}
       style={{ border: `2px solid ${isActive ? color : 'var(--border,#e1e6e4)'}`,
         borderRadius: 8, overflow: 'hidden', cursor: 'pointer',
         animation: isActive ? 'slot-pulse 1s ease-in-out infinite' : 'none',
         transition: 'border-color 0.15s', background: 'var(--bg-body,#f0f2f1)', minWidth: 0 }}
-      title={hint}>
+      title={!isActive && value && onClear ? `${hint} — click to clear` : hint}>
       <div style={{ background: color, padding: '5px 10px', color: '#fff',
         fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span>{label}</span>
-        {value && <i className="bx bx-check" style={{ fontSize: 12 }} />}
+        {value && <i className={`bx ${onClear ? 'bx-x' : 'bx-check'}`} style={{ fontSize: 12 }} />}
       </div>
       <div style={{ padding: '6px 10px', fontSize: 12, fontWeight: 600,
         color: value ? color : 'var(--text-muted,#687d75)',
@@ -477,7 +486,7 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
       </div>
     </div>
   )
-}, (p, n) => p.isActive === n.isActive && p.value === n.value && p.onToggle === n.onToggle)
+}, (p, n) => p.isActive === n.isActive && p.value === n.value && p.onToggle === n.onToggle && p.onClear === n.onClear)
 
 const DsPreviewTable = React.memo(({ rows, mappedCols, hasActiveSlot, onMap }: {
   rows: Record<string, any>[]; mappedCols: Record<string, string>
@@ -617,7 +626,8 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, onChange, onRemove 
       <div className="ds-slot-grid">
         {AGENT_SOURCE_SLOTS.map(s => <DsSlotCard key={s.key} slotKey={s.key} label={s.label} hint={s.hint}
           isActive={activeSlot === s.key} value={(source as any)[s.key] || ''}
-          onToggle={k => setActiveSlot(cur => cur === k ? null : k)} />)}
+          onToggle={k => setActiveSlot(cur => cur === k ? null : k)}
+          onClear={k => onChange({ [k]: '' } as Partial<AgentSource>)} />)}
       </div>
       {activeSlot && (
         <div className="ds-active-bar">
@@ -1024,7 +1034,8 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         <div className="ds-slot-grid">
           {AGENT_SLOTS.map(s => <DsSlotCard key={s.key} slotKey={s.key} label={s.label} hint={s.hint}
             isActive={activeAgentSlot === s.key} value={(localDs as any)[s.key] || ''}
-            onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)} />)}
+            onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
+            onClear={k => setField(k, '')} />)}
         </div>
         {activeAgentSlot && (
           <div className="ds-active-bar">
