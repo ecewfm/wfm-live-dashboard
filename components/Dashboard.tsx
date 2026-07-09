@@ -217,9 +217,17 @@ export default function Dashboard() {
         const next = { ...prev }
         agents.forEach(a => {
           const key  = `${accId}:${String(a._name ?? '')}`
-          const secs = a._durationSecs
-            ? (parseInt(String(a._durationSecs)) || 0)
-            : parseDurationToSeconds(String(a._duration ?? ''))
+          // parseDurationToSeconds (not parseInt) for BOTH fields — it already
+          // handles a plain integer string correctly, but also correctly
+          // parses "HH:MM:SS"/"MM:SS" text. parseInt() on "01:55:04" silently
+          // returns 1 (stops at the colon), so if "Duration (secs)" ever gets
+          // mapped to a formatted-text column by mistake (e.g. a duration
+          // column reused for both slots), every agent's real time was
+          // getting thrown away in favor of ~0-1s, then all ticking up
+          // together from the shared 1s/interval clock below — which is why
+          // every agent showed the same tiny number instead of their actual
+          // duration.
+          const secs = parseDurationToSeconds(String(a._durationSecs || a._duration || ''))
           next[key] = secs
         })
         return next
