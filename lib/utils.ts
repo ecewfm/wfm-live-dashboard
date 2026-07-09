@@ -1,7 +1,10 @@
 import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, AgentSource, DashboardLayout } from './types'
 
 // ── Status thresholds type ────────────────────────────────────────────────────
-export type StatusThresholds = Record<string, { warn: number; crit: number }>
+// excluded: statuses like "Logged Out"/"Offline" that shouldn't be breach-
+// checked OR shown in the Agent Status table at all — separate from just
+// setting warn/crit to N/A (999), which still leaves the agent visible.
+export type StatusThresholds = Record<string, { warn: number; crit: number; excluded?: boolean }>
 
 // ── Default KPI thresholds ────────────────────────────────────────────────────
 export const DEFAULT_THRESHOLDS: Thresholds = {

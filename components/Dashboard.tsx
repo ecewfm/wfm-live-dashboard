@@ -130,7 +130,7 @@ function buildBreaches(
   accountData.agents.forEach(a => {
     const status = String(a._status ?? '')
     const thSt   = statusTh[status]
-    if (!thSt || thSt.crit >= 999) return
+    if (!thSt || thSt.crit >= 999 || thSt.excluded) return
     const name  = String(a._name ?? '')
     const key   = `${accountId}:${name}`
     const secs  = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
@@ -504,6 +504,7 @@ export default function Dashboard() {
               onAck={() => setAlertAcked(true)}
               agentTimers={agentTimers}
               kpiTh={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
+              statusTh={statusThresholds[currentAccount] ?? DEFAULT_STATUS_THRESHOLDS}
               ds={currentDs}
               layout={dashboardLayouts[currentAccount] ?? EMPTY_LAYOUT}
               onLayoutChange={layout => {
@@ -581,9 +582,34 @@ function ColumnFilterPopup({ options, selected, onApply, onClose }: {
 
 // ── A <th> that opens a ColumnFilterPopup on click; only one open at a time
 // across the table (managed by the parent via isOpen/onToggle/onClose).
-function FilterableTh({ label, options, filter, isOpen, onToggle, onClose, onApply }: {
+// Small sort indicator shared by SortableTh and FilterableTh — neutral icon
+// when this column isn't the active sort, a directional chevron when it is.
+function SortIcon({ active, dir }: { active: boolean; dir: 'asc' | 'desc' }) {
+  return (
+    <i className={`bx ${active ? (dir === 'asc' ? 'bx-chevron-up' : 'bx-chevron-down') : 'bx-sort-alt-2'}`}
+      style={{ fontSize: 13, color: active ? '#3b82f6' : 'var(--text-muted)' }} />
+  )
+}
+
+// Plain sortable header — click anywhere to toggle asc/desc (or set this as
+// the sort column if a different one was active).
+function SortableTh({ label, active, dir, onClick }: {
+  label: string; active: boolean; dir: 'asc' | 'desc'; onClick: () => void
+}) {
+  return (
+    <th onClick={onClick} style={{ cursor: 'pointer', userSelect: 'none' }}>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        {label}
+        <SortIcon active={active} dir={dir} />
+      </span>
+    </th>
+  )
+}
+
+function FilterableTh({ label, options, filter, isOpen, onToggle, onClose, onApply, sortActive, sortDir, onSort }: {
   label: string; options: string[]; filter: Set<string> | null
   isOpen: boolean; onToggle: () => void; onClose: () => void; onApply: (vals: Set<string> | null) => void
+  sortActive: boolean; sortDir: 'asc' | 'desc'; onSort: () => void
 }) {
   const active = filter !== null
   return (
@@ -592,11 +618,16 @@ function FilterableTh({ label, options, filter, isOpen, onToggle, onClose, onApp
     // it and break the sticky header while scrolling. The popup anchors off
     // this inner wrapper instead.
     <th>
-      <div style={{ position: 'relative', display: 'inline-block' }}>
-        <span onClick={onToggle} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer', userSelect: 'none' }}>
+      <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        {/* Clicking the label sorts; clicking the funnel icon opens the
+            filter popup instead — stopPropagation so one click doesn't
+            trigger both. */}
+        <span onClick={onSort} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer', userSelect: 'none' }}>
           {label}
-          <i className="bx bx-filter" style={{ fontSize: 13, color: active ? '#3b82f6' : 'var(--text-muted)' }} />
+          <SortIcon active={sortActive} dir={sortDir} />
         </span>
+        <i className="bx bx-filter" onClick={e => { e.stopPropagation(); onToggle() }}
+          style={{ cursor: 'pointer', fontSize: 13, color: active ? '#3b82f6' : 'var(--text-muted)' }} />
         {isOpen && <ColumnFilterPopup options={options} selected={filter} onApply={onApply} onClose={onClose} />}
       </div>
     </th>
@@ -710,10 +741,10 @@ function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, ico
 }
 
 // ── Dashboard Page ─────────────────────────────────────────────────────────────
-function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, agentTimers, kpiTh, ds, layout, onLayoutChange }: {
+function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, agentTimers, kpiTh, statusTh, ds, layout, onLayoutChange }: {
   accountId: string; accountData: AccountData | undefined; breaches: BreachRow[]
   alertAcked: boolean; onAck: () => void; agentTimers: Record<string, number>
-  kpiTh: Thresholds; ds: DataSourceConfig
+  kpiTh: Thresholds; statusTh: StatusThresholds; ds: DataSourceConfig
   layout: DashboardLayout; onLayoutChange: (layout: DashboardLayout) => void
 }) {
   const agents  = accountData?.agents ?? []
@@ -770,8 +801,51 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
   const nameOptions   = useMemo(() => Array.from(new Set(agents.map(a => String(a._name   ?? '')))).sort(), [agents])
   const statusOptions = useMemo(() => Array.from(new Set(agents.map(a => String(a._status ?? '')))).sort(), [agents])
   const passesAgentFilters = (a: any) =>
+    !statusTh[String(a._status ?? '')]?.excluded &&
     (!nameFilter   || nameFilter.has(String(a._name   ?? ''))) &&
     (!statusFilter || statusFilter.has(String(a._status ?? '')))
+
+  // Agent Status sort — click a header to sort by it; click the same header
+  // again to flip direction. Duration sorts by actual seconds (agentTimers/
+  // parsed), not the formatted "1h 55m" string, so it orders correctly.
+  type AgentSortCol = 'name' | 'status' | 'duration'
+  const [agentSort, setAgentSort] = useState<{ col: AgentSortCol; dir: 'asc' | 'desc' } | null>(null)
+  const toggleAgentSort = (col: AgentSortCol) =>
+    setAgentSort(prev => prev && prev.col === col ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
+  const agentSortValue = (a: any, col: AgentSortCol): string | number => {
+    if (col === 'name')   return String(a._name ?? '').toLowerCase()
+    if (col === 'status') return String(a._status ?? '').toLowerCase()
+    const key = `${accountId}:${String(a._name ?? '')}`
+    return agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+  }
+  const sortAgentRows = (list: any[]): any[] => {
+    if (!agentSort) return list
+    const { col, dir } = agentSort
+    return [...list].sort((a, b) => {
+      const av = agentSortValue(a, col), bv = agentSortValue(b, col)
+      if (av < bv) return dir === 'asc' ? -1 : 1
+      if (av > bv) return dir === 'asc' ? 1 : -1
+      return 0
+    })
+  }
+
+  // Breach / Anomalies sort — same click-to-toggle pattern. Tries a numeric
+  // compare first (Value/Threshold carry units like "76" or "<3%"), falling
+  // back to a case-insensitive string compare for purely textual columns.
+  type BreachSortCol = 'entity' | 'metric' | 'value' | 'threshold'
+  const [breachSort, setBreachSort] = useState<{ col: BreachSortCol; dir: 'asc' | 'desc' } | null>(null)
+  const toggleBreachSort = (col: BreachSortCol) =>
+    setBreachSort(prev => prev && prev.col === col ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' })
+  const sortedBreaches = useMemo(() => {
+    if (!breachSort) return breaches
+    const { col, dir } = breachSort
+    return [...breaches].sort((a, b) => {
+      const rawA = String(a[col] ?? ''), rawB = String(b[col] ?? '')
+      const numA = parseFloat(rawA), numB = parseFloat(rawB)
+      const cmp = (!isNaN(numA) && !isNaN(numB)) ? numA - numB : rawA.toLowerCase().localeCompare(rawB.toLowerCase())
+      return dir === 'asc' ? cmp : -cmp
+    })
+  }, [breaches, breachSort])
 
   return (
     <>
@@ -806,11 +880,18 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
         <LayoutPanel id="breach" rect={liveLayout.breach ?? effectiveLayout.breach} headerColor="var(--danger,#c0392b)" icon="bx-error-circle"
           title="Breach / Anomalies" onChange={handlePanelChange} onCommit={handlePanelCommit}>
           <table className="dash-table">
-            <thead><tr><th>Queue / Agent</th><th>Metric</th><th>Value</th><th>Threshold</th></tr></thead>
+            <thead>
+              <tr>
+                <SortableTh label="Queue / Agent" active={breachSort?.col === 'entity'}    dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('entity')} />
+                <SortableTh label="Metric"        active={breachSort?.col === 'metric'}    dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('metric')} />
+                <SortableTh label="Value"         active={breachSort?.col === 'value'}     dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('value')} />
+                <SortableTh label="Threshold"     active={breachSort?.col === 'threshold'} dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('threshold')} />
+              </tr>
+            </thead>
             <tbody>
-              {breaches.length === 0
+              {sortedBreaches.length === 0
                 ? <tr><td colSpan={4} className="no-data">No breaches detected</td></tr>
-                : breaches.map((b, i) => (
+                : sortedBreaches.map((b, i) => (
                   <tr key={i}>
                     <td style={{ fontWeight: 600 }}>{b.entity}</td>
                     <td>{b.metric}</td>
@@ -832,13 +913,18 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
                   isOpen={openFilterCol === 'name'}
                   onToggle={() => setOpenFilterCol(cur => cur === 'name' ? null : 'name')}
                   onClose={() => setOpenFilterCol(null)}
-                  onApply={setNameFilter} />
+                  onApply={setNameFilter}
+                  sortActive={agentSort?.col === 'name'} sortDir={agentSort?.dir ?? 'asc'}
+                  onSort={() => toggleAgentSort('name')} />
                 <FilterableTh label="Status" options={statusOptions} filter={statusFilter}
                   isOpen={openFilterCol === 'status'}
                   onToggle={() => setOpenFilterCol(cur => cur === 'status' ? null : 'status')}
                   onClose={() => setOpenFilterCol(null)}
-                  onApply={setStatusFilter} />
-                <th>Duration</th>
+                  onApply={setStatusFilter}
+                  sortActive={agentSort?.col === 'status'} sortDir={agentSort?.dir ?? 'asc'}
+                  onSort={() => toggleAgentSort('status')} />
+                <SortableTh label="Duration" active={agentSort?.col === 'duration'} dir={agentSort?.dir ?? 'asc'}
+                  onClick={() => toggleAgentSort('duration')} />
               </tr>
             </thead>
             <tbody>
@@ -846,7 +932,7 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
                 ? <tr><td colSpan={3} className="no-data">No agent data</td></tr>
                 : (() => {
                   const body = Array.from(agentGroups.entries()).flatMap(([groupName, groupAgents]) => {
-                    const filtered = groupAgents.filter(passesAgentFilters)
+                    const filtered = sortAgentRows(groupAgents.filter(passesAgentFilters))
                     if (filtered.length === 0) return []
                     const rows = filtered.map((a, i) => {
                       const name = String(a._name ?? '')

@@ -1146,6 +1146,19 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
     }))
   }
 
+  // Excluded statuses (e.g. "Logged Out", "Offline") never breach AND are
+  // hidden from the Agent Status table on the actual Dashboard — stronger
+  // than just leaving warn/crit at N/A, which still leaves the agent visible.
+  const toggleExcluded = (statusKey: string) => {
+    setStat(prev => ({
+      ...prev,
+      [statusKey]: {
+        ...(prev[statusKey] ?? { warn: 999, crit: 999 }),
+        excluded: !(prev[statusKey]?.excluded),
+      }
+    }))
+  }
+
   const handleReset = () => {
     if (tab === 'kpi')    setKpi(JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)))
     if (tab === 'status') {
@@ -1267,33 +1280,39 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
               <>
                 <p className="sm-desc">
                   Set how long (in <strong>minutes</strong>) an agent can stay in each status before a breach.
+                  Check <strong>Exclude</strong> for statuses like "Logged Out" or "Offline" that shouldn't be
+                  tracked at all — excluded statuses never breach and are hidden from the Agent Status table.
                 </p>
                 <div className="sm-section-title">AGENT STATUS DURATION THRESHOLDS</div>
                 <table className="sm-table">
                   <thead>
-                    <tr><th style={{ width: '40%' }}>Status</th><th>Warning (min)</th><th>Critical (min)</th></tr>
+                    <tr><th style={{ width: '34%' }}>Status</th><th>Warning (min)</th><th>Critical (min)</th><th>Exclude</th></tr>
                   </thead>
                   <tbody>
                     {statusRows.length === 0 ? (
-                      <tr><td colSpan={3} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                      <tr><td colSpan={4} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
                         No agent statuses discovered yet — set up an Agent Data Source on the Data Sources tab first
                         (or check back once the scraper has written some data).
                       </td></tr>
                     ) : statusRows.map(key => {
                       const th = stat[key] ?? { warn: 999, crit: 999 }
+                      const excluded = !!th.excluded
                       return (
                         <tr key={key}>
                           <td><div className="sm-metric">{key}</div></td>
                           {(['warn','crit'] as const).map(f => (
                             <td key={f}>
                               <div className="sm-input-cell">
-                                <input type="number" className="sm-input" min={0}
+                                <input type="number" className="sm-input" min={0} disabled={excluded}
                                   value={th[f] >= 999 ? '' : th[f]} placeholder="N/A"
                                   onChange={e => updateStat(key, f, e.target.value)} />
                                 <span className="sm-unit">min</span>
                               </div>
                             </td>
                           ))}
+                          <td style={{ textAlign: 'center' }}>
+                            <input type="checkbox" checked={excluded} onChange={() => toggleExcluded(key)} />
+                          </td>
                         </tr>
                       )
                     })}
