@@ -358,18 +358,26 @@ export function parseDurationToSeconds(str: string | null | undefined): number {
     if (parts.length === 2) return parts[0] * 60 + parts[1]
   }
   let total = 0
-  const h = s.match(/(\d+)\s*h/i);  if (h)  total += parseInt(h[1]) * 3600
-  const m = s.match(/(\d+)\s*m(?!s)/i); if (m) total += parseInt(m[1]) * 60
+  // "d" (days) must be checked — some sources (e.g. Aircall's own offline-
+  // duration text, "2d 0h") report multi-day durations, and without this the
+  // days silently vanished: "2d 0h" matched only "0h" -> 0 seconds, so the
+  // timer looked like it kept resetting near zero every poll instead of
+  // showing the real multi-day duration.
+  const d  = s.match(/(\d+)\s*d/i);  if (d)  total += parseInt(d[1]) * 86400
+  const h  = s.match(/(\d+)\s*h/i);  if (h)  total += parseInt(h[1]) * 3600
+  const m  = s.match(/(\d+)\s*m(?!s)/i); if (m) total += parseInt(m[1]) * 60
   const sc = s.match(/(\d+)\s*s/i); if (sc) total += parseInt(sc[1])
   return total
 }
 
 export function formatSeconds(totalSec: number): string {
   totalSec = Math.round(Math.max(0, totalSec))
-  const h = Math.floor(totalSec / 3600)
+  const d = Math.floor(totalSec / 86400)
+  const h = Math.floor((totalSec % 86400) / 3600)
   const m = Math.floor((totalSec % 3600) / 60)
   const s = totalSec % 60
   const parts: string[] = []
+  if (d > 0) parts.push(`${d}d`)
   if (h > 0) parts.push(`${h}h`)
   if (m > 0) parts.push(`${m}m`)
   if (s > 0 || parts.length === 0) parts.push(`${s}s`)
