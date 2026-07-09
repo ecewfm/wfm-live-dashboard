@@ -28,6 +28,22 @@ function col(row: Record<string, any> | null, colName: string): string {
   return String(row[colName] ?? '')
 }
 
+// ── Freshest updated_at across all of an account's KPI rows ───────────────────
+// Rows are fetched with no guaranteed order, and an orphaned row from a LOB the
+// scraper no longer reports (never re-written, so it stays frozen at whatever
+// time it last succeeded) can otherwise get picked arbitrarily and make the
+// whole card look stale even though the LOBs actually shown are live. Using the
+// MAX across all rows reflects whether the account is actually being scraped.
+function mostRecentUpdatedAt(rows: Record<string, any>[], colName: string): string | undefined {
+  let best: string | undefined
+  for (const row of rows) {
+    const v = row?.[colName]
+    if (!v) continue
+    if (!best || new Date(v).getTime() > new Date(best).getTime()) best = v
+  }
+  return best
+}
+
 // ── Build breaches for one account ────────────────────────────────────────────
 function buildBreaches(
   accountId: string, accountData: AccountData | undefined,
@@ -341,8 +357,10 @@ export default function Dashboard() {
   const currentData = data[currentAccount]
   const currentDs   = dataSources[currentAccount] ?? DEFAULT_DATA_SOURCE
   const breaches    = allBreaches[currentAccount] ?? []
-  const anyRow      = currentData?.kpiRows[0] ?? currentData?.kpi
-  const stale       = isDataStale(anyRow ? col(anyRow, currentDs.kpiUpdatedAt) : undefined)
+  const currentFreshest = currentData?.kpiRows?.length
+    ? mostRecentUpdatedAt(currentData.kpiRows, currentDs.kpiUpdatedAt)
+    : (currentData?.kpi ? col(currentData.kpi, currentDs.kpiUpdatedAt) : undefined)
+  const stale       = isDataStale(currentFreshest)
 
   return (
     <div id="layout-wrapper" className={isDark ? 'dark' : ''}>
@@ -682,8 +700,8 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
 }) {
   const kpiRows = accountData?.kpiRows ?? []
   const groups  = ds.groups ?? []
-  const anyRow  = kpiRows[0] ?? null
-  const stale   = isDataStale(anyRow ? col(anyRow, ds.kpiUpdatedAt) : undefined)
+  const freshestUpdatedAt = mostRecentUpdatedAt(kpiRows, ds.kpiUpdatedAt)
+  const stale   = isDataStale(freshestUpdatedAt)
   const hasCrit = breaches.some(b => b.severity === 'critical')
 
   return (
@@ -775,7 +793,7 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
 
       <div className="overview-card-footer">
         <i className="bx bx-time-five" />
-        Updated: {anyRow ? formatTime(col(anyRow, ds.kpiUpdatedAt)) : 'Waiting for data...'}
+        Updated: {freshestUpdatedAt ? formatTime(freshestUpdatedAt) : 'Waiting for data...'}
         {stale && <span style={{ color: 'var(--danger)', marginLeft: 6, fontWeight: 600 }}>⚠ Stale</span>}
       </div>
     </>
