@@ -1174,10 +1174,15 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     {KPI_ROWS.map(row => {
                       const th = kpi[row.key]
                       const isAsc = th.direction === 'asc'
+                      // Prefer this account's custom tile name (set on the Data
+                      // Sources tab) over the generic default, so a renamed KPI
+                      // (e.g. "AWAITING" → "Total Calls") shows the same name
+                      // here instead of reverting to the hardcoded default.
+                      const label = ds.kpiLabels?.[row.key] || row.label
                       return (
                         <tr key={row.key}>
                           <td>
-                            <div className="sm-metric">{row.label}</div>
+                            <div className="sm-metric">{label}</div>
                             <div className="sm-metric-sub">{row.sublabel}</div>
                           </td>
                           {(['warn','crit','targ'] as const).map(f => (
