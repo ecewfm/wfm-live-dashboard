@@ -138,6 +138,13 @@ export interface DataSourceConfig {
   agentSources:  AgentSource[]
 }
 
+// ── Dashboard panel layout (Dashboard page — KPI groups, Breach, Agent Status)
+// Per-account, saved to wfm_settings.dashboard_layout. Panel ids: "kpi:<groupId>",
+// "breach", "agents". Positions are plain pixels within the page's own layout
+// container — see the LayoutPanel component in Dashboard.tsx.
+export interface PanelRect { x: number; y: number; w: number; h: number }
+export type DashboardLayout = Record<string, PanelRect>
+
 export interface AgentSource {
   id:               string   // stable id for React keys / add-remove
   label:            string   // static group label for rows from this source (ignored when groupByCol is set)

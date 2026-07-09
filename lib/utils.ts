@@ -1,4 +1,4 @@
-import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, AgentSource } from './types'
+import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, AgentSource, DashboardLayout } from './types'
 
 // ── Status thresholds type ────────────────────────────────────────────────────
 export type StatusThresholds = Record<string, { warn: number; crit: number }>
@@ -245,6 +245,36 @@ export function loadDataSource(accountId: string): DataSourceConfig {
 
 export function saveDataSource(accountId: string, ds: DataSourceConfig): void {
   try { localStorage.setItem(`wfm_ds_${accountId}`, JSON.stringify(ds)) } catch {}
+}
+
+// ── Dashboard panel layout (drag/resize) ──────────────────────────────────────
+export function loadDashboardLayout(accountId: string): DashboardLayout {
+  try {
+    const raw = localStorage.getItem(`wfm_layout_${accountId}`)
+    if (raw) return JSON.parse(raw)
+  } catch {}
+  return {}
+}
+
+export function saveDashboardLayoutLocal(accountId: string, layout: DashboardLayout): void {
+  try { localStorage.setItem(`wfm_layout_${accountId}`, JSON.stringify(layout)) } catch {}
+}
+
+/** Default panel positions for panel ids not yet present in a saved layout —
+ *  stacked KPI group rows, then Breach/Anomalies + Agent Status side by side.
+ *  Matches the original fixed flex layout's visual arrangement so a fresh
+ *  account (no custom layout saved yet) looks the same as before this
+ *  feature existed. */
+export function defaultDashboardLayout(kpiGroupIds: string[]): DashboardLayout {
+  const layout: DashboardLayout = {}
+  let y = 0
+  kpiGroupIds.forEach(gid => {
+    layout[`kpi:${gid}`] = { x: 0, y, w: 1180, h: 150 }
+    y += 166
+  })
+  layout['breach'] = { x: 0,   y, w: 580, h: 360 }
+  layout['agents'] = { x: 600, y, w: 580, h: 360 }
+  return layout
 }
 
 // ── Supabase schema helpers ───────────────────────────────────────────────────

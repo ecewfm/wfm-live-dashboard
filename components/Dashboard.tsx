@@ -3,8 +3,8 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
-import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource } from '@/lib/types'
-import { loadSettings, saveSettings, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount, type AccountConfig } from '@/lib/settings'
+import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect } from '@/lib/types'
+import { loadSettings, saveSettings, saveDashboardLayout, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount, type AccountConfig } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds,
@@ -12,10 +12,17 @@ import {
   loadKpiThresholds, saveKpiThresholds,
   loadStatusThresholds, saveStatusThresholds,
   loadDataSource, saveDataSource,
+  defaultDashboardLayout,
   type StatusThresholds
 } from '@/lib/utils'
 
 type Page = 'dashboard' | 'overview'
+
+// Stable reference (not a fresh {} literal) so passing this as a fallback
+// prop doesn't look like a changed value on every render — an unstable
+// fallback here would make DashboardPage's layout-sync effect fire on every
+// single render instead of just when the layout actually changes.
+const EMPTY_LAYOUT: DashboardLayout = {}
 
 interface BreachRow {
   entity: string; metric: string; value: string; threshold: string
@@ -151,6 +158,7 @@ export default function Dashboard() {
   const [kpiThresholds, setKpiThresholds]       = useState<Record<string, Thresholds>>({})
   const [statusThresholds, setStatusThresholds] = useState<Record<string, StatusThresholds>>({})
   const [dataSources, setDataSources]           = useState<Record<string, DataSourceConfig>>({})
+  const [dashboardLayouts, setDashboardLayouts] = useState<Record<string, DashboardLayout>>({})
   const [displayNames, setDisplayNames]         = useState<Record<string, string>>({})
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -279,14 +287,17 @@ export default function Dashboard() {
       const kpiMap: Record<string, Thresholds>          = {}
       const statusMap: Record<string, StatusThresholds> = {}
       const dsMap: Record<string, DataSourceConfig>     = {}
+      const layoutMap: Record<string, DashboardLayout>  = {}
       ids.forEach(id => {
         kpiMap[id]    = allSettings[id].kpi
         statusMap[id] = allSettings[id].status
         dsMap[id]     = allSettings[id].ds
+        layoutMap[id] = allSettings[id].layout
       })
       setKpiThresholds(kpiMap)
       setStatusThresholds(statusMap)
       setDataSources(dsMap)
+      setDashboardLayouts(layoutMap)
 
       const savedAcc = localStorage.getItem('wfm_current_account')
       const first = savedAcc && ids.includes(savedAcc) ? savedAcc : (ids[0] ?? '')
@@ -338,6 +349,7 @@ export default function Dashboard() {
         setKpiThresholds(prev => ({ ...prev, [accId]: settings.kpi }))
         setStatusThresholds(prev => ({ ...prev, [accId]: settings.status }))
         setDataSources(prev => ({ ...prev, [accId]: settings.ds }))
+        setDashboardLayouts(prev => ({ ...prev, [accId]: settings.layout }))
       })
       .subscribe()
     return () => { supabase.removeChannel(ch) }
@@ -427,6 +439,7 @@ export default function Dashboard() {
               setKpiThresholds(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].kpi }); return n })
               setStatusThresholds(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].status }); return n })
               setDataSources(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].ds }); return n })
+              setDashboardLayouts(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].layout }); return n })
             }
           }}
           onConfigureAccount={id => { switchAccount(id) }}
@@ -496,6 +509,11 @@ export default function Dashboard() {
               agentTimers={agentTimers}
               kpiTh={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
               ds={currentDs}
+              layout={dashboardLayouts[currentAccount] ?? EMPTY_LAYOUT}
+              onLayoutChange={layout => {
+                setDashboardLayouts(prev => ({ ...prev, [currentAccount]: layout }))
+                saveDashboardLayout(currentAccount, layout)
+              }}
             />
           )}
           {currentPage === 'overview' && (
@@ -589,16 +607,148 @@ function FilterableTh({ label, options, filter, isOpen, onToggle, onClose, onApp
   )
 }
 
+// ── Draggable/resizable panel wrapper ─────────────────────────────────────────
+// Plain DOM mouse events, not a grid-layout library — this codebase already
+// has a hand-rolled drag pattern (SettingsModal's makeDraggable) that works
+// fine on this project's React 19; a third-party drag/resize library's React
+// 19 support is less certain, so this avoids that risk for zero added weight.
+//
+// Drag the header to move; grab any edge/corner handle to resize. rect always
+// comes from the parent (source of truth) — onChange fires continuously while
+// dragging/resizing for live visual feedback, onCommit fires once on mouseup
+// to persist. A ref tracks the in-flight rect during a drag so onCommit always
+// reads the latest value even though the mousemove/mouseup listeners were
+// attached before this render's `rect` prop existed (avoids a stale-closure
+// bug where releasing the mouse would save the position from BEFORE the drag).
+function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, icon, children, onChange, onCommit }: {
+  id: string; rect: PanelRect; minW?: number; minH?: number
+  headerColor?: string; title: React.ReactNode; icon?: string
+  children: React.ReactNode
+  onChange: (id: string, rect: PanelRect) => void
+  onCommit: (id: string, rect: PanelRect) => void
+}) {
+  const liveRect  = useRef(rect)
+  const dragState = useRef<{ mode: 'move'; startX: number; startY: number; orig: PanelRect } | { mode: 'resize'; edge: string; startX: number; startY: number; orig: PanelRect } | null>(null)
+
+  useEffect(() => { liveRect.current = rect }, [rect])
+
+  function clamp(r: PanelRect): PanelRect {
+    return { x: Math.max(0, r.x), y: Math.max(0, r.y), w: Math.max(minW, r.w), h: Math.max(minH, r.h) }
+  }
+
+  function onMouseMove(e: MouseEvent) {
+    const st = dragState.current
+    if (!st) return
+    const dx = e.clientX - st.startX
+    const dy = e.clientY - st.startY
+    let next: PanelRect
+    if (st.mode === 'move') {
+      next = clamp({ ...st.orig, x: st.orig.x + dx, y: st.orig.y + dy })
+    } else {
+      next = { ...st.orig }
+      if (st.edge.includes('right'))  next.w = st.orig.w + dx
+      if (st.edge.includes('bottom')) next.h = st.orig.h + dy
+      if (st.edge.includes('left'))   { next.w = st.orig.w - dx; next.x = st.orig.x + dx }
+      if (st.edge.includes('top'))    { next.h = st.orig.h - dy; next.y = st.orig.y + dy }
+      next = clamp(next)
+    }
+    liveRect.current = next
+    onChange(id, next)
+  }
+
+  function onMouseUp() {
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+    if (dragState.current) onCommit(id, liveRect.current)
+    dragState.current = null
+  }
+
+  function startMove(e: React.MouseEvent) {
+    if ((e.target as HTMLElement).closest('.panel-resize-handle')) return
+    dragState.current = { mode: 'move', startX: e.clientX, startY: e.clientY, orig: rect }
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+    e.preventDefault()
+  }
+
+  function startResize(edge: string) {
+    return (e: React.MouseEvent) => {
+      dragState.current = { mode: 'resize', edge, startX: e.clientX, startY: e.clientY, orig: rect }
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
+      e.preventDefault()
+      e.stopPropagation()
+    }
+  }
+
+  const handleStyle: React.CSSProperties = { position: 'absolute', zIndex: 2 }
+  return (
+    <div className="panel" style={{
+      position: 'absolute', left: rect.x, top: rect.y, width: rect.w, height: rect.h,
+      background: 'var(--bg-card, #fff)', border: '1px solid var(--border,#e1e6e4)',
+      borderRadius: 10, overflow: 'hidden', display: 'flex', flexDirection: 'column',
+      boxShadow: '0 1px 3px rgba(0,0,0,.08)',
+    }}>
+      <div onMouseDown={startMove} className="panel-header" style={{
+        background: headerColor || 'var(--bg-secondary, rgba(127,127,127,.08))',
+        color: headerColor ? '#fff' : 'var(--text-main)',
+        padding: '8px 12px', fontWeight: 700, fontSize: 12, cursor: 'move',
+        display: 'flex', alignItems: 'center', flexShrink: 0, userSelect: 'none',
+      }}>
+        {icon && <i className={`bx ${icon}`} style={{ marginRight: 6 }} />}
+        {title}
+      </div>
+      <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+        {children}
+      </div>
+
+      {/* Resize handles — right/bottom edges + bottom-right corner */}
+      <div className="panel-resize-handle" onMouseDown={startResize('right')}
+        style={{ ...handleStyle, top: 0, right: 0, width: 6, height: '100%', cursor: 'ew-resize' }} />
+      <div className="panel-resize-handle" onMouseDown={startResize('bottom')}
+        style={{ ...handleStyle, left: 0, bottom: 0, width: '100%', height: 6, cursor: 'ns-resize' }} />
+      <div className="panel-resize-handle" onMouseDown={startResize('bottom-right')}
+        style={{ ...handleStyle, right: 0, bottom: 0, width: 14, height: 14, cursor: 'nwse-resize' }} />
+    </div>
+  )
+}
+
 // ── Dashboard Page ─────────────────────────────────────────────────────────────
-function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, agentTimers, kpiTh, ds }: {
+function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, agentTimers, kpiTh, ds, layout, onLayoutChange }: {
   accountId: string; accountData: AccountData | undefined; breaches: BreachRow[]
   alertAcked: boolean; onAck: () => void; agentTimers: Record<string, number>
   kpiTh: Thresholds; ds: DataSourceConfig
+  layout: DashboardLayout; onLayoutChange: (layout: DashboardLayout) => void
 }) {
   const agents  = accountData?.agents ?? []
   const hasCrit = breaches.some(b => b.severity === 'critical')
   const kpiRows = accountData?.kpiRows ?? []
   const groups  = ds.groups ?? []
+
+  // Merge saved overrides on top of computed defaults so any group not yet
+  // positioned (a brand-new KPI group, or a fresh account with no custom
+  // layout saved at all) still gets a sensible starting spot.
+  const panelIds = useMemo(() => [...groups.map(g => `kpi:${g.id}`), 'breach', 'agents'], [groups])
+  const effectiveLayout = useMemo(() => {
+    const defaults = defaultDashboardLayout(groups.map(g => g.id))
+    const merged: DashboardLayout = {}
+    panelIds.forEach(id => { merged[id] = layout[id] ?? defaults[id] })
+    return merged
+  }, [layout, panelIds, groups])
+
+  // Live-update during drag/resize (no save); commit (save) once on release.
+  const [liveLayout, setLiveLayout] = useState(effectiveLayout)
+  useEffect(() => { setLiveLayout(effectiveLayout) }, [effectiveLayout])
+  const handlePanelChange = (id: string, rect: PanelRect) => setLiveLayout(prev => ({ ...prev, [id]: rect }))
+  const handlePanelCommit = (id: string, rect: PanelRect) => {
+    const next = { ...layout, [id]: rect }
+    onLayoutChange(next)
+  }
+
+  const containerHeight = Math.max(...panelIds.map(id => {
+    const r = liveLayout[id] ?? effectiveLayout[id]
+    return r ? r.y + r.h : 0
+  }), 200) + 20
 
   // Group agents by _agentGroup (set in fetchAccount from either a
   // multi-source label or a groupByCol value). Accounts with a single
@@ -644,94 +794,94 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
         </div>
       )}
 
-      {/* KPI tiles — one set per manually-defined group */}
-      {groups.map(group => (
-        <div key={group.id} style={{ marginBottom: 16 }}>
-          <div className="kpi-section-title">{group.name || 'Metrics'}</div>
-          <KpiGrid group={group} rows={kpiRows} kpiTh={kpiTh} ds={ds} />
-        </div>
-      ))}
+      {/* Every panel below is freely draggable (grab the header) and
+          resizable (grab any edge/corner) — position/size persist per
+          account. Container height grows to fit whatever's been dragged. */}
+      <div style={{ position: 'relative', height: containerHeight }}>
+        {groups.map(group => (
+          <LayoutPanel key={group.id} id={`kpi:${group.id}`} rect={liveLayout[`kpi:${group.id}`] ?? effectiveLayout[`kpi:${group.id}`]}
+            title={group.name || 'Metrics'} onChange={handlePanelChange} onCommit={handlePanelCommit}>
+            <div style={{ padding: 12 }}>
+              <KpiGrid group={group} rows={kpiRows} kpiTh={kpiTh} ds={ds} />
+            </div>
+          </LayoutPanel>
+        ))}
 
-      <div className="tables-row">
-        <div className="table-card">
-          <div className="table-card-header red"><i className="bx bx-error-circle" style={{ marginRight: 6 }} />Breach / Anomalies</div>
-          <div className="table-card-body">
-            <table className="dash-table">
-              <thead><tr><th>Queue / Agent</th><th>Metric</th><th>Value</th><th>Threshold</th></tr></thead>
-              <tbody>
-                {breaches.length === 0
-                  ? <tr><td colSpan={4} className="no-data">No breaches detected</td></tr>
-                  : breaches.map((b, i) => (
-                    <tr key={i}>
-                      <td style={{ fontWeight: 600 }}>{b.entity}</td>
-                      <td>{b.metric}</td>
-                      <td><span className={b.severity === 'critical' ? 'badge-crit' : 'badge-warn'}>{b.value}</span></td>
-                      <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{b.threshold}</td>
-                    </tr>
-                  ))
-                }
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <LayoutPanel id="breach" rect={liveLayout.breach ?? effectiveLayout.breach} headerColor="var(--danger,#c0392b)" icon="bx-error-circle"
+          title="Breach / Anomalies" onChange={handlePanelChange} onCommit={handlePanelCommit}>
+          <table className="dash-table">
+            <thead><tr><th>Queue / Agent</th><th>Metric</th><th>Value</th><th>Threshold</th></tr></thead>
+            <tbody>
+              {breaches.length === 0
+                ? <tr><td colSpan={4} className="no-data">No breaches detected</td></tr>
+                : breaches.map((b, i) => (
+                  <tr key={i}>
+                    <td style={{ fontWeight: 600 }}>{b.entity}</td>
+                    <td>{b.metric}</td>
+                    <td><span className={b.severity === 'critical' ? 'badge-crit' : 'badge-warn'}>{b.value}</span></td>
+                    <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{b.threshold}</td>
+                  </tr>
+                ))
+              }
+            </tbody>
+          </table>
+        </LayoutPanel>
 
-        <div className="table-card">
-          <div className="table-card-header green"><i className="bx bx-user-check" style={{ marginRight: 6 }} />Agent Status</div>
-          <div className="table-card-body">
-            <table className="dash-table">
-              <thead>
-                <tr>
-                  <FilterableTh label="Agent" options={nameOptions} filter={nameFilter}
-                    isOpen={openFilterCol === 'name'}
-                    onToggle={() => setOpenFilterCol(cur => cur === 'name' ? null : 'name')}
-                    onClose={() => setOpenFilterCol(null)}
-                    onApply={setNameFilter} />
-                  <FilterableTh label="Status" options={statusOptions} filter={statusFilter}
-                    isOpen={openFilterCol === 'status'}
-                    onToggle={() => setOpenFilterCol(cur => cur === 'status' ? null : 'status')}
-                    onClose={() => setOpenFilterCol(null)}
-                    onApply={setStatusFilter} />
-                  <th>Duration</th>
-                </tr>
-              </thead>
-              <tbody>
-                {agents.length === 0
-                  ? <tr><td colSpan={3} className="no-data">No agent data</td></tr>
-                  : (() => {
-                    const body = Array.from(agentGroups.entries()).flatMap(([groupName, groupAgents]) => {
-                      const filtered = groupAgents.filter(passesAgentFilters)
-                      if (filtered.length === 0) return []
-                      const rows = filtered.map((a, i) => {
-                        const name = String(a._name ?? '')
-                        const key  = `${accountId}:${name}`
-                        const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
-                        return (
-                          <tr key={`${groupName}-${i}`}>
-                            <td style={{ fontWeight: 600 }}>{name}</td>
-                            <td><span className={getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
-                            <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
-                          </tr>
-                        )
-                      })
-                      if (!showAgentGroupHeaders || !groupName) return rows
-                      return [
-                        <tr key={`${groupName}-hdr`}>
-                          <td colSpan={3} style={{
-                            background: 'var(--bg-secondary, rgba(127,127,127,.08))', fontWeight: 700,
-                            fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px',
-                            color: 'var(--text-muted)', padding: '6px 12px',
-                          }}>{groupName}</td>
-                        </tr>,
-                        ...rows,
-                      ]
+        <LayoutPanel id="agents" rect={liveLayout.agents ?? effectiveLayout.agents} headerColor="var(--success,#2e8b57)" icon="bx-user-check"
+          title="Agent Status" onChange={handlePanelChange} onCommit={handlePanelCommit}>
+          <table className="dash-table">
+            <thead>
+              <tr>
+                <FilterableTh label="Agent" options={nameOptions} filter={nameFilter}
+                  isOpen={openFilterCol === 'name'}
+                  onToggle={() => setOpenFilterCol(cur => cur === 'name' ? null : 'name')}
+                  onClose={() => setOpenFilterCol(null)}
+                  onApply={setNameFilter} />
+                <FilterableTh label="Status" options={statusOptions} filter={statusFilter}
+                  isOpen={openFilterCol === 'status'}
+                  onToggle={() => setOpenFilterCol(cur => cur === 'status' ? null : 'status')}
+                  onClose={() => setOpenFilterCol(null)}
+                  onApply={setStatusFilter} />
+                <th>Duration</th>
+              </tr>
+            </thead>
+            <tbody>
+              {agents.length === 0
+                ? <tr><td colSpan={3} className="no-data">No agent data</td></tr>
+                : (() => {
+                  const body = Array.from(agentGroups.entries()).flatMap(([groupName, groupAgents]) => {
+                    const filtered = groupAgents.filter(passesAgentFilters)
+                    if (filtered.length === 0) return []
+                    const rows = filtered.map((a, i) => {
+                      const name = String(a._name ?? '')
+                      const key  = `${accountId}:${name}`
+                      const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+                      return (
+                        <tr key={`${groupName}-${i}`}>
+                          <td style={{ fontWeight: 600 }}>{name}</td>
+                          <td><span className={getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
+                          <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
+                        </tr>
+                      )
                     })
-                    return body.length > 0 ? body : <tr><td colSpan={3} className="no-data">No agents match the current filter</td></tr>
-                  })()
-                }
-              </tbody>
-            </table>
-          </div>
-        </div>
+                    if (!showAgentGroupHeaders || !groupName) return rows
+                    return [
+                      <tr key={`${groupName}-hdr`}>
+                        <td colSpan={3} style={{
+                          background: 'var(--bg-secondary, rgba(127,127,127,.08))', fontWeight: 700,
+                          fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px',
+                          color: 'var(--text-muted)', padding: '6px 12px',
+                        }}>{groupName}</td>
+                      </tr>,
+                      ...rows,
+                    ]
+                  })
+                  return body.length > 0 ? body : <tr><td colSpan={3} className="no-data">No agents match the current filter</td></tr>
+                })()
+              }
+            </tbody>
+          </table>
+        </LayoutPanel>
       </div>
     </>
   )

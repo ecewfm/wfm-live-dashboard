@@ -43,6 +43,24 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
+
+/* ── Scrollbars — thin, theme-matched instead of the default OS style. Uses
+   the same variables as everything else, so it already flips with dark mode
+   instead of needing its own light/dark rules. ─────────────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--text-muted); background-clip: content-box; }
+*::-webkit-scrollbar-corner { background: transparent; }
 body {
   font-family: var(--font-sans), 'Poppins', Arial, sans-serif;
   background-color: var(--bg-body);

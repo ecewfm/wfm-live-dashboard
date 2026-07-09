@@ -4,12 +4,13 @@
 // localStorage is kept as a cache/fallback for offline use.
 
 import { supabase } from './supabase'
-import type { Thresholds, DataSourceConfig } from './types'
+import type { Thresholds, DataSourceConfig, DashboardLayout } from './types'
 import type { StatusThresholds } from './utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   loadKpiThresholds, loadStatusThresholds, loadDataSource,
   saveKpiThresholds, saveStatusThresholds, saveDataSource,
+  loadDashboardLayout, saveDashboardLayoutLocal,
   migrateDataSource
 } from './utils'
 
@@ -17,6 +18,7 @@ export interface AccountSettings {
   kpi:    Thresholds
   status: StatusThresholds
   ds:     DataSourceConfig
+  layout: DashboardLayout
 }
 
 // ── Load settings for one account ─────────────────────────────────────────────
@@ -25,7 +27,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
   try {
     const { data, error } = await supabase
       .from('wfm_settings')
-      .select('kpi_thresholds, status_thresholds, data_source')
+      .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout')
       .eq('id', accountId)
       .maybeSingle()
 
@@ -40,11 +42,13 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
         ds:     data.data_source
                   ? migrateDataSource(data.data_source)
                   : loadDataSource(accountId),
+        layout: data.dashboard_layout || loadDashboardLayout(accountId),
       }
       // Refresh localStorage cache
       saveKpiThresholds(accountId, settings.kpi)
       saveStatusThresholds(accountId, settings.status)
       saveDataSource(accountId, settings.ds)
+      saveDashboardLayoutLocal(accountId, settings.layout)
       return settings
     }
   } catch {}
@@ -54,6 +58,26 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     kpi:    loadKpiThresholds(accountId),
     status: loadStatusThresholds(accountId),
     ds:     loadDataSource(accountId),
+    layout: loadDashboardLayout(accountId),
+  }
+}
+
+// ── Save just the dashboard panel layout ──────────────────────────────────────
+// Separate from saveSettings — layout changes save immediately on drag/resize
+// end, not gated behind the Settings modal's Save button. Supabase upsert only
+// touches the columns provided here, so this never disturbs kpi_thresholds/
+// status_thresholds/data_source saved via the modal.
+export async function saveDashboardLayout(accountId: string, layout: DashboardLayout): Promise<boolean> {
+  saveDashboardLayoutLocal(accountId, layout)
+  try {
+    const { error } = await supabase
+      .from('wfm_settings')
+      .upsert({ id: accountId, account_id: accountId, dashboard_layout: layout, updated_at: new Date().toISOString() })
+    if (error) { console.warn('[settings] layout save error:', error.message); return false }
+    return true
+  } catch (e) {
+    console.warn('[settings] layout save failed:', e)
+    return false
   }
 }
 
