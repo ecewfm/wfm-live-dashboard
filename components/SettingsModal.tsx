@@ -896,18 +896,6 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
           </div>
         </div>
 
-        {/* Core KPI label renames */}
-        <div className="ds-label-row">
-          {CORE_KPIS.map(c => (
-            <div key={c.key} className="ds-label-field">
-              <span className="ds-label-dot" style={{ background: c.color }} />
-              <input className="acc-add-input" style={{ padding: '5px 8px', fontSize: 12, width: 130 }}
-                value={localDs.kpiLabels[c.key]} onChange={e => setLabel(c.key, e.target.value)}
-                placeholder={(DEFAULT_KPI_LABELS as any)[c.key]} />
-            </div>
-          ))}
-        </div>
-
         <p className="ds-hint">
           <strong>Group by</strong> = the column whose values are your LOBs (e.g. <code>skill</code>); pick each group&apos;s value in its header.
           <strong> Row key</strong> = the metric column within a group (e.g. <code>label</code>). Then <strong>click a KPI slot</strong> (it pulses) and
@@ -939,7 +927,23 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                     style={{ borderColor: isActive ? color : 'var(--border,#e1e6e4)', animation: isActive ? 'slot-pulse 1s infinite' : 'none' }}
                     onClick={() => setActiveCell(cur => (cur && cur.groupId === group.id && cur.kpiKey === k) ? null : { groupId: group.id, kpiKey: k })}>
                     <div className="ds-cellcard-h" style={{ background: color }}>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tileLabel(k)}</span>
+                      {/* Editable right on the card you already click to arm cell-picking —
+                          stopPropagation so typing here doesn't also arm/disarm the card.
+                          Renames this KPI's tile label everywhere it's shown (Overview,
+                          Dashboard, breach text) — shared across every group, since there's
+                          one display name per KPI key, not one per group. */}
+                      <input value={tileLabel(k)} title="Click to rename this tile"
+                        onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}
+                        onChange={e => {
+                          const val = e.target.value
+                          if (k === 'sla' || k === 'wait' || k === 'aht' || k === 'abn') setLabel(k, val)
+                          else updateExtra(k, { label: val })
+                        }}
+                        style={{
+                          background: 'transparent', border: 'none', outline: 'none', color: '#fff',
+                          fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.4px',
+                          width: '100%', minWidth: 0, padding: 0, margin: 0, fontFamily: 'inherit', cursor: 'text',
+                        }} />
                       {b && <i className="bx bx-x" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); clearCell(group.id, k) }} />}
                     </div>
                     <div className="ds-cellcard-v" style={{ color: b ? color : 'var(--text-muted)', background: b ? `${color}12` : 'transparent' }}>{disp}</div>
