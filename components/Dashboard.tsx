@@ -184,19 +184,23 @@ export default function Dashboard() {
         ? await supabase.from(src.kpiTable as any).select('*').eq(src.kpiAccountCol, accId)
         : { data: [] as any[] }
 
-      // Agent fetch — either multiple sources (src.agentSources, merged and
-      // tagged with a group) or the legacy single table. Either way, every
-      // row comes out normalized to _name/_status/_duration/_durationSecs/
-      // _agentGroup so downstream code (breaches, timers, rendering) never
-      // has to branch on which path produced it.
-      const agents: any[] = src.agentSources && src.agentSources.length > 0
-        ? (await Promise.all(src.agentSources.map(as_ => fetchAgentSource(as_, accId)))).flat()
-        : await fetchAgentSource({
-            id: 'legacy', label: '', groupByCol: '',
-            table: src.agentTable, accountCol: src.agentAccountCol,
-            nameCol: src.agentNameCol, statusCol: src.agentStatusCol,
-            durationCol: src.agentDurationCol, durationSecsCol: src.agentDurationSecs,
-          }, accId)
+      // Agent fetch — the legacy single table (if set) PLUS every configured
+      // agentSources entry, all combined. "Additional Agent Sources" means
+      // additional to the table above, not instead of it — every row comes
+      // out normalized to _name/_status/_duration/_durationSecs/_agentGroup
+      // so downstream code (breaches, timers, rendering) never has to branch
+      // on which source produced it.
+      const agentSourcesToFetch: AgentSource[] = []
+      if (src.agentTable) {
+        agentSourcesToFetch.push({
+          id: 'legacy', label: src.agentTable, groupByCol: '',
+          table: src.agentTable, accountCol: src.agentAccountCol,
+          nameCol: src.agentNameCol, statusCol: src.agentStatusCol,
+          durationCol: src.agentDurationCol, durationSecsCol: src.agentDurationSecs,
+        })
+      }
+      if (src.agentSources) agentSourcesToFetch.push(...src.agentSources)
+      const agents: any[] = (await Promise.all(agentSourcesToFetch.map(as_ => fetchAgentSource(as_, accId)))).flat()
 
       const kpiRows = (kpiRes.data as any[]) ?? []
 

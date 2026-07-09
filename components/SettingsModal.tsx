@@ -1063,9 +1063,9 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         <p className="ds-hint">
           Use this when agent status is split across <strong>multiple tables</strong> (add one source
           per table), or when one table already has a column that separates teams/queues (add one
-          source and set its <strong>Group by col</strong>). Adding any source here overrides the
-          single table above — the dashboard's Agent Status list will show all sources combined,
-          grouped by label or by Group by col.
+          source and set its <strong>Group by col</strong>). Anything added here shows up
+          <strong> in addition to</strong> the single table above, not instead of it — the dashboard's
+          Agent Status list combines all of them, grouped by label or by Group by col.
         </p>
         {localDs.agentSources.map(source => (
           <AgentSourceCard key={source.id} source={source} tables={tables} supaUrl={supaUrl} supaKey={supaKey}
