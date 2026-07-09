@@ -447,26 +447,22 @@ export default function Dashboard() {
         />
       )}
 
-      {/* Sidebar */}
-      <div className="sidebar">
-        <div className="sidebar-brand"><i className="bx bx-pulse" /> WFM Live</div>
-        <div className="sidebar-section">
-          <label>Active Account</label>
+      {/* Top navigation bar — replaces the old left sidebar */}
+      <div className="top-nav">
+        <div className="top-nav-brand"><i className="bx bx-pulse" /> WFM Live</div>
+        <div className="top-nav-account">
+          <i className="bx bx-buildings" title="Active account" />
           <select value={currentAccount} onChange={e => switchAccount(e.target.value)}>
             {accounts.length === 0 && <option>Loading...</option>}
             {accounts.map(id => <option key={id} value={id}>{displayNames[id] || id}</option>)}
           </select>
         </div>
-        <div className="sidebar-menu">
-          <div className="menu-label">Menu</div>
-          <div className={`menu-item${currentPage === 'overview'  ? ' active' : ''}`} onClick={() => navigate('overview')}>
+        <div className="top-nav-menu">
+          <div className={`top-nav-item${currentPage === 'overview'  ? ' active' : ''}`} onClick={() => navigate('overview')}>
             <i className="bx bx-grid-alt" /> Overview
           </div>
-          <div className={`menu-item${currentPage === 'dashboard' ? ' active' : ''}`} onClick={() => navigate('dashboard')}>
+          <div className={`top-nav-item${currentPage === 'dashboard' ? ' active' : ''}`} onClick={() => navigate('dashboard')}>
             <i className="bx bx-home-circle" /> Dashboard
-          </div>
-          <div className="menu-item" onClick={() => setSettingsOpen(true)}>
-            <i className="bx bx-cog" /> Settings
           </div>
         </div>
       </div>
