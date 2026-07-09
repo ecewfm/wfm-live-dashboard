@@ -370,6 +370,23 @@ export function parseDurationToSeconds(str: string | null | undefined): number {
   return total
 }
 
+// A source string like "5d 4h" only tells us the whole-hour count — it has no
+// minutes/seconds component, so we don't actually know how many seconds into
+// that hour the agent is. Ticking it up live client-side would just show a
+// fake seconds count that then snaps back on the next poll (looks like a
+// reset). Anything with real minute/second precision (or HH:MM:SS/MM:SS/plain
+// seconds) is safe to tick; day-and-hour-only text is not.
+export function isCoarseDuration(str: string | null | undefined): boolean {
+  if (!str) return false
+  const s = String(str).trim()
+  if (/^\d+(\.\d+)?$/.test(s)) return false
+  const parts = s.split(':').map(Number)
+  if (parts.length > 1 && parts.every(p => !isNaN(p))) return false
+  const hasM = /(\d+)\s*m(?!s)/i.test(s)
+  const hasS = /(\d+)\s*s/i.test(s)
+  return !hasM && !hasS
+}
+
 export function formatSeconds(totalSec: number): string {
   totalSec = Math.round(Math.max(0, totalSec))
   const d = Math.floor(totalSec / 86400)

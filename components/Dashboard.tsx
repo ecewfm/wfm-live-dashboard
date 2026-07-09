@@ -7,7 +7,7 @@ import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, 
 import { loadSettings, saveSettings, saveDashboardLayout, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount, type AccountConfig } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
-  extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds,
+  extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds, isCoarseDuration,
   getKpiColorClass, getStatusPillClass, resolveCell, getExtraTileColorClass,
   loadKpiThresholds, saveKpiThresholds,
   loadStatusThresholds, saveStatusThresholds,
@@ -162,6 +162,10 @@ export default function Dashboard() {
   const [displayNames, setDisplayNames]         = useState<Record<string, string>>({})
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Keys whose latest scraped duration text is day/hour-only (e.g. "5d 4h") —
+  // no minute/second precision to tick live from, so the 1s clock below skips
+  // them and just shows whatever the last poll actually reported.
+  const coarseKeysRef = useRef<Set<string>>(new Set())
 
   useEffect(() => { setMounted(true) }, [])
 
@@ -239,8 +243,11 @@ export default function Dashboard() {
           // together from the shared 1s/interval clock below — which is why
           // every agent showed the same tiny number instead of their actual
           // duration.
-          const secs = parseDurationToSeconds(String(a._durationSecs || a._duration || ''))
+          const raw  = String(a._durationSecs || a._duration || '')
+          const secs = parseDurationToSeconds(raw)
           next[key] = secs
+          if (isCoarseDuration(raw)) coarseKeysRef.current.add(key)
+          else coarseKeysRef.current.delete(key)
         })
         return next
       })
@@ -360,7 +367,7 @@ export default function Dashboard() {
     timerRef.current = setInterval(() => {
       setAgentTimers(prev => {
         const next: Record<string, number> = {}
-        for (const k in prev) next[k] = (prev[k] ?? 0) + 1
+        for (const k in prev) next[k] = coarseKeysRef.current.has(k) ? prev[k] : (prev[k] ?? 0) + 1
         return next
       })
     }, 1000)
