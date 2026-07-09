@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
-import type { AccountData, Thresholds, DataSourceConfig, KpiGroup } from '@/lib/types'
+import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource } from '@/lib/types'
 import { loadSettings, saveSettings, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount, type AccountConfig } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
@@ -42,6 +42,34 @@ function mostRecentUpdatedAt(rows: Record<string, any>[], colName: string): stri
     if (!best || new Date(v).getTime() > new Date(best).getTime()) best = v
   }
   return best
+}
+
+// ── Fetch one agent source (a table + its column mapping) and normalize its
+// rows to _name/_status/_duration/_durationSecs/_agentGroup. Used for both the
+// legacy single-table config (one synthetic AgentSource built from it) and
+// the new multi-source array, so every downstream consumer reads the same
+// shape regardless of how many tables/groups an account is configured with.
+async function fetchAgentSource(src: AgentSource, accId: string): Promise<any[]> {
+  if (!src.table) return []
+  const accountCol = src.accountCol || 'account_id'
+
+  let res: any = await supabase.from(src.table as any).select('*').eq(accountCol, accId)
+    .order(src.statusCol || 'id').order(src.nameCol || 'id')
+  if (res.error) {
+    // Column names in order() might be wrong — retry without ordering
+    console.warn(`[${accId}] agent order() failed on ${src.table} (${res.error.message}) — retrying without order`)
+    res = await supabase.from(src.table as any).select('*').eq(accountCol, accId)
+  }
+
+  const rows = (res.data as any[]) ?? []
+  return rows.map(r => ({
+    ...r,
+    _agentGroup:   src.groupByCol ? String(r[src.groupByCol] ?? '') : src.label,
+    _name:         String(r[src.nameCol]     ?? ''),
+    _status:       String(r[src.statusCol]   ?? ''),
+    _duration:     String(r[src.durationCol] ?? ''),
+    _durationSecs: src.durationSecsCol ? String(r[src.durationSecsCol] ?? '') : '',
+  }))
 }
 
 // ── Build breaches for one account ────────────────────────────────────────────
@@ -90,14 +118,15 @@ function buildBreaches(
     })
   })
 
-  // Agent status breaches
+  // Agent status breaches — agents are pre-normalized in fetchAccount to
+  // _name/_status/_duration regardless of single-table vs agentSources.
   accountData.agents.forEach(a => {
-    const status = String(a[ds.agentStatusCol] ?? '')
+    const status = String(a._status ?? '')
     const thSt   = statusTh[status]
     if (!thSt || thSt.crit >= 999) return
-    const name  = String(a[ds.agentNameCol] ?? '')
+    const name  = String(a._name ?? '')
     const key   = `${accountId}:${name}`
-    const secs  = agentTimers[key] ?? parseDurationToSeconds(String(a[ds.agentDurationCol] ?? ''))
+    const secs  = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
     const mins  = secs / 60
     const dur   = formatSeconds(secs)
     if (mins >= thSt.crit)       rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical' })
@@ -155,17 +184,19 @@ export default function Dashboard() {
         ? await supabase.from(src.kpiTable as any).select('*').eq(src.kpiAccountCol, accId)
         : { data: [] as any[] }
 
-      // Agent fetch — try with order first, fall back to no-order if columns don't exist
-      let agentRes: any = src.agentTable
-        ? await supabase.from(src.agentTable as any).select('*').eq(src.agentAccountCol, accId)
-            .order(src.agentStatusCol || 'id').order(src.agentNameCol || 'id')
-        : { data: [] as any[], error: null }
-      if (agentRes.error) {
-        // Column names in order() might be wrong — retry without ordering
-        console.warn(`[${accId}] agent order() failed (${agentRes.error.message}) — retrying without order`)
-        agentRes = await supabase
-          .from(src.agentTable as any).select('*').eq(src.agentAccountCol, accId)
-      }
+      // Agent fetch — either multiple sources (src.agentSources, merged and
+      // tagged with a group) or the legacy single table. Either way, every
+      // row comes out normalized to _name/_status/_duration/_durationSecs/
+      // _agentGroup so downstream code (breaches, timers, rendering) never
+      // has to branch on which path produced it.
+      const agents: any[] = src.agentSources && src.agentSources.length > 0
+        ? (await Promise.all(src.agentSources.map(as_ => fetchAgentSource(as_, accId)))).flat()
+        : await fetchAgentSource({
+            id: 'legacy', label: '', groupByCol: '',
+            table: src.agentTable, accountCol: src.agentAccountCol,
+            nameCol: src.agentNameCol, statusCol: src.agentStatusCol,
+            durationCol: src.agentDurationCol, durationSecsCol: src.agentDurationSecs,
+          }, accId)
 
       const kpiRows = (kpiRes.data as any[]) ?? []
 
@@ -174,7 +205,7 @@ export default function Dashboard() {
         [accId]: {
           kpi:     kpiRows[0] ?? null,
           kpiRows: kpiRows,
-          agents:  (agentRes.data as any[]) ?? [],
+          agents:  agents,
           status:  null,
           calls:   [],
           syncing: false
@@ -182,14 +213,13 @@ export default function Dashboard() {
       }))
 
       // Update agent timers
-      const agents = (agentRes.data as any[]) ?? []
       setAgentTimers(prev => {
         const next = { ...prev }
         agents.forEach(a => {
-          const key  = `${accId}:${String(a[src.agentNameCol] ?? '')}`
-          const secs = src.agentDurationSecs
-            ? (parseInt(String(a[src.agentDurationSecs] ?? '0')) || 0)
-            : parseDurationToSeconds(String(a[src.agentDurationCol] ?? ''))
+          const key  = `${accId}:${String(a._name ?? '')}`
+          const secs = a._durationSecs
+            ? (parseInt(String(a._durationSecs)) || 0)
+            : parseDurationToSeconds(String(a._duration ?? ''))
           next[key] = secs
         })
         return next
@@ -484,6 +514,22 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
   const kpiRows = accountData?.kpiRows ?? []
   const groups  = ds.groups ?? []
 
+  // Group agents by _agentGroup (set in fetchAccount from either a
+  // multi-source label or a groupByCol value). Accounts with a single
+  // ungrouped source — i.e. every existing account before this feature
+  // existed — collapse to one group named '', which renders flat with no
+  // header row, so there's no visual change unless grouping is configured.
+  const agentGroups = useMemo(() => {
+    const map = new Map<string, any[]>()
+    agents.forEach(a => {
+      const g = a._agentGroup || ''
+      if (!map.has(g)) map.set(g, [])
+      map.get(g)!.push(a)
+    })
+    return map
+  }, [agents])
+  const showAgentGroupHeaders = agentGroups.size > 1
+
   return (
     <>
       {breaches.length > 0 && !alertAcked && (
@@ -540,17 +586,30 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
               <tbody>
                 {agents.length === 0
                   ? <tr><td colSpan={3} className="no-data">No agent data</td></tr>
-                  : agents.map((a, i) => {
-                    const name  = String(a[ds.agentNameCol] ?? '')
-                    const key   = `${accountId}:${name}`
-                    const secs  = agentTimers[key] ?? parseDurationToSeconds(String(a[ds.agentDurationCol] ?? ''))
-                    return (
-                      <tr key={i}>
-                        <td style={{ fontWeight: 600 }}>{name}</td>
-                        <td><span className={getStatusPillClass(String(a[ds.agentStatusCol] ?? ''))}>{String(a[ds.agentStatusCol] ?? '—')}</span></td>
-                        <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
-                      </tr>
-                    )
+                  : Array.from(agentGroups.entries()).flatMap(([groupName, groupAgents]) => {
+                    const rows = groupAgents.map((a, i) => {
+                      const name = String(a._name ?? '')
+                      const key  = `${accountId}:${name}`
+                      const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+                      return (
+                        <tr key={`${groupName}-${i}`}>
+                          <td style={{ fontWeight: 600 }}>{name}</td>
+                          <td><span className={getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
+                          <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
+                        </tr>
+                      )
+                    })
+                    if (!showAgentGroupHeaders || !groupName) return rows
+                    return [
+                      <tr key={`${groupName}-hdr`}>
+                        <td colSpan={3} style={{
+                          background: 'var(--bg-secondary, rgba(127,127,127,.08))', fontWeight: 700,
+                          fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px',
+                          color: 'var(--text-muted)', padding: '6px 12px',
+                        }}>{groupName}</td>
+                      </tr>,
+                      ...rows,
+                    ]
                   })
                 }
               </tbody>

@@ -117,10 +117,35 @@ export interface DataSourceConfig {
   groups:        KpiGroup[]
 
   // Agent data (column-based — one row per agent already)
+  // Legacy single-table fields — still read as a fallback when agentSources
+  // is empty, so every account configured before agentSources existed keeps
+  // working unchanged. New setup should use agentSources instead.
   agentTable:       string
   agentAccountCol:  string
   agentNameCol:     string
   agentStatusCol:   string
   agentDurationCol: string    // duration as string e.g. "5:23"
   agentDurationSecs:string    // duration in seconds ('' if N/A)
+
+  // Multiple agent tables and/or one table split into groups. Covers two
+  // cases: (1) agent status is scraped into several physical tables (e.g.
+  // Hippo's hippo_licensed_agents + hippo_level_1) — one AgentSource per
+  // table; (2) agent status is one table with a column that already
+  // distinguishes teams/queues (e.g. ZenBusiness's zenbusiness_agent_states.
+  // team_name) — one AgentSource with groupByCol set, rows grouped by that
+  // column's value instead of a fixed label. When non-empty, this takes
+  // priority over the legacy single-table fields above.
+  agentSources:  AgentSource[]
+}
+
+export interface AgentSource {
+  id:               string   // stable id for React keys / add-remove
+  label:            string   // static group label for rows from this source (ignored when groupByCol is set)
+  table:            string
+  accountCol:       string
+  nameCol:          string
+  statusCol:        string
+  durationCol:      string
+  durationSecsCol:  string
+  groupByCol:       string   // '' = use `label` for every row; else group rows by this column's own value (e.g. "team_name")
 }

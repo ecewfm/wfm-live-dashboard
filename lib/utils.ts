@@ -1,4 +1,4 @@
-import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile } from './types'
+import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, AgentSource } from './types'
 
 // ── Status thresholds type ────────────────────────────────────────────────────
 export type StatusThresholds = Record<string, { warn: number; crit: number }>
@@ -37,6 +37,16 @@ export function genId(): string {
 /** A fresh group with no cell bindings. */
 export function newGroup(name = 'Global'): KpiGroup {
   return { id: genId(), name, cells: {} }
+}
+
+/** A fresh agent source — one table + its column mapping, optionally grouped
+ *  by a column value instead of a fixed label (see AgentSource.groupByCol). */
+export function newAgentSource(label = ''): AgentSource {
+  return {
+    id: genId(), label, table: '',
+    accountCol: 'account_id', nameCol: '', statusCol: '', durationCol: '', durationSecsCol: '',
+    groupByCol: '',
+  }
 }
 
 /** Read a single value from the fetched KPI rows using a cell binding.
@@ -103,7 +113,8 @@ export const PRESET_AIRCALL: DataSourceConfig = {
   agentNameCol:     'agent_name',
   agentStatusCol:   'status',
   agentDurationCol: 'duration',
-  agentDurationSecs:''
+  agentDurationSecs:'',
+  agentSources:     []
 }
 
 export const PRESET_TALKDESK: DataSourceConfig = {
@@ -125,7 +136,8 @@ export const PRESET_TALKDESK: DataSourceConfig = {
   agentNameCol:     'agent_name',
   agentStatusCol:   'status',
   agentDurationCol: 'duration',
-  agentDurationSecs:'duration_secs'
+  agentDurationSecs:'duration_secs',
+  agentSources:     []
 }
 
 export const DEFAULT_DATA_SOURCE: DataSourceConfig = {
@@ -143,7 +155,8 @@ export const DEFAULT_DATA_SOURCE: DataSourceConfig = {
   agentNameCol:     'name',
   agentStatusCol:   'state',
   agentDurationCol: 'duration',
-  agentDurationSecs:''
+  agentDurationSecs:'',
+  agentSources:     []
 }
 
 /** Convert any stored data-source shape (old column-based or new) to the v2 model. */
@@ -155,9 +168,10 @@ export function migrateDataSource(raw: any): DataSourceConfig {
     return {
       ...JSON.parse(JSON.stringify(DEFAULT_DATA_SOURCE)),
       ...raw,
-      kpiLabels:  { ...DEFAULT_KPI_LABELS, ...(raw.kpiLabels || {}) },
-      extraTiles: Array.isArray(raw.extraTiles) ? raw.extraTiles : [],
-      groups:     raw.groups.length ? raw.groups : [newGroup()],
+      kpiLabels:    { ...DEFAULT_KPI_LABELS, ...(raw.kpiLabels || {}) },
+      extraTiles:   Array.isArray(raw.extraTiles) ? raw.extraTiles : [],
+      groups:       raw.groups.length ? raw.groups : [newGroup()],
+      agentSources: Array.isArray(raw.agentSources) ? raw.agentSources : [],
     }
   }
 
@@ -184,6 +198,7 @@ export function migrateDataSource(raw: any): DataSourceConfig {
     agentStatusCol:   raw.agentStatusCol   || 'state',
     agentDurationCol: raw.agentDurationCol || 'duration',
     agentDurationSecs:raw.agentDurationSecs|| '',
+    agentSources:     [],
   }
 }
 
@@ -399,7 +414,8 @@ export const PRESET_FIVE9: DataSourceConfig = {
   agentNameCol:     'name',
   agentStatusCol:   'state',
   agentDurationCol: 'duration',
-  agentDurationSecs:''
+  agentDurationSecs:'',
+  agentSources:     []
 }
 
 // Uniters uses its own dedicated tables (same tall shape as Five9).

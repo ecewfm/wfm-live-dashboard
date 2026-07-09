@@ -2,12 +2,12 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, AgentSource } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
   PRESET_AIRCALL, PRESET_TALKDESK, PRESET_FIVE9, PRESET_UNITERS,
-  DEFAULT_KPI_LABELS, genId, newGroup,
+  DEFAULT_KPI_LABELS, genId, newGroup, newAgentSource,
   fetchPublicTables
 } from '@/lib/utils'
 import { addAccount, removeAccount, type AccountConfig } from '@/lib/settings'
@@ -414,7 +414,22 @@ const SLOT_COLORS: Record<string, string> = {
   agentStatusCol:  '#4b7a9a',
   agentDurationCol:'#7a6a9a',
   agentDurationSecs:'#888',
+  // Per-AgentSource-card slots (AgentSourceCard, below) reuse this same
+  // lookup so DsSlotCard/DsPreviewTable colors stay consistent everywhere.
+  nameCol:          '#3b6c5a',
+  statusCol:        '#4b7a9a',
+  durationCol:      '#7a6a9a',
+  durationSecsCol:  '#888',
+  groupByCol:       '#b07d3a',
 }
+
+const AGENT_SOURCE_SLOTS = [
+  { key: 'nameCol',         label: 'Agent Name',      hint: 'e.g. agent_name, name' },
+  { key: 'statusCol',       label: 'Status',          hint: 'e.g. status, state' },
+  { key: 'durationCol',     label: 'Duration',        hint: 'e.g. duration, time_in_status' },
+  { key: 'durationSecsCol', label: 'Duration (secs)', hint: 'e.g. duration_secs (or leave empty)' },
+  { key: 'groupByCol',      label: 'Group By',        hint: "e.g. team_name — groups this source's rows by the column's own value instead of the label above" },
+]
 
 // Core KPI cells that every group binds
 const CORE_KPIS: { key: 'sla' | 'aht' | 'abn' | 'wait'; color: string }[] = [
@@ -544,6 +559,86 @@ const ColSelect = React.memo(({ cols, value, onChange, emptyLabel }: {
   </select>
 ), (p, n) => p.value === n.value && p.cols === n.cols && p.onChange === n.onChange)
 
+// One card per agent source — its own table + column mapping, fetching its
+// own column list independently since each source can point at a different
+// table. `groupByCol` (if set) groups that source's rows by the VALUE of that
+// column instead of the static `label` (covers "one table, already split by
+// team/queue column" — e.g. ZenBusiness's team_name — vs "one source per
+// physical table" — e.g. Hippo's Licensed Agents + Level 1).
+function AgentSourceCard({ source, tables, supaUrl, supaKey, onChange, onRemove }: {
+  source: AgentSource; tables: string[]; supaUrl: string; supaKey: string
+  onChange: (patch: Partial<AgentSource>) => void; onRemove: () => void
+}) {
+  const [preview, setPreview] = useState<Record<string, any>[]>([])
+  const [loading, setLoading] = useState(false)
+  const [activeSlot, setActiveSlot] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!source.table) { setPreview([]); return }
+    setLoading(true)
+    fetch(`${supaUrl}/rest/v1/${source.table}?limit=8`, { headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` } })
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setPreview(Array.isArray(d) ? d : []))
+      .catch(() => setPreview([]))
+      .finally(() => setLoading(false))
+  }, [source.table, supaUrl, supaKey])
+
+  const cols = preview.length ? Object.keys(preview[0]) : []
+  // Reads activeSlot directly rather than via the setActiveSlot updater —
+  // calling the PARENT's onChange (a different component's setState) from
+  // inside a setState updater callback is a React violation ("Cannot update
+  // a component while rendering a different component"). Both setState
+  // calls below happen as plain top-level statements in an event handler
+  // instead, which is the normal, valid place for them.
+  const mapCol = useCallback((colName: string) => {
+    if (!activeSlot) return
+    onChange({ [activeSlot]: colName } as Partial<AgentSource>)
+    setActiveSlot(null)
+  }, [activeSlot, onChange])
+
+  return (
+    <div className="ds-group" style={{ marginBottom: 10 }}>
+      <div className="ds-group-head">
+        <input className="ds-group-name" value={source.label} placeholder="Label (e.g. Level 1)"
+          onChange={e => onChange({ label: e.target.value })} />
+        <button className="ds-x" title="Remove source" onClick={onRemove}><i className="bx bx-trash" /></button>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, padding: '8px 2px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="ds-mini-label">Table</span>
+          <DsTableSelector field="table" value={source.table} tables={tables} onChange={(_, v) => { onChange({ table: v }); setActiveSlot(null) }} />
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="ds-mini-label">Account col</span>
+          <ColSelect cols={cols} value={source.accountCol} onChange={v => onChange({ accountCol: v })} />
+        </div>
+      </div>
+      <p className="ds-hint"><strong>Click a slot</strong>, then click a column header in the preview to map it.</p>
+      <div className="ds-slot-grid">
+        {AGENT_SOURCE_SLOTS.map(s => <DsSlotCard key={s.key} slotKey={s.key} label={s.label} hint={s.hint}
+          isActive={activeSlot === s.key} value={(source as any)[s.key] || ''}
+          onToggle={k => setActiveSlot(cur => cur === k ? null : k)} />)}
+      </div>
+      {activeSlot && (
+        <div className="ds-active-bar">
+          <i className="bx bx-crosshair" style={{ fontSize: 16 }} />
+          <strong>{AGENT_SOURCE_SLOTS.find(s => s.key === activeSlot)?.label}</strong> is active — click a column header below
+        </div>
+      )}
+      {source.table && (
+        <div className="ds-preview">
+          {loading ? (
+            <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>Loading preview...</div>
+          ) : (
+            <DsPreviewTable rows={preview} hasActiveSlot={!!activeSlot} onMap={mapCol}
+              mappedCols={AGENT_SOURCE_SLOTS.reduce((acc, s) => { const v = (source as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key] || '#888'; return acc }, {} as Record<string, string>)} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   accountId: string
   ds: DataSourceConfig
@@ -649,6 +744,20 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   }, [])
   const mapAgentCol = useCallback((colName: string) => {
     setActiveAgentSlot(cur => { if (cur) setLocalDs(prev => ({ ...prev, [cur]: colName })); return null })
+  }, [])
+
+  // ── Multiple agent sources — covers both "agent status split across several
+  // tables" (one source per table) and "one table, grouped by a column" (one
+  // source with groupByCol set). Independent of the legacy single-table
+  // fields above; when non-empty, fetchAccount uses this instead.
+  const addAgentSource = useCallback(() => {
+    setLocalDs(prev => ({ ...prev, agentSources: [...prev.agentSources, newAgentSource(`Source ${prev.agentSources.length + 1}`)] }))
+  }, [])
+  const removeAgentSource = useCallback((id: string) => {
+    setLocalDs(prev => ({ ...prev, agentSources: prev.agentSources.filter(s => s.id !== id) }))
+  }, [])
+  const updateAgentSource = useCallback((id: string, patch: Partial<AgentSource>) => {
+    setLocalDs(prev => ({ ...prev, agentSources: prev.agentSources.map(s => s.id === id ? { ...s, ...patch } : s) }))
   }, [])
 
   const tileColor = (key: string) => {
@@ -929,6 +1038,25 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             )}
           </div>
         )}
+      </div>
+
+      {/* Multiple agent sources — either several physical tables, or one
+          table already split by a team/queue column (groupByCol). When any
+          source is added here, it's used INSTEAD of the single table above. */}
+      <div className="ds-section">
+        <div className="ds-section-title">ADDITIONAL AGENT SOURCES</div>
+        <p className="ds-hint">
+          Use this when agent status is split across <strong>multiple tables</strong> (add one source
+          per table), or when one table already has a column that separates teams/queues (add one
+          source and set its <strong>Group by col</strong>). Adding any source here overrides the
+          single table above — the dashboard's Agent Status list will show all sources combined,
+          grouped by label or by Group by col.
+        </p>
+        {localDs.agentSources.map(source => (
+          <AgentSourceCard key={source.id} source={source} tables={tables} supaUrl={supaUrl} supaKey={supaKey}
+            onChange={patch => updateAgentSource(source.id, patch)} onRemove={() => removeAgentSource(source.id)} />
+        ))}
+        <button className="ds-add-btn" onClick={addAgentSource}><i className="bx bx-plus" /> Add Agent Source</button>
       </div>
     </div>
   )
