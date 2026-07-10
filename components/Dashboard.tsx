@@ -321,8 +321,20 @@ export default function Dashboard() {
     init()
   }, [fetchAccount])
 
-  // ── Realtime — re-fetch on any change ─────────────────────────────────────
+  // ── Realtime — TEMPORARILY DISABLED (band-aid) ──────────────────────────────
+  // Supabase bills Realtime messages per-recipient (1 change × N listening
+  // tabs = N messages counted) — so viewer count alone, independent of how
+  // clean the trigger logic is, was on track to blow past the 5M/mo org-wide
+  // quota once real-time monitoring analysts start watching this in bulk
+  // (10-20+ concurrent tabs, mostly on the all-accounts Overview page). Turned
+  // off entirely until the self-hosted webhook-relay replacement ships — the
+  // 30s poll below (a few lines down) is now the sole refresh mechanism. That
+  // poll bills under API Gateway, a completely separate quota nowhere near
+  // its limit. Flip REALTIME_ENABLED back to true once the relay is ready —
+  // everything below is untouched and will just work again.
+  const REALTIME_ENABLED = false
   useEffect(() => {
+    if (!REALTIME_ENABLED) return
     // Debounced: a single scraper write batch fires one event per row, so a
     // burst of N events for the same account within the window collapses
     // into exactly one fetchAccount() call (the last one to fire wins).
@@ -389,13 +401,16 @@ export default function Dashboard() {
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [])
 
-  // ── Polling fallback — re-fetch every 60s in case Realtime misses events ──
-  // Realtime can miss events occasionally; this ensures data never goes stale
+  // ── Polling — sole data refresh mechanism while Realtime is disabled ──────
+  // 30s matches the scraper's own write cadence exactly — polling faster
+  // (e.g. 15s) can't surface fresher data than this, since the source itself
+  // only updates every 30s; it would just double the request count for no
+  // benefit. Billed under API Gateway, not Realtime Messages.
   useEffect(() => {
     if (accounts.length === 0) return
     const poll = setInterval(() => {
       accounts.forEach(id => fetchAccount(id, dataSources[id]))
-    }, 60_000)
+    }, 30_000)
     return () => clearInterval(poll)
   }, [accounts, fetchAccount, dataSources])
 
