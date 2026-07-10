@@ -166,6 +166,11 @@ export default function Dashboard() {
   // no minute/second precision to tick live from, so the 1s clock below skips
   // them and just shows whatever the last poll actually reported.
   const coarseKeysRef = useRef<Set<string>>(new Set())
+  // Debounce timers for the Realtime refetch — a single scraper write batch
+  // (e.g. 20+ agents upserted at once) fires one change event PER ROW, so
+  // without this a burst of simultaneous events for the same account was
+  // triggering that many fully-redundant fetchAccount() calls back to back.
+  const refetchTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   useEffect(() => { setMounted(true) }, [])
 
@@ -318,11 +323,17 @@ export default function Dashboard() {
 
   // ── Realtime — re-fetch on any change ─────────────────────────────────────
   useEffect(() => {
+    // Debounced: a single scraper write batch fires one event per row, so a
+    // burst of N events for the same account within the window collapses
+    // into exactly one fetchAccount() call (the last one to fire wins).
     const refetch = (table: string, accId: string | undefined) => {
-      if (accId) {
+      if (!accId) return
+      if (refetchTimersRef.current[accId]) clearTimeout(refetchTimersRef.current[accId])
+      refetchTimersRef.current[accId] = setTimeout(() => {
+        delete refetchTimersRef.current[accId]
         const ds = dataSources[accId]
         fetchAccount(accId, ds)
-      }
+      }, 500)
     }
     const ch = supabase.channel('wfm-realtime')
       // Agent status tables no longer use postgres_changes — a DB trigger
@@ -359,7 +370,11 @@ export default function Dashboard() {
         setDashboardLayouts(prev => ({ ...prev, [accId]: settings.layout }))
       })
       .subscribe()
-    return () => { supabase.removeChannel(ch) }
+    return () => {
+      supabase.removeChannel(ch)
+      Object.values(refetchTimersRef.current).forEach(clearTimeout)
+      refetchTimersRef.current = {}
+    }
   }, [fetchAccount, dataSources])
 
   // ── Live agent timers ──────────────────────────────────────────────────────
