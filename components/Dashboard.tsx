@@ -325,14 +325,6 @@ export default function Dashboard() {
       }
     }
     const ch = supabase.channel('wfm-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_kpi_snapshots' },
-          p => refetch('wfm_kpi_snapshots', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'talkdesk_lob_kpis' },
-          p => refetch('talkdesk_lob_kpis', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'five9_kpis' },
-          p => refetch('five9_kpis', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'uniters_kpis' },
-          p => refetch('uniters_kpis', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
       // Agent status tables no longer use postgres_changes — a DB trigger
       // (sql/realtime_status_broadcast.sql) only broadcasts on this single
       // 'status_change' event when an agent's status column actually differs
@@ -341,6 +333,13 @@ export default function Dashboard() {
       // bumps). Same tables (wfm_agent_states/talkdesk_agent_states/
       // five9_agent_states/uniters_agent_states), far fewer messages.
       .on('broadcast', { event: 'status_change' },
+          p => refetch((p.payload as any)?.table, (p.payload as any)?.account_id))
+      // Same idea for the KPI tables (wfm_kpi_snapshots/talkdesk_lob_kpis/
+      // five9_kpis/uniters_kpis) — sql/realtime_kpi_broadcast.sql only
+      // broadcasts 'kpi_change' when a row's actual values differ from
+      // before (whole-row compare, ignoring id/account_id/updated_at), not
+      // on every unconditional ~30s write.
+      .on('broadcast', { event: 'kpi_change' },
           p => refetch((p.payload as any)?.table, (p.payload as any)?.account_id))
       // Reload settings when another user saves them
       .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_accounts' }, async () => {
