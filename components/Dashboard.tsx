@@ -384,6 +384,34 @@ export default function Dashboard() {
     return () => clearInterval(poll)
   }, [accounts, fetchAccount, dataSources])
 
+  // ── Auto-reload on new deployment ───────────────────────────────────────────
+  // A tab that's been open since before a deploy keeps running the OLD JS
+  // bundle forever — including its old Realtime subscription config — since
+  // a server-side deploy can't retroactively update code already loaded in a
+  // browser. This polls /api/version (always reads the live deployment's
+  // commit SHA fresh) and compares it to the SHA baked into THIS tab's bundle
+  // at build time; a mismatch means a newer build has shipped since this tab
+  // loaded, so it reloads itself to pick it up. Skips while Settings is open
+  // so an in-progress edit isn't interrupted — it'll just check again next
+  // interval once closed.
+  useEffect(() => {
+    const BUILD_SHA = process.env.NEXT_PUBLIC_BUILD_SHA
+    if (!BUILD_SHA || BUILD_SHA === 'dev') return // skip in local dev
+    const checkVersion = async () => {
+      if (settingsOpen) return
+      try {
+        const res = await fetch('/api/version', { cache: 'no-store' })
+        const { sha } = await res.json()
+        if (sha && sha !== BUILD_SHA) {
+          console.log('[version] New deployment detected — reloading to pick it up')
+          window.location.reload()
+        }
+      } catch {}
+    }
+    const interval = setInterval(checkVersion, 5 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [settingsOpen])
+
   // ── All breaches ───────────────────────────────────────────────────────────
   const allBreaches = useMemo(() => {
     const map: Record<string, BreachRow[]> = {}
