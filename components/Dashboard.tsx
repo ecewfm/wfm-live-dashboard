@@ -327,20 +327,21 @@ export default function Dashboard() {
     const ch = supabase.channel('wfm-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_kpi_snapshots' },
           p => refetch('wfm_kpi_snapshots', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_agent_states' },
-          p => refetch('wfm_agent_states', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'talkdesk_lob_kpis' },
           p => refetch('talkdesk_lob_kpis', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'talkdesk_agent_states' },
-          p => refetch('talkdesk_agent_states', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'five9_kpis' },
           p => refetch('five9_kpis', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'five9_agent_states' },
-          p => refetch('five9_agent_states', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'uniters_kpis' },
           p => refetch('uniters_kpis', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'uniters_agent_states' },
-          p => refetch('uniters_agent_states', (p.new as any)?.account_id ?? (p.old as any)?.account_id))
+      // Agent status tables no longer use postgres_changes — a DB trigger
+      // (sql/realtime_status_broadcast.sql) only broadcasts on this single
+      // 'status_change' event when an agent's status column actually differs
+      // from before, instead of on every write (which fired every ~30s per
+      // agent regardless of whether anything changed, since updated_at always
+      // bumps). Same tables (wfm_agent_states/talkdesk_agent_states/
+      // five9_agent_states/uniters_agent_states), far fewer messages.
+      .on('broadcast', { event: 'status_change' },
+          p => refetch((p.payload as any)?.table, (p.payload as any)?.account_id))
       // Reload settings when another user saves them
       .on('postgres_changes', { event: '*', schema: 'public', table: 'wfm_accounts' }, async () => {
         const configs = await loadAccounts()
