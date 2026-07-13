@@ -90,10 +90,11 @@ function buildBreaches(
   const kpiRows = accountData.kpiRows ?? []
 
   const checkKpi = (
-    num: number, th: { warn: number; crit: number; direction: 'asc' | 'desc' },
+    num: number, th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean },
     entity: string, metric: string, value: string, thLabel: string
   ) => {
     if (isNaN(num)) return
+    if (th.excludeZero && num === 0) return
     const isCrit = th.direction === 'desc' ? num <= th.crit : num >= th.crit
     const isWarn = th.direction === 'desc' ? num <= th.warn : num >= th.warn
     if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical' })

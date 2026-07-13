@@ -435,9 +435,10 @@ export function getStatusPillClass(status: string | null): string {
 
 export function getKpiColorClass(
   value: number,
-  th: { warn: number; crit: number; direction: 'asc' | 'desc' }
+  th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
 ): string {
   if (isNaN(value)) return 'text-muted'
+  if (th.excludeZero && value === 0) return 'text-success'
   if (th.direction === 'desc') {
     // Low = Bad: boundary values fall in the BETTER zone
     // e.g. crit=70, warn=80 → <70=red, 70–79=yellow, ≥80=green

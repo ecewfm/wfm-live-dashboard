@@ -65,11 +65,14 @@ export interface AccountData {
 }
 
 // ── KPI threshold type ────────────────────────────────────────────────────────
+// excludeZero: when the account's CRM reports a metric as exactly 0 because
+// there's literally no volume to work (e.g. SLA% with zero calls offered),
+// skip breach-tagging it instead of treating 0 as a critical breach.
 export interface Thresholds {
-  sla:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc' }
-  wait: { warn: number; crit: number; targ: number; direction: 'asc' | 'desc' }
-  aht:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc' }
-  abn:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc' }
+  sla:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
+  wait: { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
+  aht:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
+  abn:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
 }
 
 // ── Data source configuration (per account, stored in wfm_settings + localStorage)

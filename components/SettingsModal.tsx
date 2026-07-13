@@ -1131,6 +1131,15 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       [key]: { ...prev[key], direction: prev[key].direction === 'asc' ? 'desc' : 'asc' }
     }))
   }
+  // Exclude a KPI from breach-tagging when its reported value is exactly 0 —
+  // covers accounts whose CRM reports 0 because there's no volume to work on
+  // that period, not because performance actually broke down.
+  const toggleExcludeZero = (key: keyof Thresholds) => {
+    setKpi(prev => ({
+      ...prev,
+      [key]: { ...prev[key], excludeZero: !prev[key].excludeZero }
+    }))
+  }
   // Clearing a field (empty string) reverts that status to "N/A" (999 is the
   // existing "disabled, never breach" sentinel already used elsewhere in this
   // codebase, e.g. DEFAULT_STATUS_THRESHOLDS.Offline/Available) — so a newly
@@ -1224,13 +1233,15 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 <p className="sm-desc">
                   Set <strong>Warning</strong> and <strong>Critical</strong> thresholds for each KPI.
                   Use the <strong>Direction</strong> button to control whether high or low values trigger a breach.
+                  Check <strong>Exclude 0</strong> for metrics where a reported value of 0 means there was
+                  no volume to work (not an actual breach).
                 </p>
                 <div className="sm-section-title">KPI BREACH THRESHOLDS</div>
                 <table className="sm-table">
                   <thead>
                     <tr>
-                      <th style={{ width: '28%' }}>Metric</th>
-                      <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th>
+                      <th style={{ width: '24%' }}>Metric</th>
+                      <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1263,6 +1274,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                               <i className={`bx ${isAsc ? 'bx-trending-up' : 'bx-trending-down'}`} />
                               <span>{isAsc ? 'High = Bad' : 'Low = Bad'}</span>
                             </button>
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <input type="checkbox" checked={!!th.excludeZero} onChange={() => toggleExcludeZero(row.key)} />
                           </td>
                         </tr>
                       )
