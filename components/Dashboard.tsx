@@ -1177,9 +1177,28 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
   const stale   = isDataStale(freshestUpdatedAt)
   const hasCrit = breaches.some(b => b.severity === 'critical')
 
+  // ── Per-account header band color — a personalization so accounts are
+  // visually distinguishable on the Overview page. Browser-local only (like
+  // the theme toggle), not synced via Supabase — this is a "how I want MY
+  // screen to look" preference, not shared account config.
+  const [bandColor, setBandColor] = useState('')
+  const colorInputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    setBandColor(localStorage.getItem(`wfm_band_color_${accId}`) || '')
+  }, [accId])
+  const handleBandColorChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value
+    setBandColor(val)
+    localStorage.setItem(`wfm_band_color_${accId}`, val)
+  }
+  const resetBandColor = () => {
+    setBandColor('')
+    localStorage.removeItem(`wfm_band_color_${accId}`)
+  }
+
   return (
     <>
-      <div className="overview-card-header">
+      <div className="overview-card-header" style={bandColor ? { background: bandColor } : undefined}>
         <div className="overview-card-title">
           <i className="bx bx-buildings" />
           <span>{displayName}</span>
@@ -1197,6 +1216,23 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
           <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
             <span className="ov-live-dot" />
             <span className="ov-live-text">Live</span>
+          </div>
+          <div className="ov-color-picker-wrap">
+            <button type="button" className="ov-color-btn" title="Set header color"
+              onClick={() => colorInputRef.current?.click()}>
+              <i className="bx bxs-palette" />
+              {bandColor && <span className="ov-color-swatch" style={{ background: bandColor }} />}
+            </button>
+            <input
+              ref={colorInputRef} type="color" className="ov-color-input"
+              value={bandColor || '#3b5a4f'} onChange={handleBandColorChange}
+              onClick={e => e.stopPropagation()}
+            />
+            {bandColor && (
+              <button type="button" className="ov-color-reset" title="Reset to default color" onClick={resetBandColor}>
+                <i className="bx bx-x" />
+              </button>
+            )}
           </div>
         </div>
       </div>

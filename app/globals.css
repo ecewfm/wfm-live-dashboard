@@ -272,6 +272,33 @@ body {
   display: flex; align-items: center; gap: 8px;
 }
 
+/* Per-account header color picker */
+.ov-color-picker-wrap { display: flex; align-items: center; gap: 2px; position: relative; }
+.ov-color-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border-radius: 6px; border: none;
+  background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.85);
+  cursor: pointer; transition: background 0.15s; position: relative; padding: 0;
+}
+.ov-color-btn:hover { background: rgba(255,255,255,0.22); }
+.ov-color-btn i { font-size: 13px; }
+.ov-color-swatch {
+  position: absolute; bottom: 2px; right: 2px;
+  width: 7px; height: 7px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.8);
+}
+.ov-color-input {
+  position: absolute; width: 0; height: 0; padding: 0; margin: 0; border: none; opacity: 0;
+  pointer-events: none;
+}
+.ov-color-reset {
+  display: flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%; border: none;
+  background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.7);
+  cursor: pointer; transition: background 0.15s, color 0.15s; padding: 0;
+}
+.ov-color-reset:hover { background: rgba(255,255,255,0.25); color: #fff; }
+.ov-color-reset i { font-size: 13px; }
+
 /* Live status dot + text */
 .ov-live-dot {
   width: 7px; height: 7px; border-radius: 50%;
