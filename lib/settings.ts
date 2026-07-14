@@ -4,13 +4,14 @@
 // localStorage is kept as a cache/fallback for offline use.
 
 import { supabase } from './supabase'
-import type { Thresholds, DataSourceConfig, DashboardLayout } from './types'
+import type { Thresholds, DataSourceConfig, DashboardLayout, HeaderColors } from './types'
 import type { StatusThresholds } from './utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   loadKpiThresholds, loadStatusThresholds, loadDataSource,
   saveKpiThresholds, saveStatusThresholds, saveDataSource,
   loadDashboardLayout, saveDashboardLayoutLocal,
+  loadHeaderColorsLocal, saveHeaderColorsLocal,
   migrateDataSource
 } from './utils'
 
@@ -19,19 +20,34 @@ export interface AccountSettings {
   status: StatusThresholds
   ds:     DataSourceConfig
   layout: DashboardLayout
+  headerColors: HeaderColors
 }
 
 // ── Load settings for one account ─────────────────────────────────────────────
 // Priority: Supabase → localStorage → hardcoded defaults
 export async function loadSettings(accountId: string): Promise<AccountSettings> {
   try {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('wfm_settings')
-      .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout')
+      .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout, header_band_color, header_text_color')
       .eq('id', accountId)
       .maybeSingle()
 
+    // header_band_color/header_text_color don't exist until sql/header_colors.sql
+    // has been run — PostgREST errors the WHOLE select on an unknown column, so
+    // retry without them rather than losing kpi/status/data-source/layout too.
+    if (error) {
+      const retry = await supabase
+        .from('wfm_settings')
+        .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout')
+        .eq('id', accountId)
+        .maybeSingle()
+      data  = retry.data as any
+      error = retry.error
+    }
+
     if (!error && data) {
+      const localColors = loadHeaderColorsLocal(accountId)
       const settings: AccountSettings = {
         kpi:    data.kpi_thresholds
                   ? { ...DEFAULT_THRESHOLDS,        ...data.kpi_thresholds    }
@@ -43,6 +59,13 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
                   ? migrateDataSource(data.data_source)
                   : loadDataSource(accountId),
         layout: data.dashboard_layout || loadDashboardLayout(accountId),
+        // header_band_color/header_text_color columns may not exist yet on an
+        // account that hasn't run sql/header_colors.sql — fall back to
+        // whatever was previously picked in THIS browser (pre-sync behavior)
+        // so no one's already-chosen color appears to reset.
+        headerColors: (data.header_band_color != null || data.header_text_color != null)
+                  ? { band: data.header_band_color || '', text: data.header_text_color || '' }
+                  : localColors,
       }
       // Refresh localStorage cache
       saveKpiThresholds(accountId, settings.kpi)
@@ -59,6 +82,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     status: loadStatusThresholds(accountId),
     ds:     loadDataSource(accountId),
     layout: loadDashboardLayout(accountId),
+    headerColors: loadHeaderColorsLocal(accountId),
   }
 }
 
@@ -77,6 +101,29 @@ export async function saveDashboardLayout(accountId: string, layout: DashboardLa
     return true
   } catch (e) {
     console.warn('[settings] layout save failed:', e)
+    return false
+  }
+}
+
+// ── Save just the Overview header colors (band background + title text) ─────
+// Separate from saveSettings — colors save immediately on pick, not gated
+// behind the Settings modal's Save button. Requires sql/header_colors.sql to
+// have been run; if the columns don't exist yet this just fails quietly and
+// the color still applies locally via loadHeaderColorsLocal's fallback.
+export async function saveHeaderColors(accountId: string, colors: HeaderColors): Promise<boolean> {
+  saveHeaderColorsLocal(accountId, colors)
+  try {
+    const { error } = await supabase
+      .from('wfm_settings')
+      .upsert({
+        id: accountId, account_id: accountId,
+        header_band_color: colors.band, header_text_color: colors.text,
+        updated_at: new Date().toISOString(),
+      })
+    if (error) { console.warn('[settings] header colors save error:', error.message); return false }
+    return true
+  } catch (e) {
+    console.warn('[settings] header colors save failed:', e)
     return false
   }
 }

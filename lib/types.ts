@@ -148,6 +148,11 @@ export interface DataSourceConfig {
 export interface PanelRect { x: number; y: number; w: number; h: number }
 export type DashboardLayout = Record<string, PanelRect>
 
+// ── Overview page header colors (band background + title text) ──────────────
+// Per-account, saved to wfm_settings.header_band_color/header_text_color —
+// shared across every browser/device, unlike the theme toggle. '' = default.
+export interface HeaderColors { band: string; text: string }
+
 export interface AgentSource {
   id:               string   // stable id for React keys / add-remove
   label:            string   // static group label for rows from this source (ignored when groupByCol is set)

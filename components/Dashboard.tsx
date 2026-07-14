@@ -3,8 +3,8 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
-import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect } from '@/lib/types'
-import { loadSettings, saveSettings, saveDashboardLayout, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount, type AccountConfig } from '@/lib/settings'
+import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors } from '@/lib/types'
+import { loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount, type AccountConfig } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds, isCoarseDuration,
@@ -23,6 +23,7 @@ type Page = 'dashboard' | 'overview'
 // fallback here would make DashboardPage's layout-sync effect fire on every
 // single render instead of just when the layout actually changes.
 const EMPTY_LAYOUT: DashboardLayout = {}
+const DEFAULT_HEADER_COLORS: HeaderColors = { band: '', text: '' }
 
 interface BreachRow {
   entity: string; metric: string; value: string; threshold: string
@@ -160,6 +161,7 @@ export default function Dashboard() {
   const [statusThresholds, setStatusThresholds] = useState<Record<string, StatusThresholds>>({})
   const [dataSources, setDataSources]           = useState<Record<string, DataSourceConfig>>({})
   const [dashboardLayouts, setDashboardLayouts] = useState<Record<string, DashboardLayout>>({})
+  const [headerColors, setHeaderColors]         = useState<Record<string, HeaderColors>>({})
   const [displayNames, setDisplayNames]         = useState<Record<string, string>>({})
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -301,16 +303,19 @@ export default function Dashboard() {
       const statusMap: Record<string, StatusThresholds> = {}
       const dsMap: Record<string, DataSourceConfig>     = {}
       const layoutMap: Record<string, DashboardLayout>  = {}
+      const colorMap: Record<string, HeaderColors>      = {}
       ids.forEach(id => {
         kpiMap[id]    = allSettings[id].kpi
         statusMap[id] = allSettings[id].status
         dsMap[id]     = allSettings[id].ds
         layoutMap[id] = allSettings[id].layout
+        colorMap[id]  = allSettings[id].headerColors
       })
       setKpiThresholds(kpiMap)
       setStatusThresholds(statusMap)
       setDataSources(dsMap)
       setDashboardLayouts(layoutMap)
+      setHeaderColors(colorMap)
 
       const savedAcc = localStorage.getItem('wfm_current_account')
       const first = savedAcc && ids.includes(savedAcc) ? savedAcc : (ids[0] ?? '')
@@ -381,6 +386,7 @@ export default function Dashboard() {
         setStatusThresholds(prev => ({ ...prev, [accId]: settings.status }))
         setDataSources(prev => ({ ...prev, [accId]: settings.ds }))
         setDashboardLayouts(prev => ({ ...prev, [accId]: settings.layout }))
+        setHeaderColors(prev => ({ ...prev, [accId]: settings.headerColors }))
       })
       .subscribe()
     return () => {
@@ -469,6 +475,13 @@ export default function Dashboard() {
     await saveSettings(currentAccount, kpi, status, ds)
   }
 
+  // ── Save one account's Overview header colors — instant, like layout drag ──
+  const updateHeaderColors = (accId: string, patch: Partial<HeaderColors>) => {
+    const next = { ...(headerColors[accId] ?? DEFAULT_HEADER_COLORS), ...patch }
+    setHeaderColors(prev => ({ ...prev, [accId]: next }))
+    saveHeaderColors(accId, next)
+  }
+
   const switchAccount = (id: string) => {
     setCurrentAccount(id); localStorage.setItem('wfm_current_account', id); setAlertAcked(false)
   }
@@ -506,6 +519,7 @@ export default function Dashboard() {
               setStatusThresholds(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].status }); return n })
               setDataSources(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].ds }); return n })
               setDashboardLayouts(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].layout }); return n })
+              setHeaderColors(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].headerColors }); return n })
             }
           }}
           onConfigureAccount={id => { switchAccount(id) }}
@@ -588,6 +602,8 @@ export default function Dashboard() {
               kpiThresholds={kpiThresholds}
               dataSources={dataSources}
               displayNames={displayNames}
+              headerColors={headerColors}
+              onHeaderColorsChange={updateHeaderColors}
             />
           )}
         </div>
@@ -1082,11 +1098,12 @@ function KpiTile({ label, value, numValue, target, th, showBar, plain, colorOver
 }
 
 // ── Overview Page ──────────────────────────────────────────────────────────────
-function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames }: {
+function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, onHeaderColorsChange }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
+  headerColors: Record<string, HeaderColors>; onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
 }) {
   return (
     <>
@@ -1099,17 +1116,18 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
       <OverviewMasonry
         accounts={accounts} data={data} agentTimers={agentTimers}
         allBreaches={allBreaches} kpiThresholds={kpiThresholds} dataSources={dataSources}
-        displayNames={displayNames}
+        displayNames={displayNames} headerColors={headerColors} onHeaderColorsChange={onHeaderColorsChange}
       />
     </>
   )
 }
 
-function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames }: {
+function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, onHeaderColorsChange }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
+  headerColors: Record<string, HeaderColors>; onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
 }) {
   const [layout, setLayout] = useState<{ top: number; left: number; width: number }[]>([])
   const [gridH, setGridH]   = useState(0)
@@ -1158,6 +1176,8 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
             breaches={allBreaches[accId] ?? []}
             kpiTh={kpiThresholds[accId] ?? DEFAULT_THRESHOLDS}
             ds={dataSources[accId] ?? DEFAULT_DATA_SOURCE}
+            colors={headerColors[accId] ?? DEFAULT_HEADER_COLORS}
+            onColorsChange={onHeaderColorsChange}
           />
         </div>
       ))}
@@ -1166,10 +1186,11 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
 }
 
 // ── Overview Card ─────────────────────────────────────────────────────────────
-function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds }: {
+function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds, colors, onColorsChange }: {
   accId: string; displayName: string; accountData: AccountData | undefined
   agentTimers: Record<string, number>; breaches: BreachRow[]
   kpiTh: Thresholds; ds: DataSourceConfig
+  colors: HeaderColors; onColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
 }) {
   const kpiRows = accountData?.kpiRows ?? []
   const groups  = ds.groups ?? []
@@ -1179,11 +1200,14 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
 
   // ── Per-account header colors (band background + title text) — a
   // personalization so accounts are visually distinguishable on the Overview
-  // page. Browser-local only (like the theme toggle), not synced via
-  // Supabase — this is a "how I want MY screen to look" preference, not
-  // shared account config.
-  const [bandColor, setBandColor, resetBandColor] = useStoredColor(`wfm_band_color_${accId}`)
-  const [textColor, setTextColor, resetTextColor] = useStoredColor(`wfm_band_text_color_${accId}`)
+  // page. Synced via Supabase (lifted up in Dashboard, see updateHeaderColors)
+  // so every browser/device shows the same color-coding.
+  const bandColor = colors.band
+  const textColor = colors.text
+  const setBandColor   = (val: string) => onColorsChange(accId, { band: val })
+  const resetBandColor = () => onColorsChange(accId, { band: '' })
+  const setTextColor   = (val: string) => onColorsChange(accId, { text: val })
+  const resetTextColor = () => onColorsChange(accId, { text: '' })
 
   return (
     <>
@@ -1283,16 +1307,6 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
       </div>
     </>
   )
-}
-
-// A browser-local (localStorage) color preference, keyed by a caller-supplied
-// key — used for the Overview header's per-account band/text color pickers.
-function useStoredColor(key: string): [string, (val: string) => void, () => void] {
-  const [color, setColorState] = useState('')
-  useEffect(() => { setColorState(localStorage.getItem(key) || '') }, [key])
-  const setColor = (val: string) => { setColorState(val); localStorage.setItem(key, val) }
-  const resetColor = () => { setColorState(''); localStorage.removeItem(key) }
-  return [color, setColor, resetColor]
 }
 
 function HeaderColorPicker({ icon, title, color, defaultColor, onChange, onReset }: {

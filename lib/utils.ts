@@ -1,4 +1,4 @@
-import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, AgentSource, DashboardLayout } from './types'
+import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, AgentSource, DashboardLayout, HeaderColors } from './types'
 
 // ── Status thresholds type ────────────────────────────────────────────────────
 // excluded: statuses like "Logged Out"/"Offline" that shouldn't be breach-
@@ -261,6 +261,27 @@ export function loadDashboardLayout(accountId: string): DashboardLayout {
 
 export function saveDashboardLayoutLocal(accountId: string, layout: DashboardLayout): void {
   try { localStorage.setItem(`wfm_layout_${accountId}`, JSON.stringify(layout)) } catch {}
+}
+
+// ── Overview header colors (band background + title text) ────────────────────
+// localStorage is a fallback/cache only — the source of truth is Supabase
+// (see lib/settings.ts) so every browser/device shows the same colors. Reads
+// the original per-browser keys from before this was synced, so colors
+// someone already picked aren't lost the first time this loads.
+export function loadHeaderColorsLocal(accountId: string): HeaderColors {
+  try {
+    return {
+      band: localStorage.getItem(`wfm_band_color_${accountId}`) || '',
+      text: localStorage.getItem(`wfm_band_text_color_${accountId}`) || '',
+    }
+  } catch { return { band: '', text: '' } }
+}
+
+export function saveHeaderColorsLocal(accountId: string, colors: HeaderColors): void {
+  try {
+    localStorage.setItem(`wfm_band_color_${accountId}`, colors.band)
+    localStorage.setItem(`wfm_band_text_color_${accountId}`, colors.text)
+  } catch {}
 }
 
 /** Default panel positions for panel ids not yet present in a saved layout —
