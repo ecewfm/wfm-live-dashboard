@@ -1177,29 +1177,18 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
   const stale   = isDataStale(freshestUpdatedAt)
   const hasCrit = breaches.some(b => b.severity === 'critical')
 
-  // ── Per-account header band color — a personalization so accounts are
-  // visually distinguishable on the Overview page. Browser-local only (like
-  // the theme toggle), not synced via Supabase — this is a "how I want MY
-  // screen to look" preference, not shared account config.
-  const [bandColor, setBandColor] = useState('')
-  const colorInputRef = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    setBandColor(localStorage.getItem(`wfm_band_color_${accId}`) || '')
-  }, [accId])
-  const handleBandColorChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value
-    setBandColor(val)
-    localStorage.setItem(`wfm_band_color_${accId}`, val)
-  }
-  const resetBandColor = () => {
-    setBandColor('')
-    localStorage.removeItem(`wfm_band_color_${accId}`)
-  }
+  // ── Per-account header colors (band background + title text) — a
+  // personalization so accounts are visually distinguishable on the Overview
+  // page. Browser-local only (like the theme toggle), not synced via
+  // Supabase — this is a "how I want MY screen to look" preference, not
+  // shared account config.
+  const [bandColor, setBandColor, resetBandColor] = useStoredColor(`wfm_band_color_${accId}`)
+  const [textColor, setTextColor, resetTextColor] = useStoredColor(`wfm_band_text_color_${accId}`)
 
   return (
     <>
       <div className="overview-card-header" style={bandColor ? { background: bandColor } : undefined}>
-        <div className="overview-card-title">
+        <div className="overview-card-title" style={textColor ? { color: textColor } : undefined}>
           <i className="bx bx-buildings" />
           <span>{displayName}</span>
           {displayName !== accId && (
@@ -1217,23 +1206,10 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
             <span className="ov-live-dot" />
             <span className="ov-live-text">Live</span>
           </div>
-          <div className="ov-color-picker-wrap">
-            <button type="button" className="ov-color-btn" title="Set header color"
-              onClick={() => colorInputRef.current?.click()}>
-              <i className="bx bxs-palette" />
-              {bandColor && <span className="ov-color-swatch" style={{ background: bandColor }} />}
-            </button>
-            <input
-              ref={colorInputRef} type="color" className="ov-color-input"
-              value={bandColor || '#3b5a4f'} onChange={handleBandColorChange}
-              onClick={e => e.stopPropagation()}
-            />
-            {bandColor && (
-              <button type="button" className="ov-color-reset" title="Reset to default color" onClick={resetBandColor}>
-                <i className="bx bx-x" />
-              </button>
-            )}
-          </div>
+          <HeaderColorPicker icon="bxs-palette" title="Set header band color"
+            color={bandColor} defaultColor="#3b5a4f" onChange={setBandColor} onReset={resetBandColor} />
+          <HeaderColorPicker icon="bx-font" title="Set header text color"
+            color={textColor} defaultColor="#ffffff" onChange={setTextColor} onReset={resetTextColor} />
         </div>
       </div>
 
@@ -1306,6 +1282,41 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
         {stale && <span style={{ color: 'var(--danger)', marginLeft: 6, fontWeight: 600 }}>⚠ Stale</span>}
       </div>
     </>
+  )
+}
+
+// A browser-local (localStorage) color preference, keyed by a caller-supplied
+// key — used for the Overview header's per-account band/text color pickers.
+function useStoredColor(key: string): [string, (val: string) => void, () => void] {
+  const [color, setColorState] = useState('')
+  useEffect(() => { setColorState(localStorage.getItem(key) || '') }, [key])
+  const setColor = (val: string) => { setColorState(val); localStorage.setItem(key, val) }
+  const resetColor = () => { setColorState(''); localStorage.removeItem(key) }
+  return [color, setColor, resetColor]
+}
+
+function HeaderColorPicker({ icon, title, color, defaultColor, onChange, onReset }: {
+  icon: string; title: string; color: string; defaultColor: string
+  onChange: (val: string) => void; onReset: () => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  return (
+    <div className="ov-color-picker-wrap">
+      <button type="button" className="ov-color-btn" title={title} onClick={() => inputRef.current?.click()}>
+        <i className={`bx ${icon}`} />
+        {color && <span className="ov-color-swatch" style={{ background: color }} />}
+      </button>
+      <input
+        ref={inputRef} type="color" className="ov-color-input"
+        value={color || defaultColor} onChange={e => onChange(e.target.value)}
+        onClick={e => e.stopPropagation()}
+      />
+      {color && (
+        <button type="button" className="ov-color-reset" title="Reset to default" onClick={onReset}>
+          <i className="bx bx-x" />
+        </button>
+      )}
+    </div>
   )
 }
 
