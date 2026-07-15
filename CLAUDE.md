@@ -82,19 +82,28 @@ allows once-a-day cron, which is why it didn't start here originally).
 - `lib/breaches.ts` — the ONE canonical breach algorithm, shared by this scan
   AND the live Dashboard/Overview pages (`components/Dashboard.tsx` imports
   it too) — never duplicate this logic elsewhere.
-- `lib/zohoCliq.ts` — mints Zoho access tokens from a stored refresh token
-  (`ZOHO_CLIQ_REFRESH_TOKEN` env var) and posts to the Cliq message API.
+- `lib/zohoCliq.ts` — mints Zoho access tokens from a refresh token stored in
+  Supabase (`wfm_cliq_oauth`, see below) and posts to the Cliq message API.
 - `app/api/zoho/authorize` + `app/api/zoho/callback` — the ONE-TIME OAuth
   handshake (needs a public HTTPS redirect, which is why this lives in the
-  Vercel app specifically) that produces `ZOHO_CLIQ_REFRESH_TOKEN` in the
-  first place. Triggered by the "Authorize with Zoho" button in the same
-  Settings tab. Refresh token is logged server-side only (Vercel function
-  logs), never rendered in the callback page.
+  Vercel app specifically). The callback route saves the resulting refresh
+  token straight into `wfm_cliq_oauth` via `lib/supabaseAdmin.ts`'s
+  service-role client — no copy/paste into an env var, no redeploy needed,
+  same idea as the GAS predecessor's OAuth2 library silently persisting the
+  token into `PropertiesService`. Triggered by the "Authorize with Zoho"
+  button in the same Settings tab.
+- `sql/cliq_oauth_token.sql` — creates `wfm_cliq_oauth` with RLS enabled and
+  **no policies**, so the public anon key (used everywhere else in this app,
+  including client-side) cannot read/write it. Only the `service_role` key
+  bypasses RLS — that's why `lib/supabaseAdmin.ts` exists as a *separate*
+  client from `lib/supabase.ts`; don't use it for anything else.
 
 Required env vars (Vercel dashboard, NOT `NEXT_PUBLIC_` — server-only):
-`ZOHO_CLIQ_CLIENT_ID`, `ZOHO_CLIQ_CLIENT_SECRET`, `ZOHO_CLIQ_REFRESH_TOKEN`
-(from the one-time authorize flow), and optionally `CRON_SECRET` (recommended
-— without it, `/api/cliq/scan` accepts unauthenticated requests).
+`ZOHO_CLIQ_CLIENT_ID`, `ZOHO_CLIQ_CLIENT_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`
+(from Supabase Dashboard → Project Settings → API — needed by the callback
+route and by `lib/zohoCliq.ts` to reach `wfm_cliq_oauth`), and optionally
+`CRON_SECRET` (recommended — without it, `/api/cliq/scan` accepts
+unauthenticated requests).
 
 Per-account cooldown (`wfm_settings.cliq_last_sent_at`, default 5 min,
 configurable in Settings) and a 5-minute staleness suppression (same

@@ -1376,11 +1376,11 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     Authorize with Zoho
                   </a>
                   <span style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                    One-time setup — requires <code>ZOHO_CLIQ_CLIENT_ID</code>/<code>ZOHO_CLIQ_CLIENT_SECRET</code> to
-                    already be set as env vars on this deployment. Opens Zoho&apos;s consent screen in a new tab;
-                    after you approve, copy the resulting refresh token from that page and add it as
-                    <code>ZOHO_CLIQ_REFRESH_TOKEN</code> in this project&apos;s Vercel Environment Variables, then
-                    redeploy. You won&apos;t need to do this again unless that token is revoked.
+                    One-time setup — requires <code>ZOHO_CLIQ_CLIENT_ID</code>/<code>ZOHO_CLIQ_CLIENT_SECRET</code>/
+                    <code>SUPABASE_SERVICE_ROLE_KEY</code> to already be set as env vars on this deployment. Opens
+                    Zoho&apos;s consent screen in a new tab; once you approve, the resulting token is saved
+                    automatically — nothing to copy or paste. You won&apos;t need to do this again unless that
+                    token is revoked.
                   </span>
                 </div>
 

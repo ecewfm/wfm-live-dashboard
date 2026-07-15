@@ -1,18 +1,18 @@
 // app/api/zoho/callback/route.ts
 // Zoho redirects here after the human completes (or denies) consent at
-// /api/zoho/authorize. Exchanges the returned code for tokens, then shows the
-// refresh token once on this page (Cache-Control: no-store, noindex — not
-// cached or crawlable) so it can be copied straight into Vercel's env vars
-// without hunting through Function Logs. Also still logged server-side as a
-// fallback in case the page is closed before it's copied.
+// /api/zoho/authorize. Exchanges the returned code for tokens, then saves the
+// refresh token straight into Supabase (wfm_cliq_oauth, via
+// lib/supabaseAdmin.ts's service-role client, which bypasses that table's
+// RLS lockdown) — no copy-paste into an env var, no redeploy needed. Mirrors
+// how the old GAS tool's OAuth2 library silently persisted the refresh token
+// into PropertiesService; this is the same idea using Supabase as the store.
 //
-// After this runs once, add the refresh token to THIS project's Vercel env
-// vars as ZOHO_CLIQ_REFRESH_TOKEN, then redeploy so the Cron job
-// (app/api/cliq/scan) picks it up. This route doesn't need to be visited
-// again after that — lib/zohoCliq.ts refreshes its own access tokens from
-// the stored refresh token from then on.
+// This route doesn't need to be visited again after a successful run —
+// lib/zohoCliq.ts reads the stored token and refreshes its own access tokens
+// from it going forward.
 
 import { NextResponse } from 'next/server'
+import { getSupabaseAdmin } from '@/lib/supabaseAdmin'
 
 const ZOHO_TOKEN_URL = 'https://accounts.zoho.com/oauth/v2/token'
 const STATE_COOKIE   = 'zoho_oauth_state'
@@ -82,28 +82,27 @@ export async function GET(request: Request) {
     )
   }
 
-  // Also logged server-side as a fallback (e.g. if this page gets closed
-  // before the token is copied) — but the page itself is now the primary way
-  // to grab it, see below.
-  console.log('[zoho/callback] Authorization complete for refresh token ending in:', tokenData.refresh_token.slice(-6))
+  try {
+    const { error: saveError } = await getSupabaseAdmin()
+      .from('wfm_cliq_oauth')
+      .upsert({ id: 'global', refresh_token: tokenData.refresh_token, updated_at: new Date().toISOString() })
+    if (saveError) throw new Error(saveError.message)
+  } catch (e: any) {
+    console.error('[zoho/callback] Got a refresh token but failed to save it:', e.message)
+    return htmlResponse(
+      `<p><strong>Authorized with Zoho, but failed to save the token.</strong></p>
+       <p>${e.message}</p>
+       <p>Common cause: <code>sql/cliq_oauth_token.sql</code> hasn't been run yet, or
+          <code>SUPABASE_SERVICE_ROLE_KEY</code> isn't set in this deployment's env vars.
+          Fix that and visit <a href="/api/zoho/authorize">/api/zoho/authorize</a> again
+          — re-authorizing is safe to repeat.</p>`,
+      500
+    )
+  }
 
-  const token = String(tokenData.refresh_token)
   const res = htmlResponse(`
-    <p><strong>Authorization complete.</strong></p>
-    <p>Add this as <code>ZOHO_CLIQ_REFRESH_TOKEN</code> in this project's Vercel
-       Environment Variables, then redeploy so the Cron job picks it up. This
-       page won't show it again — copy it now. This route doesn't need to be
-       visited again after that.</p>
-    <div style="display:flex; gap:8px; align-items:center; margin-top:12px;">
-      <input id="tok" type="text" readonly value="${token}"
-        style="flex:1; font-family:monospace; font-size:13px; padding:8px; border:1px solid #ccc; border-radius:4px;" />
-      <button onclick="
-        navigator.clipboard.writeText(document.getElementById('tok').value);
-        this.textContent='Copied!';
-        setTimeout(() => this.textContent='Copy', 1500);
-      " style="padding:8px 14px; border-radius:4px; border:1px solid #888; cursor:pointer; background:#f0f0f0;">Copy</button>
-    </div>
-    <p style="margin-top:16px; color:#a00;">⚠️ Treat this like a password — don't screenshot or share this page.</p>
+    <p><strong>Success! Authorization complete.</strong></p>
+    <p>You're all set — nothing else to do. This route doesn't need to be visited again.</p>
   `)
   res.cookies.delete(STATE_COOKIE)
   return res

@@ -1,10 +1,11 @@
 // app/api/zoho/authorize/route.ts
 // One-time Zoho Cliq OAuth kickoff — visit this route once (in a browser,
-// signed into whichever Zoho/Cliq account should post the breach alerts) to
-// mint a refresh token, then add it as ZOHO_CLIQ_REFRESH_TOKEN in this
-// project's Vercel env vars. Not used on any recurring basis — the Cron job
-// (app/api/cliq/scan, via lib/zohoCliq.ts) mints its own access tokens from
-// that stored refresh token from then on.
+// signed into whichever Zoho/Cliq account should post the breach alerts).
+// The callback route saves the resulting refresh token straight into
+// Supabase — nothing to copy/paste, no redeploy needed. Not used on any
+// recurring basis after that — the Cron job (app/api/cliq/scan, via
+// lib/zohoCliq.ts) mints its own access tokens from that stored refresh
+// token from then on.
 //
 // Requires these Vercel env vars (server-side only, NOT NEXT_PUBLIC_):
 //   ZOHO_CLIQ_CLIENT_ID, ZOHO_CLIQ_CLIENT_SECRET
