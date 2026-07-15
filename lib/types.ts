@@ -153,6 +153,17 @@ export type DashboardLayout = Record<string, PanelRect>
 // shared across every browser/device, unlike the theme toggle. '' = default.
 export interface HeaderColors { band: string; text: string }
 
+// ── Zoho Cliq breach-notification settings ───────────────────────────────────
+// Global settings live in the wfm_cliq_settings singleton row (id='global').
+// Per-account cliqChannel/cliqLastSentAt live on wfm_settings alongside the
+// other per-account config. The actual scan/send loop runs in the wfm-live-
+// scraper process, not this app — this app only edits the config it reads.
+export interface CliqGlobalSettings {
+  enabled:          boolean
+  testMode:         boolean
+  frequencyMinutes: number   // cooldown between repeat alerts for the same account
+}
+
 export interface AgentSource {
   id:               string   // stable id for React keys / add-remove
   label:            string   // static group label for rows from this source (ignored when groupByCol is set)

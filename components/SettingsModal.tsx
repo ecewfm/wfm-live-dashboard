@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, AgentSource } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, AgentSource, CliqGlobalSettings } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
@@ -10,9 +10,9 @@ import {
   DEFAULT_KPI_LABELS, genId, newGroup, newAgentSource,
   fetchPublicTables
 } from '@/lib/utils'
-import { addAccount, removeAccount, type AccountConfig } from '@/lib/settings'
+import { addAccount, removeAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, type AccountConfig } from '@/lib/settings'
 
-type Tab = 'kpi' | 'status' | 'datasource' | 'accounts'
+type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq'
 
 const KPI_ROWS: { key: keyof Thresholds; label: string; sublabel: string; unit: string }[] = [
   { key: 'sla',  label: 'SLA %',         sublabel: 'Service Level Agreement',       unit: '%' },
@@ -253,7 +253,10 @@ interface Props {
   kpiThresholds:    Thresholds
   statusThresholds: StatusThresholds
   dataSource:       DataSourceConfig
-  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig) => void
+  cliqChannel:       string               // this account's Cliq channel unique name ('' = alerts off)
+  cliqGlobalSettings: CliqGlobalSettings   // shared across every account
+  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string) => void
+  onSaveCliqGlobal: (settings: CliqGlobalSettings) => void
   onAccountsChange: () => void           // called after add/remove
   onConfigureAccount: (id: string) => void  // switch active account + go to Data Sources
   onClose:          () => void
@@ -1066,11 +1069,13 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
 
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, onSave, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
   const [ds, setDs]     = useState<DataSourceConfig>(JSON.parse(JSON.stringify(dataSource)))
+  const [cliqChan, setCliqChan]     = useState(cliqChannel)
+  const [cliqGlobal, setCliqGlobal] = useState<CliqGlobalSettings>(JSON.parse(JSON.stringify(cliqGlobalSettings)))
 
   // ── Dynamic status discovery ────────────────────────────────────────────────
   // Every CRM/account uses its own status vocabulary (Aircall's "Ringing" vs
@@ -1211,6 +1216,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             <button className={`sm-tab${tab === 'status' ? ' active' : ''}`} onClick={() => setTab('status')}>
               <i className="bx bx-user-clock" /> Status Durations
             </button>
+            <button className={`sm-tab${tab === 'cliq' ? ' active' : ''}`} onClick={() => setTab('cliq')}>
+              <i className="bx bx-bell" /> Cliq Alerts
+            </button>
           </div>
 
           {/* Body */}
@@ -1334,6 +1342,74 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 </table>
               </>
             )}
+
+            {tab === 'cliq' && (
+              <>
+                <p className="sm-desc">
+                  Sends a breach alert message to a Zoho Cliq channel whenever active breaches are
+                  detected. Runs server-side in the scraper process, checking every ~60s — not something
+                  you need to leave a browser tab open for. <strong>Test Mode</strong> prefixes every
+                  message with <code>[TEST]</code> so channel members know alerts are still being verified.
+                </p>
+
+                <div className="sm-section-title">ZOHO AUTHORIZATION</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 18, flexWrap: 'wrap' }}>
+                  <a href="/api/zoho/authorize" target="_blank" rel="noopener noreferrer"
+                    className="acc-btn acc-btn-cfg" style={{ fontSize: 13, padding: '9px 16px' }}>
+                    <i className="bx bx-link-external" style={{ marginRight: 6 }} />
+                    Authorize with Zoho
+                  </a>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                    One-time setup — requires <code>ZOHO_CLIQ_CLIENT_ID</code>/<code>ZOHO_CLIQ_CLIENT_SECRET</code> to
+                    already be set as env vars on this deployment. Opens Zoho&apos;s consent screen in a new tab;
+                    after you approve, copy the resulting refresh token from that request&apos;s server logs and
+                    paste it into the scraper&apos;s <code>.env</code> as <code>ZOHO_CLIQ_REFRESH_TOKEN</code>. You
+                    won&apos;t need to do this again unless that token is revoked.
+                  </span>
+                </div>
+
+                <div className="sm-section-title">GLOBAL CLIQ SETTINGS</div>
+                <table className="sm-table">
+                  <tbody>
+                    <tr>
+                      <td><div className="sm-metric">Enable Cliq Notifications</div><div className="sm-metric-sub">Applies to every account with a channel configured below</div></td>
+                      <td style={{ textAlign: 'center' }}>
+                        <input type="checkbox" checked={cliqGlobal.enabled}
+                          onChange={() => setCliqGlobal(prev => ({ ...prev, enabled: !prev.enabled }))} />
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><div className="sm-metric">Test Mode</div><div className="sm-metric-sub">Prefixes every message with [TEST]</div></td>
+                      <td style={{ textAlign: 'center' }}>
+                        <input type="checkbox" checked={cliqGlobal.testMode}
+                          onChange={() => setCliqGlobal(prev => ({ ...prev, testMode: !prev.testMode }))} />
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><div className="sm-metric">Re-alert Frequency</div><div className="sm-metric-sub">Minimum minutes between repeat alerts for the same account</div></td>
+                      <td style={{ textAlign: 'center' }}>
+                        <div className="sm-input-cell" style={{ justifyContent: 'center' }}>
+                          <input type="number" className="sm-input" min={1} max={60}
+                            value={cliqGlobal.frequencyMinutes}
+                            onChange={e => setCliqGlobal(prev => ({ ...prev, frequencyMinutes: Math.max(1, parseInt(e.target.value) || 5) }))} />
+                          <span className="sm-unit">min</span>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <div className="sm-section-title" style={{ marginTop: 20 }}>CLIQ CHANNEL — {accountId}</div>
+                <p className="sm-desc" style={{ marginBottom: 10 }}>
+                  Enter the <strong>Unique Name</strong> of the Zoho Cliq channel for this account
+                  (find it under the channel&apos;s Connectors tab in Cliq). Leave blank to disable
+                  Cliq alerts for this account specifically.
+                </p>
+                <input type="text" className="sm-input" style={{ width: '100%', textAlign: 'left' }}
+                  placeholder="e.g. ashleywfmlive" value={cliqChan}
+                  onChange={e => setCliqChan(e.target.value.trim())} />
+              </>
+            )}
           </div>
 
           {/* Footer */}
@@ -1345,7 +1421,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan); onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>

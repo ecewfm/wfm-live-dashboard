@@ -4,7 +4,7 @@
 // localStorage is kept as a cache/fallback for offline use.
 
 import { supabase } from './supabase'
-import type { Thresholds, DataSourceConfig, DashboardLayout, HeaderColors } from './types'
+import type { Thresholds, DataSourceConfig, DashboardLayout, HeaderColors, CliqGlobalSettings } from './types'
 import type { StatusThresholds } from './utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
@@ -15,12 +15,17 @@ import {
   migrateDataSource
 } from './utils'
 
+export const DEFAULT_CLIQ_GLOBAL_SETTINGS: CliqGlobalSettings = {
+  enabled: false, testMode: true, frequencyMinutes: 5,
+}
+
 export interface AccountSettings {
   kpi:    Thresholds
   status: StatusThresholds
   ds:     DataSourceConfig
   layout: DashboardLayout
   headerColors: HeaderColors
+  cliqChannel: string
 }
 
 // ── Load settings for one account ─────────────────────────────────────────────
@@ -29,13 +34,14 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
   try {
     let { data, error } = await supabase
       .from('wfm_settings')
-      .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout, header_band_color, header_text_color')
+      .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout, header_band_color, header_text_color, cliq_channel')
       .eq('id', accountId)
       .maybeSingle()
 
-    // header_band_color/header_text_color don't exist until sql/header_colors.sql
-    // has been run — PostgREST errors the WHOLE select on an unknown column, so
-    // retry without them rather than losing kpi/status/data-source/layout too.
+    // header_band_color/header_text_color/cliq_channel don't exist until their
+    // migrations have been run — PostgREST errors the WHOLE select on an
+    // unknown column, so retry without them rather than losing kpi/status/
+    // data-source/layout too.
     if (error) {
       const retry = await supabase
         .from('wfm_settings')
@@ -66,6 +72,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
         headerColors: (data.header_band_color != null || data.header_text_color != null)
                   ? { band: data.header_band_color || '', text: data.header_text_color || '' }
                   : localColors,
+        cliqChannel: data.cliq_channel || '',
       }
       // Refresh localStorage cache
       saveKpiThresholds(accountId, settings.kpi)
@@ -83,6 +90,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     ds:     loadDataSource(accountId),
     layout: loadDashboardLayout(accountId),
     headerColors: loadHeaderColorsLocal(accountId),
+    cliqChannel: '',
   }
 }
 
@@ -128,13 +136,57 @@ export async function saveHeaderColors(accountId: string, colors: HeaderColors):
   }
 }
 
+// ── Zoho Cliq global notification settings (singleton row, id='global') ─────
+// Enable/test-mode/frequency apply to every account — the actual scan/send
+// loop lives in the wfm-live-scraper process and reads this same table
+// directly via its own Supabase REST calls (see lib/cliq-notifier.js there).
+export async function loadCliqSettings(): Promise<CliqGlobalSettings> {
+  try {
+    const { data, error } = await supabase
+      .from('wfm_cliq_settings')
+      .select('enabled, test_mode, frequency_minutes')
+      .eq('id', 'global')
+      .maybeSingle()
+    if (!error && data) {
+      return {
+        enabled:          !!data.enabled,
+        testMode:         data.test_mode !== false,
+        frequencyMinutes: data.frequency_minutes || DEFAULT_CLIQ_GLOBAL_SETTINGS.frequencyMinutes,
+      }
+    }
+  } catch (e) {
+    console.warn('[settings] Cliq settings load failed:', e)
+  }
+  return { ...DEFAULT_CLIQ_GLOBAL_SETTINGS }
+}
+
+export async function saveCliqSettings(settings: CliqGlobalSettings): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('wfm_cliq_settings')
+      .upsert({
+        id:                'global',
+        enabled:           settings.enabled,
+        test_mode:         settings.testMode,
+        frequency_minutes: settings.frequencyMinutes,
+        updated_at:        new Date().toISOString(),
+      })
+    if (error) { console.warn('[settings] Cliq settings save error:', error.message); return false }
+    return true
+  } catch (e) {
+    console.warn('[settings] Cliq settings save failed:', e)
+    return false
+  }
+}
+
 // ── Save settings for one account ─────────────────────────────────────────────
 // Writes to Supabase (shared) AND localStorage (local cache).
 export async function saveSettings(
   accountId: string,
   kpi:    Thresholds,
   status: StatusThresholds,
-  ds:     DataSourceConfig
+  ds:     DataSourceConfig,
+  cliqChannel: string = ''
 ): Promise<boolean> {
   // 1. Always write to localStorage immediately (instant, works offline)
   saveKpiThresholds(accountId, kpi)
@@ -143,7 +195,7 @@ export async function saveSettings(
 
   // 2. Write to Supabase (shared across all browsers/devices)
   try {
-    const { error } = await supabase
+    let { error } = await supabase
       .from('wfm_settings')
       .upsert({
         id:                accountId,
@@ -151,8 +203,25 @@ export async function saveSettings(
         kpi_thresholds:    kpi,
         status_thresholds: status,
         data_source:       ds,
+        cliq_channel:      cliqChannel,
         updated_at:        new Date().toISOString(),
       })
+    // cliq_channel doesn't exist until sql/cliq_notifications.sql has been
+    // run — PostgREST rejects the WHOLE upsert on an unknown column, so retry
+    // without it rather than failing to save kpi/status/data-source too.
+    if (error) {
+      const retry = await supabase
+        .from('wfm_settings')
+        .upsert({
+          id:                accountId,
+          account_id:        accountId,
+          kpi_thresholds:    kpi,
+          status_thresholds: status,
+          data_source:       ds,
+          updated_at:        new Date().toISOString(),
+        })
+      error = retry.error
+    }
     if (error) { console.warn('[settings] Supabase save error:', error.message); return false }
     return true
   } catch (e) {

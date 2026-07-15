@@ -3,8 +3,12 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
-import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors } from '@/lib/types'
-import { loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount, type AccountConfig } from '@/lib/settings'
+import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings } from '@/lib/types'
+import {
+  loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
+  loadCliqSettings, saveCliqSettings, DEFAULT_CLIQ_GLOBAL_SETTINGS,
+  type AccountConfig
+} from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds, isCoarseDuration,
@@ -162,6 +166,8 @@ export default function Dashboard() {
   const [dataSources, setDataSources]           = useState<Record<string, DataSourceConfig>>({})
   const [dashboardLayouts, setDashboardLayouts] = useState<Record<string, DashboardLayout>>({})
   const [headerColors, setHeaderColors]         = useState<Record<string, HeaderColors>>({})
+  const [cliqChannels, setCliqChannels]         = useState<Record<string, string>>({})
+  const [cliqGlobal, setCliqGlobal]             = useState<CliqGlobalSettings>(DEFAULT_CLIQ_GLOBAL_SETTINGS)
   const [displayNames, setDisplayNames]         = useState<Record<string, string>>({})
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -304,18 +310,22 @@ export default function Dashboard() {
       const dsMap: Record<string, DataSourceConfig>     = {}
       const layoutMap: Record<string, DashboardLayout>  = {}
       const colorMap: Record<string, HeaderColors>      = {}
+      const cliqChanMap: Record<string, string>         = {}
       ids.forEach(id => {
-        kpiMap[id]    = allSettings[id].kpi
-        statusMap[id] = allSettings[id].status
-        dsMap[id]     = allSettings[id].ds
-        layoutMap[id] = allSettings[id].layout
-        colorMap[id]  = allSettings[id].headerColors
+        kpiMap[id]      = allSettings[id].kpi
+        statusMap[id]   = allSettings[id].status
+        dsMap[id]       = allSettings[id].ds
+        layoutMap[id]   = allSettings[id].layout
+        colorMap[id]    = allSettings[id].headerColors
+        cliqChanMap[id] = allSettings[id].cliqChannel
       })
       setKpiThresholds(kpiMap)
       setStatusThresholds(statusMap)
       setDataSources(dsMap)
       setDashboardLayouts(layoutMap)
       setHeaderColors(colorMap)
+      setCliqChannels(cliqChanMap)
+      loadCliqSettings().then(setCliqGlobal)
 
       const savedAcc = localStorage.getItem('wfm_current_account')
       const first = savedAcc && ids.includes(savedAcc) ? savedAcc : (ids[0] ?? '')
@@ -387,6 +397,7 @@ export default function Dashboard() {
         setDataSources(prev => ({ ...prev, [accId]: settings.ds }))
         setDashboardLayouts(prev => ({ ...prev, [accId]: settings.layout }))
         setHeaderColors(prev => ({ ...prev, [accId]: settings.headerColors }))
+        setCliqChannels(prev => ({ ...prev, [accId]: settings.cliqChannel }))
       })
       .subscribe()
     return () => {
@@ -464,15 +475,16 @@ export default function Dashboard() {
   }, [accounts, data, agentTimers, kpiThresholds, statusThresholds, dataSources])
 
   // ── Save settings — writes to Supabase so all browsers sync ────────────────
-  const handleSaveSettings = async (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig) => {
+  const handleSaveSettings = async (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string) => {
     // Update local state immediately (instant UI feedback)
     setKpiThresholds(prev => ({ ...prev, [currentAccount]: kpi }))
     setStatusThresholds(prev => ({ ...prev, [currentAccount]: status }))
     setDataSources(prev => ({ ...prev, [currentAccount]: ds }))
+    setCliqChannels(prev => ({ ...prev, [currentAccount]: cliqChannel }))
     // Re-fetch with new data source
     fetchAccount(currentAccount, ds)
     // Persist to Supabase (shared) + localStorage (cache)
-    await saveSettings(currentAccount, kpi, status, ds)
+    await saveSettings(currentAccount, kpi, status, ds, cliqChannel)
   }
 
   // ── Save one account's Overview header colors — instant, like layout drag ──
@@ -480,6 +492,12 @@ export default function Dashboard() {
     const next = { ...(headerColors[accId] ?? DEFAULT_HEADER_COLORS), ...patch }
     setHeaderColors(prev => ({ ...prev, [accId]: next }))
     saveHeaderColors(accId, next)
+  }
+
+  // ── Save the global Cliq notification settings (shared across all accounts) ─
+  const handleSaveCliqGlobal = (settings: CliqGlobalSettings) => {
+    setCliqGlobal(settings)
+    saveCliqSettings(settings)
   }
 
   const switchAccount = (id: string) => {
@@ -506,7 +524,10 @@ export default function Dashboard() {
           kpiThresholds={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
           statusThresholds={statusThresholds[currentAccount] ?? DEFAULT_STATUS_THRESHOLDS}
           dataSource={dataSources[currentAccount] ?? DEFAULT_DATA_SOURCE}
+          cliqChannel={cliqChannels[currentAccount] ?? ''}
+          cliqGlobalSettings={cliqGlobal}
           onSave={handleSaveSettings}
+          onSaveCliqGlobal={handleSaveCliqGlobal}
           onAccountsChange={async () => {
             const configs = await loadAccounts()
             const ids = configs.map(a => a.id)
@@ -520,6 +541,7 @@ export default function Dashboard() {
               setDataSources(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].ds }); return n })
               setDashboardLayouts(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].layout }); return n })
               setHeaderColors(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].headerColors }); return n })
+              setCliqChannels(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].cliqChannel }); return n })
             }
           }}
           onConfigureAccount={id => { switchAccount(id) }}
