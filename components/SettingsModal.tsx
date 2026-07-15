@@ -1076,6 +1076,22 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [ds, setDs]     = useState<DataSourceConfig>(JSON.parse(JSON.stringify(dataSource)))
   const [cliqChan, setCliqChan]     = useState(cliqChannel)
   const [cliqGlobal, setCliqGlobal] = useState<CliqGlobalSettings>(JSON.parse(JSON.stringify(cliqGlobalSettings)))
+  const [cliqScanning, setCliqScanning] = useState(false)
+  const [cliqScanLog, setCliqScanLog]   = useState<string[] | null>(null)
+
+  // ── Force an immediate Cliq scan (bypasses cooldown, not staleness) ─────────
+  const handleForceScan = async () => {
+    setCliqScanning(true)
+    setCliqScanLog(null)
+    try {
+      const res  = await fetch('/api/cliq/force-scan', { method: 'POST' })
+      const data = await res.json()
+      setCliqScanLog(data.log ?? [data.error || 'Unknown error'])
+    } catch (e: any) {
+      setCliqScanLog([`Request failed: ${e.message}`])
+    }
+    setCliqScanning(false)
+  }
 
   // ── Dynamic status discovery ────────────────────────────────────────────────
   // Every CRM/account uses its own status vocabulary (Aircall's "Ringing" vs
@@ -1347,8 +1363,8 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
               <>
                 <p className="sm-desc">
                   Sends a breach alert message to a Zoho Cliq channel whenever active breaches are
-                  detected. Runs server-side in the scraper process, checking every ~60s — not something
-                  you need to leave a browser tab open for. <strong>Test Mode</strong> prefixes every
+                  detected. Runs as a Vercel Cron job, checking every minute — not something you need to
+                  leave a browser tab open for. <strong>Test Mode</strong> prefixes every
                   message with <code>[TEST]</code> so channel members know alerts are still being verified.
                 </p>
 
@@ -1362,9 +1378,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   <span style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
                     One-time setup — requires <code>ZOHO_CLIQ_CLIENT_ID</code>/<code>ZOHO_CLIQ_CLIENT_SECRET</code> to
                     already be set as env vars on this deployment. Opens Zoho&apos;s consent screen in a new tab;
-                    after you approve, copy the resulting refresh token from that request&apos;s server logs and
-                    paste it into the scraper&apos;s <code>.env</code> as <code>ZOHO_CLIQ_REFRESH_TOKEN</code>. You
-                    won&apos;t need to do this again unless that token is revoked.
+                    after you approve, copy the resulting refresh token from that page and add it as
+                    <code>ZOHO_CLIQ_REFRESH_TOKEN</code> in this project&apos;s Vercel Environment Variables, then
+                    redeploy. You won&apos;t need to do this again unless that token is revoked.
                   </span>
                 </div>
 
@@ -1408,6 +1424,28 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 <input type="text" className="sm-input" style={{ width: '100%', textAlign: 'left' }}
                   placeholder="e.g. ashleywfmlive" value={cliqChan}
                   onChange={e => setCliqChan(e.target.value.trim())} />
+
+                <div className="sm-section-title" style={{ marginTop: 20 }}>FORCE SCAN</div>
+                <p className="sm-desc" style={{ marginBottom: 10 }}>
+                  Runs the scan immediately instead of waiting for the next scheduled minute —
+                  bypasses the cooldown above, but not the staleness suppression (an account whose
+                  data hasn&apos;t updated recently still won&apos;t send).
+                </p>
+                <button type="button" className="acc-btn acc-btn-cfg" disabled={cliqScanning}
+                  style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleForceScan}>
+                  <i className={`bx ${cliqScanning ? 'bx-loader-alt bx-spin' : 'bx-play-circle'}`} style={{ marginRight: 6 }} />
+                  {cliqScanning ? 'Scanning...' : 'Force Scan Now'}
+                </button>
+                {cliqScanLog && (
+                  <pre style={{
+                    marginTop: 12, padding: 12, maxHeight: 220, overflowY: 'auto',
+                    background: 'var(--bg-body,#f0f2f1)', border: '1px solid var(--border,#e1e6e4)',
+                    borderRadius: 6, fontSize: 11.5, lineHeight: 1.6, whiteSpace: 'pre-wrap',
+                    color: 'var(--text-main)',
+                  }}>
+                    {cliqScanLog.join('\n')}
+                  </pre>
+                )}
               </>
             )}
           </div>

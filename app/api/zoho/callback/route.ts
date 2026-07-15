@@ -1,15 +1,16 @@
 // app/api/zoho/callback/route.ts
 // Zoho redirects here after the human completes (or denies) consent at
-// /api/zoho/authorize. Exchanges the returned code for tokens, then logs the
-// refresh token to THIS REQUEST's server-side function logs only (Vercel
-// dashboard → Deployments → Functions → this route's invocation) — never
-// rendered in the HTML response, so it's not sitting in the browser's
-// response body even for the one person who completes this flow.
+// /api/zoho/authorize. Exchanges the returned code for tokens, then shows the
+// refresh token once on this page (Cache-Control: no-store, noindex — not
+// cached or crawlable) so it can be copied straight into Vercel's env vars
+// without hunting through Function Logs. Also still logged server-side as a
+// fallback in case the page is closed before it's copied.
 //
-// After this runs once, copy the refresh token from the function log into
-// the wfm-live-scraper process's .env as ZOHO_CLIQ_REFRESH_TOKEN. This route
-// is never used again after that — the scraper refreshes its own access
-// tokens directly against Zoho from then on.
+// After this runs once, add the refresh token to THIS project's Vercel env
+// vars as ZOHO_CLIQ_REFRESH_TOKEN, then redeploy so the Cron job
+// (app/api/cliq/scan) picks it up. This route doesn't need to be visited
+// again after that — lib/zohoCliq.ts refreshes its own access tokens from
+// the stored refresh token from then on.
 
 import { NextResponse } from 'next/server'
 
@@ -81,18 +82,28 @@ export async function GET(request: Request) {
     )
   }
 
-  // Server-side log ONLY — never put this in the HTML response.
-  console.log('[zoho/callback] Authorization complete. Refresh token (copy into the scraper\'s .env as ZOHO_CLIQ_REFRESH_TOKEN):', tokenData.refresh_token)
+  // Also logged server-side as a fallback (e.g. if this page gets closed
+  // before the token is copied) — but the page itself is now the primary way
+  // to grab it, see below.
+  console.log('[zoho/callback] Authorization complete for refresh token ending in:', tokenData.refresh_token.slice(-6))
 
+  const token = String(tokenData.refresh_token)
   const res = htmlResponse(`
     <p><strong>Authorization complete.</strong></p>
-    <p>The refresh token was NOT shown here — it's in this request's server-side
-       function log instead (Vercel dashboard → your project → Deployments →
-       this deployment → Functions → find the <code>/api/zoho/callback</code>
-       invocation for this request → view logs).</p>
-    <p>Copy that refresh token into the <code>wfm-live-scraper</code> process's
-       <code>.env</code> as <code>ZOHO_CLIQ_REFRESH_TOKEN</code>, then you're done —
-       this route doesn't need to be visited again.</p>
+    <p>Add this as <code>ZOHO_CLIQ_REFRESH_TOKEN</code> in this project's Vercel
+       Environment Variables, then redeploy so the Cron job picks it up. This
+       page won't show it again — copy it now. This route doesn't need to be
+       visited again after that.</p>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:12px;">
+      <input id="tok" type="text" readonly value="${token}"
+        style="flex:1; font-family:monospace; font-size:13px; padding:8px; border:1px solid #ccc; border-radius:4px;" />
+      <button onclick="
+        navigator.clipboard.writeText(document.getElementById('tok').value);
+        this.textContent='Copied!';
+        setTimeout(() => this.textContent='Copy', 1500);
+      " style="padding:8px 14px; border-radius:4px; border:1px solid #888; cursor:pointer; background:#f0f0f0;">Copy</button>
+    </div>
+    <p style="margin-top:16px; color:#a00;">⚠️ Treat this like a password — don't screenshot or share this page.</p>
   `)
   res.cookies.delete(STATE_COOKIE)
   return res

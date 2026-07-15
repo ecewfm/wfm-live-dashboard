@@ -60,3 +60,44 @@ Invoke-RestMethod -Method POST `
 ```
 
 Full schema → see TASK-API.md
+
+## Zoho Cliq breach notifications
+
+Migrated from an older Google Apps Script tool's Cliq integration. Runs
+entirely in **this** app via a Vercel Cron job — NOT in the `wfm-live-scraper`
+repo (that was tried first, then moved here once this project confirmed it's
+on Vercel Pro, which allows a real 1-minute cron for free; Hobby plan only
+allows once-a-day cron, which is why it didn't start here originally).
+
+- `vercel.json` — `crons` config, hits `/api/cliq/scan` every minute.
+- `app/api/cliq/scan/route.ts` — the Cron-triggered scan (protected by
+  `CRON_SECRET`, which Vercel auto-sends as a Bearer token when that env var
+  is set).
+- `app/api/cliq/force-scan/route.ts` — same scan, no secret, triggered by the
+  "Force Scan Now" button in Settings → Cliq Alerts.
+- `lib/cliqScan.ts` — the actual orchestration (fetch every account's
+  `wfm_settings` row → for ones with `cliq_channel` set, fetch live KPI/agent
+  data per that account's own `data_source` config → run `lib/breaches.ts`'s
+  `buildBreaches()` → send to Cliq if any breach found).
+- `lib/breaches.ts` — the ONE canonical breach algorithm, shared by this scan
+  AND the live Dashboard/Overview pages (`components/Dashboard.tsx` imports
+  it too) — never duplicate this logic elsewhere.
+- `lib/zohoCliq.ts` — mints Zoho access tokens from a stored refresh token
+  (`ZOHO_CLIQ_REFRESH_TOKEN` env var) and posts to the Cliq message API.
+- `app/api/zoho/authorize` + `app/api/zoho/callback` — the ONE-TIME OAuth
+  handshake (needs a public HTTPS redirect, which is why this lives in the
+  Vercel app specifically) that produces `ZOHO_CLIQ_REFRESH_TOKEN` in the
+  first place. Triggered by the "Authorize with Zoho" button in the same
+  Settings tab. Refresh token is logged server-side only (Vercel function
+  logs), never rendered in the callback page.
+
+Required env vars (Vercel dashboard, NOT `NEXT_PUBLIC_` — server-only):
+`ZOHO_CLIQ_CLIENT_ID`, `ZOHO_CLIQ_CLIENT_SECRET`, `ZOHO_CLIQ_REFRESH_TOKEN`
+(from the one-time authorize flow), and optionally `CRON_SECRET` (recommended
+— without it, `/api/cliq/scan` accepts unauthenticated requests).
+
+Per-account cooldown (`wfm_settings.cliq_last_sent_at`, default 5 min,
+configurable in Settings) and a 5-minute staleness suppression (same
+`isDataStale()` threshold the dashboard's own "DATA NOT IN SYNC" overlay
+uses) both apply on the scheduled scan — cooldown only advances on a
+confirmed successful send. Force Scan bypasses cooldown, not staleness.
