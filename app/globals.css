@@ -351,12 +351,6 @@ body {
   font-size: 20px; font-weight: 700; line-height: 1.1;
   transition: color 0.3s;
 }
-/* Tile sublabel */
-.ov-kpi-tile-sublabel {
-  font-size: 9px; color: var(--text-muted); opacity: 0.85;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-
 /* ── Overview breach section ─────────────────────────────────────────────── */
 .ov-breach-section { flex: 1; }
 

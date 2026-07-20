@@ -1196,14 +1196,14 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
             <div key={group.id} style={{ marginBottom: 10 }}>
               <div className="ov-section-label">{group.name || 'Global'}</div>
               <div className="ov-kpi-tiles">
-                {group.cells.sla  && <OvKpiTile label={ds.kpiLabels.sla}  value={slaVal}  sublabel={`Target ${kpiTh.sla.targ}%`}  colorClass={getKpiColorClass(extractPercent(slaVal), kpiTh.sla)} />}
-                {group.cells.wait && <OvKpiTile label={ds.kpiLabels.wait} value={waitVal} sublabel="In queue"                     colorClass={getKpiColorClass(parseInt(waitVal)||0, kpiTh.wait)} />}
-                {group.cells.aht  && <OvKpiTile label={ds.kpiLabels.aht}  value={ahtVal}  sublabel="Handle time"                  colorClass="text-main" />}
-                {group.cells.abn  && <OvKpiTile label={ds.kpiLabels.abn}  value={abnVal}  sublabel={`Target <${kpiTh.abn.targ}%`} colorClass={getKpiColorClass(extractPercent(abnVal), kpiTh.abn)} />}
+                {group.cells.sla  && <OvKpiTile label={ds.kpiLabels.sla}  value={slaVal}  colorClass={getKpiColorClass(extractPercent(slaVal), kpiTh.sla)} />}
+                {group.cells.wait && <OvKpiTile label={ds.kpiLabels.wait} value={waitVal} colorClass={getKpiColorClass(parseInt(waitVal)||0, kpiTh.wait)} />}
+                {group.cells.aht  && <OvKpiTile label={ds.kpiLabels.aht}  value={ahtVal}  colorClass="text-main" />}
+                {group.cells.abn  && <OvKpiTile label={ds.kpiLabels.abn}  value={abnVal}  colorClass={getKpiColorClass(extractPercent(abnVal), kpiTh.abn)} />}
                 {(ds.extraTiles ?? []).map(t => {
                   if (!group.cells[t.key]) return null
                   const raw = rc(group.cells[t.key])
-                  return <OvKpiTile key={t.key} label={t.label} value={raw} sublabel={`Target ${t.targ}`} colorClass={getExtraTileColorClass(extractPercent(raw), t)} />
+                  return <OvKpiTile key={t.key} label={t.label} value={raw} colorClass={getExtraTileColorClass(extractPercent(raw), t)} />
                 })}
               </div>
             </div>
@@ -1271,14 +1271,13 @@ function HeaderColorPicker({ icon, title, color, defaultColor, onChange, onReset
   )
 }
 
-function OvKpiTile({ label, value, sublabel, colorClass }: {
-  label: string; value: string; sublabel: string; colorClass: string
+function OvKpiTile({ label, value, colorClass }: {
+  label: string; value: string; colorClass: string
 }) {
   return (
     <div className="ov-kpi-tile">
       <div className="ov-kpi-tile-label">{label}</div>
       <div className={`ov-kpi-tile-value ${colorClass}`}>{value || '--'}</div>
-      <div className="ov-kpi-tile-sublabel">{sublabel}</div>
     </div>
   )
 }
