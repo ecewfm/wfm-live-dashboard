@@ -78,7 +78,10 @@ export async function createWorkforceLogRecord(input: WorkforceLogInput): Promis
   const site = lookupValue(input.site, false)
   if (site !== undefined) data.Site = site
 
-  const url = `${CREATOR_API_BASE}/${OWNER_NAME}/${APP_LINK_NAME}/form/${FORM_LINK_NAME}`
+  // "/data/" segment required before {owner}/{app} — see lib/zohoFieldScan.ts
+  // for why (discovered via the same "Invalid API URL format" error on the
+  // read side, fixed by matching Meta API's "/meta/" segment pattern).
+  const url = `${CREATOR_API_BASE}/data/${OWNER_NAME}/${APP_LINK_NAME}/form/${FORM_LINK_NAME}`
   const res = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Zoho-oauthtoken ${token}`, 'Content-Type': 'application/json' },

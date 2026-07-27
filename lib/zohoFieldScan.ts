@@ -111,7 +111,13 @@ export async function scanZohoFields(): Promise<FieldScanResult> {
   let cursor: string | null = null
 
   do {
-    const url = `${CREATOR_API_BASE}/${OWNER_NAME}/${APP_LINK_NAME}/report/${REPORT_LINK_NAME}?field_config=all&max_records=200`
+    // Both link names are individually confirmed valid (logged above) via
+    // Zoho's Meta API, which itself needed an explicit "/meta/" path segment
+    // before {owner}/{app} to work — the parallel "/data/" segment below for
+    // this actual record-read call is what that symmetry implies, and is
+    // the fix for the generic "Invalid API URL format" (code 1000) error
+    // this call was throwing without it.
+    const url = `${CREATOR_API_BASE}/data/${OWNER_NAME}/${APP_LINK_NAME}/report/${REPORT_LINK_NAME}?field_config=all&max_records=200`
     const headers: Record<string, string> = { Authorization: `Zoho-oauthtoken ${token}` }
     if (cursor) headers.record_cursor = cursor
 
