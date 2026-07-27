@@ -1075,19 +1075,20 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
 // scan). Typing something that exactly matches a known option's label stores
 // its Zoho ID (most reliable write); anything else is kept as plain typed
 // text (Zoho resolves it by display value at write time — see CLAUDE.md).
-function ZohoLookupField({ label, hint, fieldName, value, onChange }: {
+function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey }: {
   label:     string
   hint:      string
   fieldName: 'Category' | 'Sub_Categories' | 'x_Account' | 'Site'
   value:     ZohoLookupChoice
   onChange:  (v: ZohoLookupChoice) => void
+  refreshKey: number   // bumped after a successful field scan to force a re-fetch without closing the modal
 }) {
   const [options, setOptions] = useState<ZohoFieldOption[]>([])
   useEffect(() => {
     let cancelled = false
     loadZohoFieldOptions(fieldName).then(opts => { if (!cancelled) setOptions(opts) })
     return () => { cancelled = true }
-  }, [fieldName])
+  }, [fieldName, refreshKey])
 
   const currentText = value.id ? (options.find(o => o.id === value.id)?.label ?? '') : (value.text || '')
   const datalistId = `zoho-lookup-${fieldName}`
@@ -1126,6 +1127,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [zohoLu, setZohoLu]             = useState<ZohoLookups>(JSON.parse(JSON.stringify(zohoLookups)))
   const [fieldScanning, setFieldScanning] = useState(false)
   const [fieldScanLog, setFieldScanLog]   = useState<string[] | null>(null)
+  const [fieldOptionsRefresh, setFieldOptionsRefresh] = useState(0)
 
   // ── Force an immediate Cliq scan (bypasses cooldown, not staleness) ─────────
   const handleForceScan = async () => {
@@ -1150,6 +1152,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       const res  = await fetch('/api/zoho/force-scan-fields', { method: 'POST' })
       const data = await res.json()
       setFieldScanLog(data.log ?? [data.error || 'Unknown error'])
+      // Re-fetch every combobox's options immediately — without this, a scan
+      // triggered from an already-open modal writes fresh data to Supabase
+      // but the four ZohoLookupFields below (which only fetch once on mount)
+      // never know to reload it, so they'd stay looking empty/stale until
+      // the modal was closed and reopened.
+      setFieldOptionsRefresh(v => v + 1)
     } catch (e: any) {
       setFieldScanLog([`Request failed: ${e.message}`])
     }
@@ -1509,16 +1517,16 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   scanned so far. Reporting stays off for this account until <strong>Account</strong> is
                   filled in, even if the toggle above is checked.
                 </p>
-                <ZohoLookupField label="Account" fieldName="x_Account"
+                <ZohoLookupField label="Account" fieldName="x_Account" refreshKey={fieldOptionsRefresh}
                   hint="Must match this account's name in Zoho's own Accounts list (the x_Account field)."
                   value={zohoLu.account} onChange={v => setZohoLu(prev => ({ ...prev, account: v }))} />
-                <ZohoLookupField label="Category" fieldName="Category"
+                <ZohoLookupField label="Category" fieldName="Category" refreshKey={fieldOptionsRefresh}
                   hint="Optional — leave blank to not set Category on this account's records."
                   value={zohoLu.category} onChange={v => setZohoLu(prev => ({ ...prev, category: v }))} />
-                <ZohoLookupField label="Sub Category" fieldName="Sub_Categories"
+                <ZohoLookupField label="Sub Category" fieldName="Sub_Categories" refreshKey={fieldOptionsRefresh}
                   hint="Optional — leave blank to not set Sub Category on this account's records."
                   value={zohoLu.subCategory} onChange={v => setZohoLu(prev => ({ ...prev, subCategory: v }))} />
-                <ZohoLookupField label="Site" fieldName="Site"
+                <ZohoLookupField label="Site" fieldName="Site" refreshKey={fieldOptionsRefresh}
                   hint="Optional — leave blank to not set Site on this account's records."
                   value={zohoLu.site} onChange={v => setZohoLu(prev => ({ ...prev, site: v }))} />
 
