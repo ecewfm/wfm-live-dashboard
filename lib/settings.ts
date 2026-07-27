@@ -224,9 +224,17 @@ export async function loadZohoFieldOptions(
       .select('zoho_id, display_value')
       .eq('field_name', fieldName)
       .order('display_value')
-    if (error || !data) return []
+    // A real error here (vs. genuinely zero rows) usually means RLS is
+    // enabled on wfm_zoho_field_options with no read policy for the anon
+    // key — see sql/zoho_field_options.sql. Logged rather than surfaced in
+    // the UI since this is a combobox convenience feature, not a blocking
+    // failure, but silent before this was hard to tell apart from "just no
+    // options scanned yet".
+    if (error) { console.warn('[settings] Zoho field options load error:', error.message); return [] }
+    if (!data) return []
     return data.map((r: any) => ({ id: r.zoho_id, label: r.display_value }))
-  } catch {
+  } catch (e) {
+    console.warn('[settings] Zoho field options load failed:', e)
     return []
   }
 }

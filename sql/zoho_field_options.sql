@@ -22,3 +22,11 @@ CREATE TABLE IF NOT EXISTS wfm_zoho_field_options (
   last_seen_at  timestamptz DEFAULT now(),
   UNIQUE (field_name, zoho_id)
 );
+
+-- Explicit, not just "no policies added" — if this table was ever created
+-- through Supabase's dashboard "New Table" UI instead of this script, RLS
+-- defaults ON there with zero policies, which silently blocks the anon-key
+-- reads the Settings UI's comboboxes depend on (writes still succeed via
+-- the service-role key, so a scan looks successful while the dropdowns
+-- stay empty). Safe/idempotent to re-run.
+ALTER TABLE wfm_zoho_field_options DISABLE ROW LEVEL SECURITY;

@@ -61,14 +61,18 @@ type LookupField = typeof LOOKUP_FIELDS[number]
 
 interface DiscoveredOption { field_name: LookupField; zoho_id: string; display_value: string }
 
-// A lookup field's value comes back as either a single {display_value, ID}
-// object, an array of them (multi-lookup, e.g. x_Account), or blank/null.
+// A lookup field's value comes back as either a single object, an array of
+// them (multi-lookup, e.g. x_Account), or blank/null. The display-name key
+// is "zc_display_value" in the actual REST API response — "display_value"
+// (checked first below) only ever showed up in the original Deluge debug
+// dump, which formats fields differently than the raw v2.1 JSON does; kept
+// as a fallback in case a future API version changes this back.
 function extractPairs(fieldName: LookupField, raw: any): DiscoveredOption[] {
   if (!raw) return []
   const items = Array.isArray(raw) ? raw : [raw]
   return items
     .filter(v => v && typeof v === 'object' && v.ID != null)
-    .map(v => ({ field_name: fieldName, zoho_id: String(v.ID), display_value: String(v.display_value ?? v.ID) }))
+    .map(v => ({ field_name: fieldName, zoho_id: String(v.ID), display_value: String(v.display_value ?? v.zc_display_value ?? v.ID) }))
 }
 
 export interface FieldScanResult {
