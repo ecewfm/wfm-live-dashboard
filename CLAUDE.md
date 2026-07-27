@@ -82,8 +82,11 @@ allows once-a-day cron, which is why it didn't start here originally).
 - `lib/breaches.ts` — the ONE canonical breach algorithm, shared by this scan
   AND the live Dashboard/Overview pages (`components/Dashboard.tsx` imports
   it too) — never duplicate this logic elsewhere.
-- `lib/zohoCliq.ts` — mints Zoho access tokens from a refresh token stored in
-  Supabase (`wfm_cliq_oauth`, see below) and posts to the Cliq message API.
+- `lib/zohoAuth.ts` — mints Zoho access tokens from the ONE refresh token
+  stored in Supabase (`wfm_cliq_oauth`, see below). Shared by every Zoho
+  product this app talks to (Cliq + Creator) — one self-client, one stored
+  refresh token, scopes for both requested together at authorize time.
+- `lib/zohoCliq.ts` — posts to the Cliq message API using `lib/zohoAuth.ts`.
 - `app/api/zoho/authorize` + `app/api/zoho/callback` — the ONE-TIME OAuth
   handshake (needs a public HTTPS redirect, which is why this lives in the
   Vercel app specifically). The callback route saves the resulting refresh
@@ -110,3 +113,95 @@ configurable in Settings) and a 5-minute staleness suppression (same
 `isDataStale()` threshold the dashboard's own "DATA NOT IN SYNC" overlay
 uses) both apply on the scheduled scan — cooldown only advances on a
 confirmed successful send. Force Scan bypasses cooldown, not staleness.
+
+## Zoho Creator Workforce Logs reporting
+
+Client-requested: every detected breach for an account with reporting enabled
+also creates a record in Zoho Creator's "All Workforce Logs" report (app
+`ece-time-tracker`, owner `ececonsultinggroup`). Runs in the SAME Vercel Cron
+scan as Cliq alerts (`lib/cliqScan.ts`) — an account can have Cliq alerts,
+Workforce Logs reporting, both, or neither, fully independently. There is
+**no global on/off switch** for this one, only the per-account toggle (Cliq
+has both; this was a deliberate scope choice — see chat history if that needs
+to change).
+
+- `lib/zohoCreator.ts` — `createWorkforceLogRecord()`. POSTs to the Creator
+  v2.1 Add Record API for `FORM_LINK_NAME`. `x_Account`/`Category`/
+  `Sub_Categories`/`Site` are all Zoho lookup fields, each written from a
+  per-account `{id, text}` pair (`ZohoLookupChoice`, `lib/types.ts`) — `id`
+  set means write by exact Zoho record ID (reliable), `text` set (no `id`)
+  means write by plain display value (Zoho resolves it — unverified against
+  a live write, see caveat below). No live "search Zoho for this name" call
+  happens at write time anymore — see the field-scan feature below for why.
+- `lib/cliqScan.ts` — per-account gate is `wf_logs_enabled && (zoho_account_id
+  || zoho_account_name)` (all in `wfm_settings`), independent of the Cliq
+  global-enable toggle. Cooldown (`wfm_settings.wf_logs_last_sent_at`) reuses
+  the same global "Re-alert Frequency" minutes setting as Cliq — there's no
+  separate one.
+- `sql/zoho_workforce_logs.sql` — adds `wf_logs_enabled` plus an `(id, text)`
+  column pair per lookup field (`zoho_account_id`/`zoho_account_name`,
+  `zoho_category_id`/`_text`, `zoho_subcategory_id`/`_text`,
+  `zoho_site_id`/`_text`) and `wf_logs_last_sent_at` to `wfm_settings`.
+- Settings UI: Settings → **Zoho Integrations** tab (renamed from "Cliq
+  Alerts" since it now covers both) → "WORKFORCE LOGS REPORTING — {account}"
+  section, below the Cliq channel field. Each lookup field is a single
+  `<input list>`/`<datalist>` combobox (`ZohoLookupField` in
+  `components/SettingsModal.tsx`) — picking a suggestion stores its ID,
+  typing something new stores it as plain text instead.
+
+No env vars for any of this — none of it is a secret, so it's all plain
+constants at the top of `lib/zohoCreator.ts`/`lib/zohoFieldScan.ts`:
+- `OWNER_NAME` (`ececonsultinggroup`), `APP_LINK_NAME` (`ece-time-tracker`) —
+  known from the client's own app URL.
+- `FORM_LINK_NAME` (`lib/zohoCreator.ts`) — **best guess, needs confirming.**
+  The Creator Add-Record API writes to a *form*, not the
+  `All_Workforce_Logs_RTA_View` *report* the client linked (forms are for
+  submitting data, reports are filtered views of it). Currently set to
+  `'Workforce_Logs'`, guessed from Zoho's own naming convention (a default
+  report is auto-named `All_<FormName>`, and this one has an extra
+  `_RTA_View` suffix on top of that pattern). Confirm/fix by opening the
+  Forms panel in the `ece-time-tracker` builder and checking the link name
+  in the URL bar (same `#Form:xxx`/`#Report:xxx` pattern already seen for
+  the report link).
+
+Status on every auto-created record is hardcoded `Resolved` (client's explicit
+choice — these are being treated as an audit log, not something needing
+follow-up review). `NTE_NOD` and `Coached` are hardcoded `No`.
+
+The exact Zoho Creator v2.1 field payload shapes (lookup fields as ID vs
+array-of-ID, whether `Category`/`Sub_Categories` accept a bare numeric ID or
+plain text for an unresolved value) are implemented from Zoho's documented
+API behavior but have **not yet been verified against a live write** —
+expect to debug/adjust the payload in `lib/zohoCreator.ts` on the first real
+test, the same way the Cliq send format needed no adjustment but this
+integration is new and untested.
+
+### Zoho field option discovery (Category/Sub_Categories/x_Account/Site)
+
+Rather than requiring anyone to dig up raw Zoho record IDs for the four
+lookup fields above, `lib/zohoFieldScan.ts`'s `scanZohoFields()` reads every
+existing record in the `All_Workforce_Logs_RTA_View` **report** (reading is a
+report-level operation, unlike writing — no `FORM_LINK_NAME` needed here) and
+collects the unique `{ID, display_value}` pairs ever used for each of those
+four fields into `wfm_zoho_field_options` (`sql/zoho_field_options.sql`).
+The Settings UI's comboboxes read straight from that table (via
+`loadZohoFieldOptions()` in `lib/settings.ts`, anon client — nothing
+sensitive in there) to offer real, previously-used values as suggestions.
+
+- `app/api/zoho/scan-fields/route.ts` — daily Vercel Cron (`vercel.json`,
+  `0 3 * * *`), `CRON_SECRET`-protected same as `/api/cliq/scan`.
+- `app/api/zoho/force-scan-fields/route.ts` — the "Scan Zoho Field Options
+  Now" button in the same Settings tab, no auth (matches this app's existing
+  posture).
+- Pagination uses Zoho's `record_cursor` response header, looping until it's
+  absent.
+- Every scan also calls Zoho's Meta API (`GET .../meta/{owner}/{app}/forms`,
+  needs the `ZohoCreator.meta.READ` scope) to list the app's actual forms and
+  cross-checks `lib/zohoCreator.ts`'s `FORM_LINK_NAME` guess against that
+  list — confirms it or flags a mismatch right in the scan log, so nobody
+  has to click through the Creator builder by hand to verify it.
+
+A brand-new account/category/site that's never appeared in an existing Zoho
+record won't show up as a suggestion — the combobox's free-text fallback
+covers that case (stored as `_text`, no `_id`) until it's been written once
+and shows up in a later scan.

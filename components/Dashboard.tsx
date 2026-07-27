@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
-import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings } from '@/lib/types'
+import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
+import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
 import { buildBreaches, mostRecentUpdatedAt, type BreachRow } from '@/lib/breaches'
 import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
@@ -82,6 +83,8 @@ export default function Dashboard() {
   const [dashboardLayouts, setDashboardLayouts] = useState<Record<string, DashboardLayout>>({})
   const [headerColors, setHeaderColors]         = useState<Record<string, HeaderColors>>({})
   const [cliqChannels, setCliqChannels]         = useState<Record<string, string>>({})
+  const [wfLogsEnabledMap, setWfLogsEnabledMap] = useState<Record<string, boolean>>({})
+  const [zohoLookupsMap, setZohoLookupsMap]     = useState<Record<string, ZohoLookups>>({})
   const [cliqGlobal, setCliqGlobal]             = useState<CliqGlobalSettings>(DEFAULT_CLIQ_GLOBAL_SETTINGS)
   const [displayNames, setDisplayNames]         = useState<Record<string, string>>({})
 
@@ -226,6 +229,8 @@ export default function Dashboard() {
       const layoutMap: Record<string, DashboardLayout>  = {}
       const colorMap: Record<string, HeaderColors>      = {}
       const cliqChanMap: Record<string, string>         = {}
+      const wfLogsMap: Record<string, boolean>          = {}
+      const zohoLuMap: Record<string, ZohoLookups>      = {}
       ids.forEach(id => {
         kpiMap[id]      = allSettings[id].kpi
         statusMap[id]   = allSettings[id].status
@@ -233,6 +238,8 @@ export default function Dashboard() {
         layoutMap[id]   = allSettings[id].layout
         colorMap[id]    = allSettings[id].headerColors
         cliqChanMap[id] = allSettings[id].cliqChannel
+        wfLogsMap[id]   = allSettings[id].wfLogsEnabled
+        zohoLuMap[id]   = allSettings[id].zohoLookups
       })
       setKpiThresholds(kpiMap)
       setStatusThresholds(statusMap)
@@ -240,6 +247,8 @@ export default function Dashboard() {
       setDashboardLayouts(layoutMap)
       setHeaderColors(colorMap)
       setCliqChannels(cliqChanMap)
+      setWfLogsEnabledMap(wfLogsMap)
+      setZohoLookupsMap(zohoLuMap)
       loadCliqSettings().then(setCliqGlobal)
 
       const savedAcc = localStorage.getItem('wfm_current_account')
@@ -313,6 +322,8 @@ export default function Dashboard() {
         setDashboardLayouts(prev => ({ ...prev, [accId]: settings.layout }))
         setHeaderColors(prev => ({ ...prev, [accId]: settings.headerColors }))
         setCliqChannels(prev => ({ ...prev, [accId]: settings.cliqChannel }))
+        setWfLogsEnabledMap(prev => ({ ...prev, [accId]: settings.wfLogsEnabled }))
+        setZohoLookupsMap(prev => ({ ...prev, [accId]: settings.zohoLookups }))
       })
       .subscribe()
     return () => {
@@ -390,16 +401,21 @@ export default function Dashboard() {
   }, [accounts, data, agentTimers, kpiThresholds, statusThresholds, dataSources])
 
   // ── Save settings — writes to Supabase so all browsers sync ────────────────
-  const handleSaveSettings = async (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string) => {
+  const handleSaveSettings = async (
+    kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string,
+    wfLogsEnabled: boolean = false, zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS
+  ) => {
     // Update local state immediately (instant UI feedback)
     setKpiThresholds(prev => ({ ...prev, [currentAccount]: kpi }))
     setStatusThresholds(prev => ({ ...prev, [currentAccount]: status }))
     setDataSources(prev => ({ ...prev, [currentAccount]: ds }))
     setCliqChannels(prev => ({ ...prev, [currentAccount]: cliqChannel }))
+    setWfLogsEnabledMap(prev => ({ ...prev, [currentAccount]: wfLogsEnabled }))
+    setZohoLookupsMap(prev => ({ ...prev, [currentAccount]: zohoLookups }))
     // Re-fetch with new data source
     fetchAccount(currentAccount, ds)
     // Persist to Supabase (shared) + localStorage (cache)
-    await saveSettings(currentAccount, kpi, status, ds, cliqChannel)
+    await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups)
   }
 
   // ── Save one account's Overview header colors — instant, like layout drag ──
@@ -441,6 +457,8 @@ export default function Dashboard() {
           dataSource={dataSources[currentAccount] ?? DEFAULT_DATA_SOURCE}
           cliqChannel={cliqChannels[currentAccount] ?? ''}
           cliqGlobalSettings={cliqGlobal}
+          wfLogsEnabled={wfLogsEnabledMap[currentAccount] ?? false}
+          zohoLookups={zohoLookupsMap[currentAccount] ?? DEFAULT_ZOHO_LOOKUPS}
           onSave={handleSaveSettings}
           onSaveCliqGlobal={handleSaveCliqGlobal}
           onAccountsChange={async () => {
@@ -457,6 +475,8 @@ export default function Dashboard() {
               setDashboardLayouts(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].layout }); return n })
               setHeaderColors(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].headerColors }); return n })
               setCliqChannels(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].cliqChannel }); return n })
+              setWfLogsEnabledMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].wfLogsEnabled }); return n })
+              setZohoLookupsMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].zohoLookups }); return n })
             }
           }}
           onConfigureAccount={id => { switchAccount(id) }}

@@ -164,6 +164,26 @@ export interface CliqGlobalSettings {
   frequencyMinutes: number   // cooldown between repeat alerts for the same account
 }
 
+// ── Zoho Creator Workforce Logs reporting ─────────────────────────────────────
+// One of these per lookup field the Workforce Logs form needs (x_Account,
+// Category, Sub_Categories, Site). Picking a value scanned by
+// lib/zohoFieldScan.ts fills in `id` (writes by exact Zoho record ID, most
+// reliable); typing something new leaves `id` blank and uses `text` instead
+// (writes by display value). Both blank means "don't set this field".
+export interface ZohoLookupChoice { id: string; text: string }
+export interface ZohoLookups {
+  account:     ZohoLookupChoice
+  category:    ZohoLookupChoice
+  subCategory: ZohoLookupChoice
+  site:        ZohoLookupChoice
+}
+export const DEFAULT_ZOHO_LOOKUPS: ZohoLookups = {
+  account:     { id: '', text: '' },
+  category:    { id: '', text: '' },
+  subCategory: { id: '', text: '' },
+  site:        { id: '', text: '' },
+}
+
 export interface AgentSource {
   id:               string   // stable id for React keys / add-remove
   label:            string   // static group label for rows from this source (ignored when groupByCol is set)

@@ -3,6 +3,10 @@
     {
       "path": "/api/cliq/scan",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/zoho/scan-fields",
+      "schedule": "0 3 * * *"
     }
   ]
 }

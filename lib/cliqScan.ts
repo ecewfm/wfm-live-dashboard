@@ -1,11 +1,17 @@
 // lib/cliqScan.ts
-// Orchestrates one Zoho Cliq breach scan across every account — the Vercel
-// Cron job (app/api/cliq/scan/route.ts) and the manual "Force Scan Now"
-// button (app/api/cliq/force-scan/route.ts) both call runCliqScan(), just
-// with a different forceSend flag. Reuses the SAME breach algorithm the live
+// Orchestrates one breach scan across every account — the Vercel Cron job
+// (app/api/cliq/scan/route.ts) and the manual "Force Scan Now" button
+// (app/api/cliq/force-scan/route.ts) both call runCliqScan(), just with a
+// different forceSend flag. Reuses the SAME breach algorithm the live
 // Dashboard/Overview pages use (lib/breaches.ts) against the SAME wfm_settings
 // config the Settings modal edits — there is only one implementation of
 // "what counts as a breach", never a second copy to drift out of sync.
+//
+// Two independent per-account outputs can fire off the same detected
+// breaches: a Zoho Cliq channel message (gated by the global Cliq
+// enable toggle + a per-account channel), and a Zoho Creator "Workforce
+// Logs" record (gated ONLY by a per-account toggle — no separate global
+// switch was asked for). An account can have either, both, or neither.
 //
 // Migrated from an older Google Apps Script tool's CliqNotifier.gs (per-
 // account cooldown, staleness suppression, [TEST]-prefixed messages) — same
@@ -13,9 +19,10 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, mostRecentUpdatedAt } from './breaches'
+import { buildBreaches, mostRecentUpdatedAt, type BreachRow } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
+import { createWorkforceLogRecord } from './zohoCreator'
 import type { AccountData, AgentSource, DataSourceConfig, Thresholds } from './types'
 import type { StatusThresholds } from './utils'
 
@@ -82,9 +89,17 @@ function formatMessage(accountId: string, breaches: ReturnType<typeof buildBreac
   })
   if (testMode) {
     lines.push('')
-    lines.push('⚠️ This is a TEST message. Disable Test Mode in Settings > Cliq Alerts when ready.')
+    lines.push('⚠️ This is a TEST message. Disable Test Mode in Settings > Zoho Integrations when ready.')
   }
   return lines.join('\n')
+}
+
+// ── Workforce Log "Remarks" formatting — plain text, no markdown/emoji since
+// this lands in a Zoho Creator text field, not a chat message. ─────────────
+function formatWorkforceLogRemarks(accountId: string, breaches: BreachRow[]): string {
+  const ts = new Date().toLocaleString('en-US', { timeZoneName: 'short' })
+  const parts = breaches.map(b => `${b.entity} - ${b.metric}: ${b.value} (threshold ${b.threshold})`)
+  return `Automated WFM Live breach detection for ${accountId} at ${ts}. ${parts.join('; ')}`
 }
 
 interface AccountSettingsRow {
@@ -94,6 +109,16 @@ interface AccountSettingsRow {
   status_thresholds: StatusThresholds | null
   cliq_channel: string | null
   cliq_last_sent_at: string | null
+  wf_logs_enabled: boolean | null
+  zoho_account_name: string | null
+  zoho_account_id: string | null
+  zoho_category_text: string | null
+  zoho_category_id: string | null
+  zoho_subcategory_text: string | null
+  zoho_subcategory_id: string | null
+  zoho_site_text: string | null
+  zoho_site_id: string | null
+  wf_logs_last_sent_at: string | null
 }
 
 export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<ScanResult> {
@@ -109,29 +134,37 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
     .maybeSingle()
 
   const globalSettings = {
+    // Cliq-specific global kill switch — Workforce Logs reporting has no
+    // equivalent global toggle, only the per-account one, so it is NOT
+    // gated on this flag below.
     enabled: !!globalRow?.enabled,
     testMode: (globalRow as any)?.test_mode !== false,
     frequencyMinutes: (globalRow as any)?.frequency_minutes || 5,
   }
 
-  if (!globalSettings.enabled) {
-    l('Cliq notifications disabled globally — nothing to do.')
-    return { accountsScanned: 0, sent: 0, skipped: 0, log }
-  }
-
   const { data: accounts, error: accountsErr } = await supabase
     .from('wfm_settings')
-    .select('id, data_source, kpi_thresholds, status_thresholds, cliq_channel, cliq_last_sent_at')
+    .select(`
+      id, data_source, kpi_thresholds, status_thresholds, cliq_channel, cliq_last_sent_at,
+      wf_logs_enabled, wf_logs_last_sent_at,
+      zoho_account_name, zoho_account_id,
+      zoho_category_text, zoho_category_id,
+      zoho_subcategory_text, zoho_subcategory_id,
+      zoho_site_text, zoho_site_id
+    `)
 
   if (accountsErr) {
     l(`Failed to load accounts: ${accountsErr.message}`)
     return { accountsScanned: 0, sent: 0, skipped: 0, log }
   }
 
-  const qualifying = ((accounts as any[]) ?? []).filter(
-    (a): a is AccountSettingsRow => !!a.cliq_channel && !!a.data_source
-  )
-  l(`${(accounts ?? []).length} account(s) total, ${qualifying.length} with a Cliq channel configured.`)
+  const qualifying = ((accounts as any[]) ?? []).filter((a): a is AccountSettingsRow => {
+    if (!a.data_source) return false
+    const wantsCliq   = globalSettings.enabled && !!a.cliq_channel
+    const wantsWfLogs = !!a.wf_logs_enabled && !!(a.zoho_account_id || a.zoho_account_name)
+    return wantsCliq || wantsWfLogs
+  })
+  l(`${(accounts ?? []).length} account(s) total, ${qualifying.length} qualifying (Cliq and/or Workforce Logs).`)
 
   for (const acc of qualifying) {
     try {
@@ -158,15 +191,7 @@ async function processAccount(
   const ds = acc.data_source as DataSourceConfig
   const kpiTh = (acc.kpi_thresholds || {}) as Thresholds
   const statusTh = (acc.status_thresholds || {}) as StatusThresholds
-
-  if (!forceSend) {
-    const lastSent = acc.cliq_last_sent_at ? new Date(acc.cliq_last_sent_at).getTime() : 0
-    const cooldownMs = globalSettings.frequencyMinutes * 60 * 1000
-    if (Date.now() - lastSent < cooldownMs) {
-      l(`${accountId}: within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
-      return false
-    }
-  }
+  const cooldownMs = globalSettings.frequencyMinutes * 60 * 1000
 
   const accountData = await fetchAccountData(ds, accountId)
 
@@ -184,15 +209,57 @@ async function processAccount(
   l(`${accountId}: ${breaches.length} breach(es).`)
   if (breaches.length === 0) return false
 
-  const message = formatMessage(accountId, breaches, globalSettings.testMode)
-  await sendCliqChannelMessage(acc.cliq_channel as string, message)
-  l(`${accountId}: sent to #${acc.cliq_channel}.`)
+  let didAnything = false
+  const updates: Record<string, any> = {}
 
-  // Cooldown only advances on a CONFIRMED send — a failed Cliq API call
-  // (thrown above) must not silently eat the cooldown window.
-  await supabase.from('wfm_settings').upsert({
-    id: accountId, account_id: accountId, cliq_last_sent_at: new Date().toISOString(),
-  })
+  // ── Zoho Cliq channel alert ──────────────────────────────────────────────
+  if (globalSettings.enabled && acc.cliq_channel) {
+    const lastSent = acc.cliq_last_sent_at ? new Date(acc.cliq_last_sent_at).getTime() : 0
+    if (forceSend || Date.now() - lastSent >= cooldownMs) {
+      try {
+        const message = formatMessage(accountId, breaches, globalSettings.testMode)
+        await sendCliqChannelMessage(acc.cliq_channel, message)
+        l(`${accountId}: sent to Cliq #${acc.cliq_channel}.`)
+        // Cooldown only advances on a CONFIRMED send — a failed Cliq API call
+        // (thrown above) must not silently eat the cooldown window.
+        updates.cliq_last_sent_at = new Date().toISOString()
+        didAnything = true
+      } catch (e: any) {
+        l(`${accountId}: Cliq send failed — ${e.message}`)
+      }
+    } else {
+      l(`${accountId}: Cliq within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
+    }
+  }
 
-  return true
+  // ── Zoho Creator Workforce Logs record ───────────────────────────────────
+  const hasAccountLink = !!(acc.zoho_account_id || acc.zoho_account_name)
+  if (acc.wf_logs_enabled && hasAccountLink) {
+    const lastSent = acc.wf_logs_last_sent_at ? new Date(acc.wf_logs_last_sent_at).getTime() : 0
+    if (forceSend || Date.now() - lastSent >= cooldownMs) {
+      try {
+        const remarks = formatWorkforceLogRemarks(accountId, breaches)
+        await createWorkforceLogRecord({
+          account:     { id: acc.zoho_account_id     || '', text: acc.zoho_account_name    || '' },
+          category:    { id: acc.zoho_category_id    || '', text: acc.zoho_category_text    || '' },
+          subCategory: { id: acc.zoho_subcategory_id || '', text: acc.zoho_subcategory_text || '' },
+          site:        { id: acc.zoho_site_id        || '', text: acc.zoho_site_text        || '' },
+          remarks,
+        })
+        l(`${accountId}: Workforce Log record created (Zoho account "${acc.zoho_account_name || acc.zoho_account_id}").`)
+        updates.wf_logs_last_sent_at = new Date().toISOString()
+        didAnything = true
+      } catch (e: any) {
+        l(`${accountId}: Workforce Log record failed — ${e.message}`)
+      }
+    } else {
+      l(`${accountId}: Workforce Logs within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
+    }
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await supabase.from('wfm_settings').upsert({ id: accountId, account_id: accountId, ...updates })
+  }
+
+  return didAnything
 }

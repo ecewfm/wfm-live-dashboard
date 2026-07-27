@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, AgentSource, CliqGlobalSettings } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, AgentSource, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
@@ -10,7 +10,7 @@ import {
   DEFAULT_KPI_LABELS, genId, newGroup, newAgentSource,
   fetchPublicTables
 } from '@/lib/utils'
-import { addAccount, removeAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, type AccountConfig } from '@/lib/settings'
+import { addAccount, removeAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
 
 type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq'
 
@@ -255,7 +255,9 @@ interface Props {
   dataSource:       DataSourceConfig
   cliqChannel:       string               // this account's Cliq channel unique name ('' = alerts off)
   cliqGlobalSettings: CliqGlobalSettings   // shared across every account
-  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string) => void
+  wfLogsEnabled:     boolean              // this account's Zoho Workforce Logs reporting toggle
+  zohoLookups:       ZohoLookups          // this account's x_Account/Category/Sub_Categories/Site picks
+  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups) => void
   onSaveCliqGlobal: (settings: CliqGlobalSettings) => void
   onAccountsChange: () => void           // called after add/remove
   onConfigureAccount: (id: string) => void  // switch active account + go to Data Sources
@@ -1068,8 +1070,50 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
 }
 
 
+// ── Zoho lookup field combobox — pick from scanned options or type new text ──
+// Backed by wfm_zoho_field_options (lib/zohoFieldScan.ts's daily/on-demand
+// scan). Typing something that exactly matches a known option's label stores
+// its Zoho ID (most reliable write); anything else is kept as plain typed
+// text (Zoho resolves it by display value at write time — see CLAUDE.md).
+function ZohoLookupField({ label, hint, fieldName, value, onChange }: {
+  label:     string
+  hint:      string
+  fieldName: 'Category' | 'Sub_Categories' | 'x_Account' | 'Site'
+  value:     ZohoLookupChoice
+  onChange:  (v: ZohoLookupChoice) => void
+}) {
+  const [options, setOptions] = useState<ZohoFieldOption[]>([])
+  useEffect(() => {
+    let cancelled = false
+    loadZohoFieldOptions(fieldName).then(opts => { if (!cancelled) setOptions(opts) })
+    return () => { cancelled = true }
+  }, [fieldName])
+
+  const currentText = value.id ? (options.find(o => o.id === value.id)?.label ?? '') : (value.text || '')
+  const datalistId = `zoho-lookup-${fieldName}`
+
+  const handleChange = (typed: string) => {
+    const match = options.find(o => o.label === typed)
+    onChange(match ? { id: match.id, text: '' } : { id: '', text: typed })
+  }
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div className="sm-metric">{label}</div>
+      <div className="sm-metric-sub" style={{ marginBottom: 6 }}>{hint}</div>
+      <input type="text" className="sm-input" style={{ width: '100%', textAlign: 'left' }}
+        list={datalistId} value={currentText}
+        placeholder="Pick a suggestion or type a new value"
+        onChange={e => handleChange(e.target.value)} />
+      <datalist id={datalistId}>
+        {options.map(o => <option key={o.id} value={o.label} />)}
+      </datalist>
+    </div>
+  )
+}
+
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, zohoLookups, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
@@ -1078,6 +1122,10 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [cliqGlobal, setCliqGlobal] = useState<CliqGlobalSettings>(JSON.parse(JSON.stringify(cliqGlobalSettings)))
   const [cliqScanning, setCliqScanning] = useState(false)
   const [cliqScanLog, setCliqScanLog]   = useState<string[] | null>(null)
+  const [wfLogsOn, setWfLogsOn]         = useState(wfLogsEnabled)
+  const [zohoLu, setZohoLu]             = useState<ZohoLookups>(JSON.parse(JSON.stringify(zohoLookups)))
+  const [fieldScanning, setFieldScanning] = useState(false)
+  const [fieldScanLog, setFieldScanLog]   = useState<string[] | null>(null)
 
   // ── Force an immediate Cliq scan (bypasses cooldown, not staleness) ─────────
   const handleForceScan = async () => {
@@ -1091,6 +1139,21 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       setCliqScanLog([`Request failed: ${e.message}`])
     }
     setCliqScanning(false)
+  }
+
+  // ── Force an immediate scan of Zoho Workforce Logs for Category/Sub
+  // Categories/x_Account/Site option values (populates the comboboxes below) ─
+  const handleForceFieldScan = async () => {
+    setFieldScanning(true)
+    setFieldScanLog(null)
+    try {
+      const res  = await fetch('/api/zoho/force-scan-fields', { method: 'POST' })
+      const data = await res.json()
+      setFieldScanLog(data.log ?? [data.error || 'Unknown error'])
+    } catch (e: any) {
+      setFieldScanLog([`Request failed: ${e.message}`])
+    }
+    setFieldScanning(false)
   }
 
   // ── Dynamic status discovery ────────────────────────────────────────────────
@@ -1233,7 +1296,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
               <i className="bx bx-user-clock" /> Status Durations
             </button>
             <button className={`sm-tab${tab === 'cliq' ? ' active' : ''}`} onClick={() => setTab('cliq')}>
-              <i className="bx bx-bell" /> Cliq Alerts
+              <i className="bx bx-bell" /> Zoho Integrations
             </button>
           </div>
 
@@ -1362,9 +1425,10 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             {tab === 'cliq' && (
               <>
                 <p className="sm-desc">
-                  Sends a breach alert message to a Zoho Cliq channel whenever active breaches are
-                  detected. Runs as a Vercel Cron job, checking every minute — not something you need to
-                  leave a browser tab open for. <strong>Test Mode</strong> prefixes every
+                  Sends a breach alert message to a Zoho Cliq channel, and/or creates a record in
+                  Zoho Creator&apos;s Workforce Logs report, whenever active breaches are detected. Both
+                  run as the same Vercel Cron job, checking every minute — not something you need to
+                  leave a browser tab open for. <strong>Test Mode</strong> (Cliq only) prefixes every
                   message with <code>[TEST]</code> so channel members know alerts are still being verified.
                 </p>
 
@@ -1376,11 +1440,13 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     Authorize with Zoho
                   </a>
                   <span style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                    One-time setup — requires <code>ZOHO_CLIQ_CLIENT_ID</code>/<code>ZOHO_CLIQ_CLIENT_SECRET</code>/
-                    <code>SUPABASE_SERVICE_ROLE_KEY</code> to already be set as env vars on this deployment. Opens
-                    Zoho&apos;s consent screen in a new tab; once you approve, the resulting token is saved
-                    automatically — nothing to copy or paste. You won&apos;t need to do this again unless that
-                    token is revoked.
+                    One-time setup — covers both Cliq alerts and Workforce Logs reporting (same Zoho
+                    self-client, both scopes requested together). Requires <code>ZOHO_CLIQ_CLIENT_ID</code>/
+                    <code>ZOHO_CLIQ_CLIENT_SECRET</code>/<code>SUPABASE_SERVICE_ROLE_KEY</code> to already be
+                    set as env vars on this deployment. Opens Zoho&apos;s consent screen in a new tab; once you
+                    approve, the resulting token is saved automatically — nothing to copy or paste.
+                    Re-run this any time a new Zoho scope is added, since Zoho only grants what was
+                    requested at consent time.
                   </span>
                 </div>
 
@@ -1425,11 +1491,66 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   placeholder="e.g. ashleywfmlive" value={cliqChan}
                   onChange={e => setCliqChan(e.target.value.trim())} />
 
-                <div className="sm-section-title" style={{ marginTop: 20 }}>FORCE SCAN</div>
+                <div className="sm-section-title" style={{ marginTop: 20 }}>WORKFORCE LOGS REPORTING — {accountId}</div>
+                <table className="sm-table">
+                  <tbody>
+                    <tr>
+                      <td><div className="sm-metric">Enable Workforce Logs Reporting</div><div className="sm-metric-sub">Creates a record in Zoho Creator&apos;s Workforce Logs report for this account&apos;s breaches</div></td>
+                      <td style={{ textAlign: 'center' }}>
+                        <input type="checkbox" checked={wfLogsOn}
+                          onChange={() => setWfLogsOn(prev => !prev)} />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p className="sm-desc" style={{ marginTop: 10, marginBottom: 4 }}>
+                  Pick a value already seen in Zoho&apos;s existing records, or type a new one if it
+                  isn&apos;t in the list yet — the field just below each box shows what&apos;s been
+                  scanned so far. Reporting stays off for this account until <strong>Account</strong> is
+                  filled in, even if the toggle above is checked.
+                </p>
+                <ZohoLookupField label="Account" fieldName="x_Account"
+                  hint="Must match this account's name in Zoho's own Accounts list (the x_Account field)."
+                  value={zohoLu.account} onChange={v => setZohoLu(prev => ({ ...prev, account: v }))} />
+                <ZohoLookupField label="Category" fieldName="Category"
+                  hint="Optional — leave blank to not set Category on this account's records."
+                  value={zohoLu.category} onChange={v => setZohoLu(prev => ({ ...prev, category: v }))} />
+                <ZohoLookupField label="Sub Category" fieldName="Sub_Categories"
+                  hint="Optional — leave blank to not set Sub Category on this account's records."
+                  value={zohoLu.subCategory} onChange={v => setZohoLu(prev => ({ ...prev, subCategory: v }))} />
+                <ZohoLookupField label="Site" fieldName="Site"
+                  hint="Optional — leave blank to not set Site on this account's records."
+                  value={zohoLu.site} onChange={v => setZohoLu(prev => ({ ...prev, site: v }))} />
+
+                <div className="sm-section-title" style={{ marginTop: 20 }}>SCAN ZOHO FIELD OPTIONS</div>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
-                  Runs the scan immediately instead of waiting for the next scheduled minute —
-                  bypasses the cooldown above, but not the staleness suppression (an account whose
-                  data hasn&apos;t updated recently still won&apos;t send).
+                  Scans every existing record in Zoho&apos;s Workforce Logs report to refresh the
+                  Account/Category/Sub Category/Site suggestions above with whatever&apos;s actually
+                  been used before. Runs automatically once a day — use this button to refresh
+                  immediately instead of waiting.
+                </p>
+                <button type="button" className="acc-btn acc-btn-cfg" disabled={fieldScanning}
+                  style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleForceFieldScan}>
+                  <i className={`bx ${fieldScanning ? 'bx-loader-alt bx-spin' : 'bx-refresh'}`} style={{ marginRight: 6 }} />
+                  {fieldScanning ? 'Scanning...' : 'Scan Zoho Field Options Now'}
+                </button>
+                {fieldScanLog && (
+                  <pre style={{
+                    marginTop: 12, padding: 12, maxHeight: 220, overflowY: 'auto',
+                    background: 'var(--bg-body,#f0f2f1)', border: '1px solid var(--border,#e1e6e4)',
+                    borderRadius: 6, fontSize: 11.5, lineHeight: 1.6, whiteSpace: 'pre-wrap',
+                    color: 'var(--text-main)',
+                  }}>
+                    {fieldScanLog.join('\n')}
+                  </pre>
+                )}
+
+                <div className="sm-section-title" style={{ marginTop: 20 }}>FORCE BREACH SCAN</div>
+                <p className="sm-desc" style={{ marginBottom: 10 }}>
+                  Runs the breach scan (Cliq alert + Workforce Logs record) immediately instead of
+                  waiting for the next scheduled minute — bypasses the cooldown above, but not the
+                  staleness suppression (an account whose data hasn&apos;t updated recently still
+                  won&apos;t send).
                 </p>
                 <button type="button" className="acc-btn acc-btn-cfg" disabled={cliqScanning}
                   style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleForceScan}>
@@ -1459,7 +1580,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan); onSaveCliqGlobal(cliqGlobal); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu); onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>

@@ -16,7 +16,12 @@
 import { NextResponse } from 'next/server'
 
 const ZOHO_AUTH_URL = 'https://accounts.zoho.com/oauth/v2/auth'
-const CLIQ_SCOPE     = 'ZohoCliq.Webhooks.CREATE,ZohoCliq.channels.read'
+// Both Cliq (breach alerts) and Creator (Workforce Logs reporting) scopes are
+// requested together on this ONE self-client so a single refresh token
+// covers both — re-run this authorize flow (same button in Settings) any
+// time a new scope is added here, since Zoho only grants what was requested
+// at consent time.
+const CLIQ_SCOPE     = 'ZohoCliq.Webhooks.CREATE,ZohoCliq.channels.read,ZohoCreator.report.CREATE,ZohoCreator.report.READ,ZohoCreator.meta.READ'
 const STATE_COOKIE   = 'zoho_oauth_state'
 
 export async function GET(request: Request) {
