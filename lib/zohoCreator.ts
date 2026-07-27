@@ -23,13 +23,12 @@ export const APP_LINK_NAME = 'ece-time-tracker'
 // Creator's Add-Record API writes to a FORM, not the "All_Workforce_Logs_
 // RTA_View" REPORT the client linked (forms are for submitting data, reports
 // are filtered views of it — Zoho's API only accepts writes at the form).
-// "Workforce_Logs" is a best guess based on Zoho's own naming convention:
-// a default report is auto-named "All_<FormName>", and this one has an
-// extra "_RTA_View" suffix on top of that pattern, implying the underlying
-// form is called "Workforce_Logs". lib/zohoFieldScan.ts's scan cross-checks
-// this guess against Zoho's own Meta API (the actual list of forms in the
-// app) and flags a mismatch in the scan log — fix this constant if it does.
-export const FORM_LINK_NAME = 'Workforce_Logs'
+// Confirmed via Zoho's own Meta API (lib/zohoFieldScan.ts's scan lists every
+// form in the app and cross-checks this constant against it, logging a
+// mismatch if wrong) — the app's actual form list includes "Workforce_RTA_
+// Logs", a near-exact match for the report name (just reordered: RTA before
+// Logs instead of after), which is what this is set to now.
+export const FORM_LINK_NAME = 'Workforce_RTA_Logs'
 
 // ── Lookup field choices ──────────────────────────────────────────────────
 // x_Account, Category, Sub_Categories, and Site are all Zoho lookup fields.

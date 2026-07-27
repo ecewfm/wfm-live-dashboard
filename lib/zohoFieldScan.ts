@@ -39,6 +39,23 @@ async function listFormLinkNames(token: string): Promise<string[]> {
   }
 }
 
+// Same idea as listFormLinkNames but for reports — the "Invalid API URL
+// format" error the Get Records call throws when REPORT_LINK_NAME is wrong
+// gives no hint what the correct name actually is, so cross-check against
+// Zoho's own report list instead of guessing again.
+async function listReportLinkNames(token: string): Promise<string[]> {
+  try {
+    const url = `${CREATOR_API_BASE}/meta/${OWNER_NAME}/${APP_LINK_NAME}/reports`
+    const res = await fetch(url, { headers: { Authorization: `Zoho-oauthtoken ${token}` } })
+    const body: any = await res.json().catch(() => ({}))
+    const reports = body?.result?.reports ?? body?.reports ?? []
+    if (!res.ok || !Array.isArray(reports)) return []
+    return reports.map((r: any) => r.link_name || r.linkName || r.report_link_name).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
 const LOOKUP_FIELDS = ['Category', 'Sub_Categories', 'x_Account', 'Site'] as const
 type LookupField = typeof LOOKUP_FIELDS[number]
 
@@ -74,6 +91,19 @@ export async function scanZohoFields(): Promise<FieldScanResult> {
     l(`FORM_LINK_NAME="${FORM_LINK_NAME}" confirmed — it exists in this app's form list.`)
   } else {
     l(`WARNING: FORM_LINK_NAME="${FORM_LINK_NAME}" was NOT found among this app's forms: [${forms.join(', ')}]. Update the constant in lib/zohoCreator.ts to the correct one before relying on Workforce Logs reporting.`)
+  }
+
+  // Same check for the REPORT link name used to read/scan records — Get
+  // Records returns a generic "Invalid API URL format" (no report list) when
+  // this is wrong, so cross-check against Zoho's own report list too instead
+  // of guessing blind a second time.
+  const reports = await listReportLinkNames(token)
+  if (reports.length === 0) {
+    l(`Could not list reports (check ZohoCreator.meta.READ scope / re-authorize) — proceeding with REPORT_LINK_NAME="${REPORT_LINK_NAME}" as-is.`)
+  } else if (reports.includes(REPORT_LINK_NAME)) {
+    l(`REPORT_LINK_NAME="${REPORT_LINK_NAME}" confirmed — it exists in this app's report list.`)
+  } else {
+    l(`WARNING: REPORT_LINK_NAME="${REPORT_LINK_NAME}" was NOT found among this app's reports: [${reports.join(', ')}]. Update the constant in lib/zohoFieldScan.ts to the correct one — the Get Records call below will otherwise keep failing.`)
   }
 
   const found = new Map<string, DiscoveredOption>() // key: field_name|zoho_id
