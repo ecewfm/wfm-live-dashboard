@@ -533,22 +533,33 @@ export default function Dashboard() {
 
         <div className="page-content">
           {currentPage === 'dashboard' && (
-            <DashboardPage
-              accountId={currentAccount}
-              accountData={currentData}
-              breaches={breaches}
-              alertAcked={alertAcked}
-              onAck={() => setAlertAcked(true)}
-              agentTimers={agentTimers}
-              kpiTh={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
-              statusTh={statusThresholds[currentAccount] ?? DEFAULT_STATUS_THRESHOLDS}
-              ds={currentDs}
-              layout={dashboardLayouts[currentAccount] ?? EMPTY_LAYOUT}
-              onLayoutChange={layout => {
-                setDashboardLayouts(prev => ({ ...prev, [currentAccount]: layout }))
-                saveDashboardLayout(currentAccount, layout)
-              }}
-            />
+            <div style={{ position: 'relative' }}>
+              {stale && (
+                <div className="stale-overlay">
+                  <div className="stale-stamp">
+                    <div className="stale-stamp-icon"><i className="bx bx-error-circle" /></div>
+                    <div className="stale-stamp-title">DATA NOT IN SYNC</div>
+                    <div className="stale-stamp-sub">Not updated in 3+ minutes</div>
+                  </div>
+                </div>
+              )}
+              <DashboardPage
+                accountId={currentAccount}
+                accountData={currentData}
+                breaches={breaches}
+                alertAcked={alertAcked}
+                onAck={() => setAlertAcked(true)}
+                agentTimers={agentTimers}
+                kpiTh={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
+                statusTh={statusThresholds[currentAccount] ?? DEFAULT_STATUS_THRESHOLDS}
+                ds={currentDs}
+                layout={dashboardLayouts[currentAccount] ?? EMPTY_LAYOUT}
+                onLayoutChange={layout => {
+                  setDashboardLayouts(prev => ({ ...prev, [currentAccount]: layout }))
+                  saveDashboardLayout(currentAccount, layout)
+                }}
+              />
+            </div>
           )}
           {currentPage === 'overview' && (
             <OverviewPage
