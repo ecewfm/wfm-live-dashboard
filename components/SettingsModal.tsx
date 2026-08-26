@@ -11,6 +11,7 @@ import {
   fetchPublicTables
 } from '@/lib/utils'
 import { addAccount, removeAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
+import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
 
 type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq'
 
@@ -257,7 +258,8 @@ interface Props {
   cliqGlobalSettings: CliqGlobalSettings   // shared across every account
   wfLogsEnabled:     boolean              // this account's Zoho Workforce Logs reporting toggle
   zohoLookups:       ZohoLookups          // this account's x_Account/Category/Sub_Categories/Site picks
-  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups) => void
+  alarmSound:        string               // this account's Overview-card breach alarm sound ('' = silent)
+  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string) => void
   onSaveCliqGlobal: (settings: CliqGlobalSettings) => void
   onAccountsChange: () => void           // called after add/remove
   onConfigureAccount: (id: string) => void  // switch active account + go to Data Sources
@@ -1114,7 +1116,7 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey }
 }
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, zohoLookups, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
@@ -1125,6 +1127,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [cliqScanLog, setCliqScanLog]   = useState<string[] | null>(null)
   const [wfLogsOn, setWfLogsOn]         = useState(wfLogsEnabled)
   const [zohoLu, setZohoLu]             = useState<ZohoLookups>(JSON.parse(JSON.stringify(zohoLookups)))
+  const [alarmSnd, setAlarmSnd]         = useState(alarmSound || 'none')
   const [fieldScanning, setFieldScanning] = useState(false)
   const [fieldScanLog, setFieldScanLog]   = useState<string[] | null>(null)
   const [fieldOptionsRefresh, setFieldOptionsRefresh] = useState(0)
@@ -1499,6 +1502,23 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   placeholder="e.g. ashleywfmlive" value={cliqChan}
                   onChange={e => setCliqChan(e.target.value.trim())} />
 
+                <div className="sm-section-title" style={{ marginTop: 20 }}>BREACH ALARM — {accountId}</div>
+                <p className="sm-desc" style={{ marginBottom: 10 }}>
+                  Sound this account&apos;s card plays on the Overview page when a new
+                  breach appears. Give each account a different sound so you can tell
+                  them apart without looking at the screen.
+                </p>
+                <div className="sm-input-cell" style={{ justifyContent: 'flex-start', gap: 10 }}>
+                  <select className="sm-input" style={{ minWidth: 200 }} value={alarmSnd}
+                    onChange={e => setAlarmSnd(e.target.value)}>
+                    {ALARM_SOUNDS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+                  </select>
+                  <button type="button" className="sm-btn-save" style={{ padding: '7px 16px' }}
+                    onClick={() => playAlarm(alarmSnd)}>
+                    <i className="bx bx-play-circle" /> Test
+                  </button>
+                </div>
+
                 <div className="sm-section-title" style={{ marginTop: 20 }}>WORKFORCE LOGS REPORTING — {accountId}</div>
                 <table className="sm-table">
                   <tbody>
@@ -1588,7 +1608,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu); onSaveCliqGlobal(cliqGlobal); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd); onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>

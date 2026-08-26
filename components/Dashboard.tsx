@@ -6,6 +6,7 @@ import SettingsModal from './SettingsModal'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
 import { buildBreaches, mostRecentUpdatedAt, type BreachRow } from '@/lib/breaches'
+import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
   loadCliqSettings, saveCliqSettings, DEFAULT_CLIQ_GLOBAL_SETTINGS,
@@ -85,6 +86,7 @@ export default function Dashboard() {
   const [cliqChannels, setCliqChannels]         = useState<Record<string, string>>({})
   const [wfLogsEnabledMap, setWfLogsEnabledMap] = useState<Record<string, boolean>>({})
   const [zohoLookupsMap, setZohoLookupsMap]     = useState<Record<string, ZohoLookups>>({})
+  const [alarmSounds, setAlarmSounds]           = useState<Record<string, string>>({})
   const [cliqGlobal, setCliqGlobal]             = useState<CliqGlobalSettings>(DEFAULT_CLIQ_GLOBAL_SETTINGS)
   const [displayNames, setDisplayNames]         = useState<Record<string, string>>({})
 
@@ -231,6 +233,7 @@ export default function Dashboard() {
       const cliqChanMap: Record<string, string>         = {}
       const wfLogsMap: Record<string, boolean>          = {}
       const zohoLuMap: Record<string, ZohoLookups>      = {}
+      const alarmMap: Record<string, string>            = {}
       ids.forEach(id => {
         kpiMap[id]      = allSettings[id].kpi
         statusMap[id]   = allSettings[id].status
@@ -240,6 +243,7 @@ export default function Dashboard() {
         cliqChanMap[id] = allSettings[id].cliqChannel
         wfLogsMap[id]   = allSettings[id].wfLogsEnabled
         zohoLuMap[id]   = allSettings[id].zohoLookups
+        alarmMap[id]    = allSettings[id].alarmSound
       })
       setKpiThresholds(kpiMap)
       setStatusThresholds(statusMap)
@@ -249,6 +253,7 @@ export default function Dashboard() {
       setCliqChannels(cliqChanMap)
       setWfLogsEnabledMap(wfLogsMap)
       setZohoLookupsMap(zohoLuMap)
+      setAlarmSounds(alarmMap)
       loadCliqSettings().then(setCliqGlobal)
 
       const savedAcc = localStorage.getItem('wfm_current_account')
@@ -324,6 +329,7 @@ export default function Dashboard() {
         setCliqChannels(prev => ({ ...prev, [accId]: settings.cliqChannel }))
         setWfLogsEnabledMap(prev => ({ ...prev, [accId]: settings.wfLogsEnabled }))
         setZohoLookupsMap(prev => ({ ...prev, [accId]: settings.zohoLookups }))
+        setAlarmSounds(prev => ({ ...prev, [accId]: settings.alarmSound }))
       })
       .subscribe()
     return () => {
@@ -403,7 +409,8 @@ export default function Dashboard() {
   // ── Save settings — writes to Supabase so all browsers sync ────────────────
   const handleSaveSettings = async (
     kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string,
-    wfLogsEnabled: boolean = false, zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS
+    wfLogsEnabled: boolean = false, zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS,
+    alarmSound: string = ''
   ) => {
     // Update local state immediately (instant UI feedback)
     setKpiThresholds(prev => ({ ...prev, [currentAccount]: kpi }))
@@ -412,10 +419,11 @@ export default function Dashboard() {
     setCliqChannels(prev => ({ ...prev, [currentAccount]: cliqChannel }))
     setWfLogsEnabledMap(prev => ({ ...prev, [currentAccount]: wfLogsEnabled }))
     setZohoLookupsMap(prev => ({ ...prev, [currentAccount]: zohoLookups }))
+    setAlarmSounds(prev => ({ ...prev, [currentAccount]: alarmSound }))
     // Re-fetch with new data source
     fetchAccount(currentAccount, ds)
     // Persist to Supabase (shared) + localStorage (cache)
-    await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups)
+    await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups, alarmSound)
   }
 
   // ── Save one account's Overview header colors — instant, like layout drag ──
@@ -459,6 +467,7 @@ export default function Dashboard() {
           cliqGlobalSettings={cliqGlobal}
           wfLogsEnabled={wfLogsEnabledMap[currentAccount] ?? false}
           zohoLookups={zohoLookupsMap[currentAccount] ?? DEFAULT_ZOHO_LOOKUPS}
+          alarmSound={alarmSounds[currentAccount] ?? ''}
           onSave={handleSaveSettings}
           onSaveCliqGlobal={handleSaveCliqGlobal}
           onAccountsChange={async () => {
@@ -477,6 +486,7 @@ export default function Dashboard() {
               setCliqChannels(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].cliqChannel }); return n })
               setWfLogsEnabledMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].wfLogsEnabled }); return n })
               setZohoLookupsMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].zohoLookups }); return n })
+              setAlarmSounds(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].alarmSound }); return n })
             }
           }}
           onConfigureAccount={id => { switchAccount(id) }}
@@ -571,6 +581,7 @@ export default function Dashboard() {
               dataSources={dataSources}
               displayNames={displayNames}
               headerColors={headerColors}
+              alarmSounds={alarmSounds}
               onHeaderColorsChange={updateHeaderColors}
             />
           )}
@@ -1066,12 +1077,13 @@ function KpiTile({ label, value, numValue, target, th, showBar, plain, colorOver
 }
 
 // ── Overview Page ──────────────────────────────────────────────────────────────
-function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, onHeaderColorsChange }: {
+function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
-  headerColors: Record<string, HeaderColors>; onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
+  headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
+  onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
 }) {
   return (
     <>
@@ -1084,18 +1096,20 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
       <OverviewMasonry
         accounts={accounts} data={data} agentTimers={agentTimers}
         allBreaches={allBreaches} kpiThresholds={kpiThresholds} dataSources={dataSources}
-        displayNames={displayNames} headerColors={headerColors} onHeaderColorsChange={onHeaderColorsChange}
+        displayNames={displayNames} headerColors={headerColors} alarmSounds={alarmSounds}
+        onHeaderColorsChange={onHeaderColorsChange}
       />
     </>
   )
 }
 
-function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, onHeaderColorsChange }: {
+function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
-  headerColors: Record<string, HeaderColors>; onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
+  headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
+  onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
 }) {
   const [layout, setLayout] = useState<{ top: number; left: number; width: number }[]>([])
   const [gridH, setGridH]   = useState(0)
@@ -1145,6 +1159,7 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
             kpiTh={kpiThresholds[accId] ?? DEFAULT_THRESHOLDS}
             ds={dataSources[accId] ?? DEFAULT_DATA_SOURCE}
             colors={headerColors[accId] ?? DEFAULT_HEADER_COLORS}
+            alarmSound={alarmSounds[accId] ?? ''}
             onColorsChange={onHeaderColorsChange}
           />
         </div>
@@ -1154,17 +1169,46 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
 }
 
 // ── Overview Card ─────────────────────────────────────────────────────────────
-function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds, colors, onColorsChange }: {
+function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds, colors, alarmSound, onColorsChange }: {
   accId: string; displayName: string; accountData: AccountData | undefined
   agentTimers: Record<string, number>; breaches: BreachRow[]
   kpiTh: Thresholds; ds: DataSourceConfig
-  colors: HeaderColors; onColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
+  colors: HeaderColors; alarmSound: string
+  onColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
 }) {
   const kpiRows = accountData?.kpiRows ?? []
   const groups  = ds.groups ?? []
   const freshestUpdatedAt = mostRecentUpdatedAt(kpiRows, ds.kpiUpdatedAt)
   const stale   = isDataStale(freshestUpdatedAt)
   const hasCrit = breaches.some(b => b.severity === 'critical')
+
+  // ── Breach alarm — this account's chosen sound (Settings → Zoho
+  // Integrations → Breach Alarm) plays once when a NEW combination of
+  // breaching entity/metric appears, not on every ~30s poll of an ongoing
+  // one. Signature-based so a genuinely new breach re-rings even if the
+  // account was previously acknowledged; clicking the siren silences the
+  // CURRENT set until it changes (or clears and a new one appears later).
+  const breachSig = useMemo(
+    () => breaches.map(b => `${b.entity}:${b.metric}`).sort().join('|'),
+    [breaches]
+  )
+  const [ackedSig, setAckedSig] = useState('')
+  const firstRender = useRef(true)
+  useEffect(() => {
+    if (firstRender.current) {
+      // Skip the very first mount (e.g. opening the Overview page, or
+      // switching tabs) — an already-breaching account shouldn't ring just
+      // because its card appeared on screen.
+      firstRender.current = false
+      return
+    }
+    if (breachSig) {
+      if (breachSig !== ackedSig) playAlarm(alarmSound)
+    } else if (ackedSig) {
+      setAckedSig('') // breach cleared — a future one should always ring again
+    }
+  }, [breachSig, ackedSig, alarmSound])
+  const acked = breachSig !== '' && breachSig === ackedSig
 
   // ── Per-account header colors (band background + title text) — a
   // personalization so accounts are visually distinguishable on the Overview
@@ -1192,7 +1236,14 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
         <div className="overview-card-header-right">
           {breaches.length > 0 && (
             <i className="bx bxs-alarm ov-siren-icon"
-              style={{ color: hasCrit ? 'var(--danger)' : 'var(--warning)', animation: 'ov-siren-pulse 1s infinite' }} />
+              title={acked ? 'Alarm silenced — click stays silent until a new breach' : 'New breach — click to silence the alarm'}
+              onClick={() => setAckedSig(breachSig)}
+              style={{
+                color: hasCrit ? 'var(--danger)' : 'var(--warning)',
+                cursor: 'pointer',
+                opacity: acked ? 0.4 : 1,
+                animation: acked ? 'none' : 'ov-siren-pulse 1s infinite',
+              }} />
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
             <span className="ov-live-dot" />

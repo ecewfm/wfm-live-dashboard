@@ -29,6 +29,7 @@ export interface AccountSettings {
   cliqChannel: string
   wfLogsEnabled: boolean
   zohoLookups: ZohoLookups
+  alarmSound: string
 }
 
 // ── Load settings for one account ─────────────────────────────────────────────
@@ -43,32 +44,50 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
         zoho_account_name, zoho_account_id,
         zoho_category_text, zoho_category_id,
         zoho_subcategory_text, zoho_subcategory_id,
-        zoho_site_text, zoho_site_id
+        zoho_site_text, zoho_site_id, alarm_sound
       `)
       .eq('id', accountId)
       .maybeSingle()
 
-    // The zoho_*/wf_logs_enabled columns don't exist until their migration
-    // has been run — PostgREST errors the WHOLE select on an unknown column,
-    // so retry without them (falling back to the previously-newest columns,
-    // then the base set) rather than losing everything else too.
+    // Each retry step drops the newest-added columns first (alarm_sound,
+    // then zoho_*/wf_logs_enabled) — PostgREST errors the WHOLE select on
+    // any one unknown column, so an account whose migrations haven't all
+    // been run yet still gets everything that DOES exist, rather than
+    // falling straight to the localStorage-only fallback below.
     if (error) {
-      const retry1 = await supabase
+      const retry0 = await supabase
         .from('wfm_settings')
-        .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout, header_band_color, header_text_color, cliq_channel')
+        .select(`
+          kpi_thresholds, status_thresholds, data_source, dashboard_layout,
+          header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
+          zoho_account_name, zoho_account_id,
+          zoho_category_text, zoho_category_id,
+          zoho_subcategory_text, zoho_subcategory_id,
+          zoho_site_text, zoho_site_id
+        `)
         .eq('id', accountId)
         .maybeSingle()
-      if (!retry1.error) {
-        data = retry1.data as any
+      if (!retry0.error) {
+        data = retry0.data as any
         error = null
       } else {
-        const retry2 = await supabase
+        const retry1 = await supabase
           .from('wfm_settings')
-          .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout')
+          .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout, header_band_color, header_text_color, cliq_channel')
           .eq('id', accountId)
           .maybeSingle()
-        data  = retry2.data as any
-        error = retry2.error
+        if (!retry1.error) {
+          data = retry1.data as any
+          error = null
+        } else {
+          const retry2 = await supabase
+            .from('wfm_settings')
+            .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout')
+            .eq('id', accountId)
+            .maybeSingle()
+          data  = retry2.data as any
+          error = retry2.error
+        }
       }
     }
 
@@ -100,6 +119,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
           subCategory: { id: (data as any).zoho_subcategory_id || '', text: (data as any).zoho_subcategory_text || '' },
           site:        { id: (data as any).zoho_site_id        || '', text: (data as any).zoho_site_text       || '' },
         },
+        alarmSound: (data as any).alarm_sound || '',
       }
       // Refresh localStorage cache
       saveKpiThresholds(accountId, settings.kpi)
@@ -120,6 +140,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     cliqChannel: '',
     wfLogsEnabled: false,
     zohoLookups: { ...DEFAULT_ZOHO_LOOKUPS },
+    alarmSound: '',
   }
 }
 
@@ -248,7 +269,8 @@ export async function saveSettings(
   ds:     DataSourceConfig,
   cliqChannel: string = '',
   wfLogsEnabled: boolean = false,
-  zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS
+  zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS,
+  alarmSound: string = ''
 ): Promise<boolean> {
   // 1. Always write to localStorage immediately (instant, works offline)
   saveKpiThresholds(accountId, kpi)
@@ -275,25 +297,50 @@ export async function saveSettings(
         zoho_subcategory_id:   zohoLookups.subCategory.id,
         zoho_site_text:        zohoLookups.site.text,
         zoho_site_id:          zohoLookups.site.id,
+        alarm_sound:           alarmSound,
         updated_at:            new Date().toISOString(),
       })
-    // The zoho_*/wf_logs_enabled columns don't exist until
-    // sql/zoho_workforce_logs.sql has been run — PostgREST rejects the WHOLE
-    // upsert on an unknown column, so retry without them rather than failing
-    // to save kpi/status/data-source/cliq_channel too.
+    // Each retry step drops the newest-added columns first (alarm_sound,
+    // then zoho_*/wf_logs_enabled) — PostgREST rejects the WHOLE upsert on
+    // any one unknown column, so an account whose migrations haven't all
+    // been run yet still saves everything that DOES exist.
     if (error) {
-      const retry = await supabase
+      const retry0 = await supabase
         .from('wfm_settings')
         .upsert({
-          id:                accountId,
-          account_id:        accountId,
-          kpi_thresholds:    kpi,
-          status_thresholds: status,
-          data_source:       ds,
-          cliq_channel:      cliqChannel,
-          updated_at:        new Date().toISOString(),
+          id:                    accountId,
+          account_id:            accountId,
+          kpi_thresholds:        kpi,
+          status_thresholds:     status,
+          data_source:           ds,
+          cliq_channel:          cliqChannel,
+          wf_logs_enabled:       wfLogsEnabled,
+          zoho_account_name:     zohoLookups.account.text,
+          zoho_account_id:       zohoLookups.account.id,
+          zoho_category_text:    zohoLookups.category.text,
+          zoho_category_id:      zohoLookups.category.id,
+          zoho_subcategory_text: zohoLookups.subCategory.text,
+          zoho_subcategory_id:   zohoLookups.subCategory.id,
+          zoho_site_text:        zohoLookups.site.text,
+          zoho_site_id:          zohoLookups.site.id,
+          updated_at:            new Date().toISOString(),
         })
-      error = retry.error
+      if (!retry0.error) {
+        error = null
+      } else {
+        const retry1 = await supabase
+          .from('wfm_settings')
+          .upsert({
+            id:                accountId,
+            account_id:        accountId,
+            kpi_thresholds:    kpi,
+            status_thresholds: status,
+            data_source:       ds,
+            cliq_channel:      cliqChannel,
+            updated_at:        new Date().toISOString(),
+          })
+        error = retry1.error
+      }
     }
     if (error) { console.warn('[settings] Supabase save error:', error.message); return false }
     return true
