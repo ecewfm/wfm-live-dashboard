@@ -224,6 +224,7 @@ export async function scanZohoFields(): Promise<FieldScanResult> {
   }
 
   const options = [...found.values()]
+  let upsertOk = true
   if (options.length > 0) {
     const { error } = await getSupabaseAdmin()
       .from('wfm_zoho_field_options')
@@ -231,28 +232,35 @@ export async function scanZohoFields(): Promise<FieldScanResult> {
         options.map(o => ({ ...o, last_seen_at: new Date().toISOString() })),
         { onConflict: 'field_name,zoho_id' }
       )
-    if (error) l(`Supabase upsert failed: ${error.message}`)
+    if (error) { l(`Supabase upsert failed: ${error.message}`); upsertOk = false }
   }
 
   // Category/Sub_Categories are exclusively sourced from their master reports
   // above (unlike x_Account/Site, which only ever accumulate) — so a value
   // removed/renamed in Zoho should stop being offered as a suggestion here
-  // too, instead of lingering forever. Skipped when a report's fetch came
-  // back empty (likely a failure, logged above) so a transient error can't
-  // wipe out every known option as a side effect.
-  const admin = getSupabaseAdmin()
-  for (const [fieldName, records] of [
-    ['Category', categoryRecords],
-    ['Sub_Categories', subCategoryRecords],
-  ] as const) {
-    const currentIds = records.map((r: any) => r.ID != null ? String(r.ID) : null).filter((id: string | null): id is string => !!id)
-    if (currentIds.length === 0) continue
-    const { error } = await admin
-      .from('wfm_zoho_field_options')
-      .delete()
-      .eq('field_name', fieldName)
-      .not('zoho_id', 'in', `(${currentIds.map(id => `"${id}"`).join(',')})`)
-    if (error) l(`Cleanup delete failed for ${fieldName}: ${error.message}`)
+  // too, instead of lingering forever. Skipped whenever a report's fetch came
+  // back empty OR the upsert above failed (e.g. wfm_zoho_field_options is
+  // missing the parent_zoho_id column because sql/zoho_field_options.sql's
+  // ALTER TABLE hasn't been run yet) — otherwise a failed write that never
+  // actually saved the fresh rows would still be followed by this deleting
+  // every OLD row, wiping the table instead of merely failing to update it.
+  if (upsertOk) {
+    const admin = getSupabaseAdmin()
+    for (const [fieldName, records] of [
+      ['Category', categoryRecords],
+      ['Sub_Categories', subCategoryRecords],
+    ] as const) {
+      const currentIds = records.map((r: any) => r.ID != null ? String(r.ID) : null).filter((id: string | null): id is string => !!id)
+      if (currentIds.length === 0) continue
+      const { error } = await admin
+        .from('wfm_zoho_field_options')
+        .delete()
+        .eq('field_name', fieldName)
+        .not('zoho_id', 'in', `(${currentIds.map(id => `"${id}"`).join(',')})`)
+      if (error) l(`Cleanup delete failed for ${fieldName}: ${error.message}`)
+    }
+  } else {
+    l('Skipping stale-option cleanup because the upsert above failed — existing options left untouched.')
   }
 
   const optionsDiscovered = LOOKUP_FIELDS.reduce((acc, f) => {
