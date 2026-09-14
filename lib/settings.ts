@@ -230,11 +230,22 @@ export async function saveCliqSettings(settings: CliqGlobalSettings): Promise<bo
 }
 
 // ── Zoho Creator lookup field options (Category/Sub_Categories/x_Account/Site) ─
-// Populated by lib/zohoFieldScan.ts (daily Cron + "Scan Zoho Field Options
-// Now" button) scanning every existing Workforce Logs record. Read directly
-// with the anon client — nothing sensitive in here, same posture as
-// wfm_settings itself (only wfm_cliq_oauth is locked down).
-export interface ZohoFieldOption { id: string; label: string }
+// Category/Sub_Categories are populated from the two canonical master reports
+// (Workforce_RTA_Categories_Report / Workforce_RTA_Sub_Categories_Report);
+// x_Account/Site are still discovered from historical Workforce Logs records
+// — see lib/zohoFieldScan.ts (daily Cron + "Scan Zoho Field Options Now"
+// button). Read directly with the anon client — nothing sensitive in here,
+// same posture as wfm_settings itself (only wfm_cliq_oauth is locked down).
+export interface ZohoFieldOption {
+  id:    string
+  label: string
+  // Sub_Categories only — the zoho_id of the parent Category this option
+  // belongs to (from the Sub-Categories report's own Workforce_RTA_Categories
+  // lookup field), so the Settings UI can filter suggestions down to just
+  // the ones under the account's currently-selected Category. Null/undefined
+  // for every other field_name.
+  parentId?: string | null
+}
 
 export async function loadZohoFieldOptions(
   fieldName: 'Category' | 'Sub_Categories' | 'x_Account' | 'Site'
@@ -242,7 +253,7 @@ export async function loadZohoFieldOptions(
   try {
     const { data, error } = await supabase
       .from('wfm_zoho_field_options')
-      .select('zoho_id, display_value')
+      .select('zoho_id, display_value, parent_zoho_id')
       .eq('field_name', fieldName)
       .order('display_value')
     // A real error here (vs. genuinely zero rows) usually means RLS is
@@ -253,7 +264,7 @@ export async function loadZohoFieldOptions(
     // options scanned yet".
     if (error) { console.warn('[settings] Zoho field options load error:', error.message); return [] }
     if (!data) return []
-    return data.map((r: any) => ({ id: r.zoho_id, label: r.display_value }))
+    return data.map((r: any) => ({ id: r.zoho_id, label: r.display_value, parentId: r.parent_zoho_id ?? null }))
   } catch (e) {
     console.warn('[settings] Zoho field options load failed:', e)
     return []

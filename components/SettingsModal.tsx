@@ -1077,13 +1077,18 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
 // scan). Typing something that exactly matches a known option's label stores
 // its Zoho ID (most reliable write); anything else is kept as plain typed
 // text (Zoho resolves it by display value at write time — see CLAUDE.md).
-function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey }: {
+function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, parentId }: {
   label:     string
   hint:      string
   fieldName: 'Category' | 'Sub_Categories' | 'x_Account' | 'Site'
   value:     ZohoLookupChoice
   onChange:  (v: ZohoLookupChoice) => void
   refreshKey: number   // bumped after a successful field scan to force a re-fetch without closing the modal
+  // Sub_Categories only — the currently-selected Category's Zoho ID. When
+  // set, suggestions are narrowed to just the sub-categories the scan linked
+  // to that Category (see lib/zohoFieldScan.ts); ignored for every other
+  // fieldName.
+  parentId?: string
 }) {
   const [options, setOptions] = useState<ZohoFieldOption[]>([])
   useEffect(() => {
@@ -1092,11 +1097,17 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey }
     return () => { cancelled = true }
   }, [fieldName, refreshKey])
 
+  // Only cascade when a Category is actually picked from the list (has an
+  // ID) — a blank or free-typed Category can't be matched to anything, so
+  // fall back to the full list rather than filtering everything out.
+  const cascading = fieldName === 'Sub_Categories' && !!parentId
+  const visibleOptions = cascading ? options.filter(o => o.parentId === parentId) : options
+
   const currentText = value.id ? (options.find(o => o.id === value.id)?.label ?? '') : (value.text || '')
   const datalistId = `zoho-lookup-${fieldName}`
 
   const handleChange = (typed: string) => {
-    const match = options.find(o => o.label === typed)
+    const match = visibleOptions.find(o => o.label === typed)
     onChange(match ? { id: match.id, text: '' } : { id: '', text: typed })
   }
 
@@ -1109,8 +1120,11 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey }
         placeholder="Pick a suggestion or type a new value"
         onChange={e => handleChange(e.target.value)} />
       <datalist id={datalistId}>
-        {options.map(o => <option key={o.id} value={o.label} />)}
+        {visibleOptions.map(o => <option key={o.id} value={o.label} />)}
       </datalist>
+      {fieldName === 'Sub_Categories' && !cascading && options.some(o => o.parentId) && (
+        <div className="sm-metric-sub" style={{ marginTop: 4 }}>Pick a Category above to narrow this list.</div>
+      )}
     </div>
   )
 }
@@ -1545,7 +1559,8 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   value={zohoLu.category} onChange={v => setZohoLu(prev => ({ ...prev, category: v }))} />
                 <ZohoLookupField label="Sub Category" fieldName="Sub_Categories" refreshKey={fieldOptionsRefresh}
                   hint="Optional — leave blank to not set Sub Category on this account's records."
-                  value={zohoLu.subCategory} onChange={v => setZohoLu(prev => ({ ...prev, subCategory: v }))} />
+                  value={zohoLu.subCategory} onChange={v => setZohoLu(prev => ({ ...prev, subCategory: v }))}
+                  parentId={zohoLu.category.id || undefined} />
                 <ZohoLookupField label="Site" fieldName="Site" refreshKey={fieldOptionsRefresh}
                   hint="Optional — leave blank to not set Site on this account's records."
                   value={zohoLu.site} onChange={v => setZohoLu(prev => ({ ...prev, site: v }))} />
