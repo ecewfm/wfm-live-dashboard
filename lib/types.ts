@@ -215,12 +215,20 @@ export interface AgentSource {
 // Agent/Status/Duration ones (see components/Dashboard.tsx's agent table).
 // Defined ONCE per account (shown as an extra <th> for every agent row,
 // regardless of which AgentSource/legacy table produced it) — same
-// add/rename/remove pattern as ExtraTile, but with no thresholds since this
-// is a plain display column, not a KPI. Where each column's VALUE actually
-// comes from is mapped separately per source: DataSourceConfig.
+// add/rename/remove pattern as ExtraTile, but with no numeric thresholds
+// since this is a plain display column, not a KPI. Where each column's VALUE
+// actually comes from is mapped separately per source: DataSourceConfig.
 // agentExtraColsMap (legacy single-table) and AgentSource.extraCols (each
 // additional source), both keyed by this key.
 export interface AgentExtraColumn {
   key:   string   // stable id, e.g. "agentcol_1699..."
   label: string   // shown as the table's column header
+  // Optional TEXT-based breach rule — some CRMs flag a problem as a literal
+  // status word (e.g. Wyze's Adherence column reading "Out of adherence")
+  // rather than a duration to compare against a threshold. When set,
+  // lib/breaches.ts flags any agent whose value for this column contains
+  // this text (case-insensitive) as a breach. Blank = never breach on this
+  // column — a purely informational display column, the default.
+  breachText?:     string
+  breachSeverity?: 'warning' | 'critical'   // only meaningful when breachText is set; defaults to 'critical'
 }

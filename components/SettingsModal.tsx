@@ -453,13 +453,21 @@ function extraAgentColColor(i: number) { return EXTRA_COLORS[i % EXTRA_COLORS.le
 // ── Module-level sub-components — MUST be outside DataSourcesTab ─────────────
 // If defined inside, React remounts them on every render → scroll resets.
 
-const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle, onClear, color: colorOverride, editableLabel, onLabelChange, onRemove }: {
+const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle, onClear, color: colorOverride, editableLabel, onLabelChange, onRemove, breachText, onBreachTextChange, breachSeverity, onBreachSeverityToggle }: {
   slotKey: string; label: string; hint: string
   isActive: boolean; value: string; onToggle: (k: string) => void; onClear?: (k: string) => void
   color?: string           // override SLOT_COLORS lookup — needed for custom columns (no fixed slot color)
   editableLabel?: boolean  // custom columns only — renders `label` as a rename-in-place input
   onLabelChange?: (label: string) => void
   onRemove?: () => void    // custom columns only — deletes the whole column, distinct from onClear's "unmap"
+  // Custom columns only — text-based breach trigger (see AgentExtraColumn).
+  // Shown/edited on every card this column appears in (legacy table + every
+  // AgentSource) since it's one shared property of the column definition,
+  // not a per-source mapping.
+  breachText?: string
+  onBreachTextChange?: (v: string) => void
+  breachSeverity?: 'warning' | 'critical'
+  onBreachSeverityToggle?: () => void
 }) => {
   const color = colorOverride || SLOT_COLORS[slotKey] || '#888'
   // Empty slot → click arms it for picking (existing behavior). Already-armed
@@ -501,6 +509,24 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
         background: value ? `${color}12` : 'transparent' }}>
         {value || (isActive ? '← click a column' : 'Not mapped')}
       </div>
+      {editableLabel && (
+        <div onClick={e => e.stopPropagation()}
+          style={{ display: 'flex', gap: 4, alignItems: 'center', padding: '5px 8px 7px', borderTop: '1px solid var(--border,#e1e6e4)' }}>
+          <input value={breachText ?? ''} onChange={e => onBreachTextChange?.(e.target.value)}
+            placeholder="Flag breach if text contains…"
+            title="Case-insensitive — e.g. &quot;Out of adherence&quot;. Leave blank to never breach on this column."
+            style={{ flex: 1, minWidth: 0, fontSize: 10, padding: '3px 6px', borderRadius: 4,
+              border: '1px solid var(--border,#e1e6e4)', background: 'var(--bg-body,#f0f2f1)', color: 'var(--text-main)' }} />
+          {!!(breachText ?? '').trim() && (
+            <button onClick={() => onBreachSeverityToggle?.()} title="Toggle warning/critical severity"
+              style={{ fontSize: 9, fontWeight: 700, padding: '3px 6px', borderRadius: 4, border: 'none',
+                cursor: 'pointer', flexShrink: 0, color: '#fff',
+                background: breachSeverity === 'warning' ? '#d99e35' : '#c95c5c' }}>
+              {breachSeverity === 'warning' ? 'WARN' : 'CRIT'}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 })
@@ -603,12 +629,14 @@ const ColSelect = React.memo(({ cols, value, onChange, emptyLabel }: {
 // column instead of the static `label` (covers "one table, already split by
 // team/queue column" — e.g. ZenBusiness's team_name — vs "one source per
 // physical table" — e.g. Hippo's Licensed Agents + Level 1).
-function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExtraCol, onRenameExtraCol, onRemoveExtraCol, onChange, onRemove }: {
+function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExtraCol, onRenameExtraCol, onRemoveExtraCol, onSetExtraColBreachText, onToggleExtraColSeverity, onChange, onRemove }: {
   source: AgentSource; tables: string[]; supaUrl: string; supaKey: string
   extraCols: AgentExtraColumn[]
   onAddExtraCol: () => void
   onRenameExtraCol: (key: string, label: string) => void
   onRemoveExtraCol: (key: string) => void
+  onSetExtraColBreachText: (key: string, breachText: string) => void
+  onToggleExtraColSeverity: (key: string) => void
   onChange: (patch: Partial<AgentSource>) => void; onRemove: () => void
 }) {
   const [preview, setPreview] = useState<Record<string, any>[]>([])
@@ -670,6 +698,8 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExt
           const slotKey = EXTRA_AGENT_COL_PREFIX + c.key
           return <DsSlotCard key={slotKey} slotKey={slotKey} label={c.label} hint="Custom column — mapped from this source's table"
             color={extraAgentColColor(i)} editableLabel onLabelChange={l => onRenameExtraCol(c.key, l)} onRemove={() => onRemoveExtraCol(c.key)}
+            breachText={c.breachText} onBreachTextChange={v => onSetExtraColBreachText(c.key, v)}
+            breachSeverity={c.breachSeverity} onBreachSeverityToggle={() => onToggleExtraColSeverity(c.key)}
             isActive={activeSlot === slotKey} value={source.extraCols?.[c.key] || ''}
             onToggle={k => setActiveSlot(cur => cur === k ? null : k)}
             onClear={() => { const ec = { ...source.extraCols }; delete ec[c.key]; onChange({ extraCols: ec }) }} />
@@ -832,6 +862,13 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   }, [])
   const renameAgentExtraCol = useCallback((key: string, label: string) => {
     setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c => c.key === key ? { ...c, label } : c) }))
+  }, [])
+  const setAgentExtraColBreachText = useCallback((key: string, breachText: string) => {
+    setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c => c.key === key ? { ...c, breachText } : c) }))
+  }, [])
+  const toggleAgentExtraColSeverity = useCallback((key: string) => {
+    setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c =>
+      c.key === key ? { ...c, breachSeverity: c.breachSeverity === 'warning' ? 'critical' : 'warning' } : c) }))
   }, [])
   const removeAgentExtraCol = useCallback((key: string) => {
     setLocalDs(prev => {
@@ -1137,6 +1174,8 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             const slotKey = EXTRA_AGENT_COL_PREFIX + c.key
             return <DsSlotCard key={slotKey} slotKey={slotKey} label={c.label} hint="Custom column — mapped from the legacy table"
               color={extraAgentColColor(i)} editableLabel onLabelChange={l => renameAgentExtraCol(c.key, l)} onRemove={() => removeAgentExtraCol(c.key)}
+              breachText={c.breachText} onBreachTextChange={v => setAgentExtraColBreachText(c.key, v)}
+              breachSeverity={c.breachSeverity} onBreachSeverityToggle={() => toggleAgentExtraColSeverity(c.key)}
               isActive={activeAgentSlot === slotKey} value={localDs.agentExtraColsMap[c.key] || ''}
               onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
               onClear={() => setLocalDs(prev => { const m = { ...prev.agentExtraColsMap }; delete m[c.key]; return { ...prev, agentExtraColsMap: m } })} />
@@ -1183,6 +1222,7 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
           <AgentSourceCard key={source.id} source={source} tables={tables} supaUrl={supaUrl} supaKey={supaKey}
             extraCols={localDs.agentExtraCols}
             onAddExtraCol={addAgentExtraCol} onRenameExtraCol={renameAgentExtraCol} onRemoveExtraCol={removeAgentExtraCol}
+            onSetExtraColBreachText={setAgentExtraColBreachText} onToggleExtraColSeverity={toggleAgentExtraColSeverity}
             onChange={patch => updateAgentSource(source.id, patch)} onRemove={() => removeAgentSource(source.id)} />
         ))}
         <button className="ds-add-btn" onClick={addAgentSource}><i className="bx bx-plus" /> Add Agent Source</button>

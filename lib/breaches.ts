@@ -86,15 +86,33 @@ export function buildBreaches(
   // _name/_status/_duration regardless of single-table vs agentSources.
   accountData.agents.forEach(a => {
     const status = String(a._status ?? '')
-    const thSt   = statusTh[status]
-    if (!thSt || thSt.crit >= 999 || thSt.excluded) return
-    const name  = String(a._name ?? '')
-    const key   = `${accountId}:${name}`
-    const secs  = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
-    const mins  = secs / 60
-    const dur   = formatSeconds(secs)
-    if (mins >= thSt.crit)       rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical' })
-    else if (mins >= thSt.warn)  rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning'  })
+    const name   = String(a._name ?? '')
+
+    // Duration-based: how long the agent has been in this status.
+    const thSt = statusTh[status]
+    if (thSt && thSt.crit < 999 && !thSt.excluded) {
+      const key  = `${accountId}:${name}`
+      const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+      const mins = secs / 60
+      const dur  = formatSeconds(secs)
+      if (mins >= thSt.crit)      rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical' })
+      else if (mins >= thSt.warn) rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning'  })
+    }
+
+    // Text-based: some CRMs flag a problem as a literal status word instead
+    // of a duration (e.g. Wyze's Adherence column reading "Out of
+    // adherence") — checked against every custom Agent Table column that has
+    // a breachText configured (see AgentExtraColumn in lib/types.ts).
+    // Independent of the duration check above — an agent can breach on both
+    // at once, as two separate rows.
+    ;(ds.agentExtraCols ?? []).forEach(col => {
+      const trigger = (col.breachText || '').trim()
+      if (!trigger) return
+      const raw = String(a[`_extra_${col.key}`] ?? '')
+      if (raw.toLowerCase().includes(trigger.toLowerCase())) {
+        rows.push({ entity: name, metric: col.label, value: raw, threshold: trigger, severity: col.breachSeverity || 'critical' })
+      }
+    })
   })
 
   return rows
