@@ -88,9 +88,17 @@ export function buildBreaches(
     const status = String(a._status ?? '')
     const name   = String(a._name ?? '')
 
+    // Excluded statuses (e.g. "Logged Out"/"Offline") never breach AT ALL —
+    // not just duration, but ALSO the text-based custom-column check below.
+    // Matches this setting's own stated intent (see StatusThresholds in
+    // lib/utils.ts: "shouldn't be breach-checked... at all") — an agent who
+    // isn't actively working shouldn't get flagged just because a stale
+    // Adherence/etc. value was left over from before they went offline.
+    if (statusTh[status]?.excluded) return
+
     // Duration-based: how long the agent has been in this status.
     const thSt = statusTh[status]
-    if (thSt && thSt.crit < 999 && !thSt.excluded) {
+    if (thSt && thSt.crit < 999) {
       const key  = `${accountId}:${name}`
       const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
       const mins = secs / 60
