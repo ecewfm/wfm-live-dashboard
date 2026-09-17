@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, AgentSource, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
@@ -442,6 +442,14 @@ const AGENT_SLOTS = [
   { key: 'agentDurationSecs', label: 'Duration (secs)', hint: 'e.g. duration_secs (or leave empty)' },
 ]
 
+// Custom Agent Table columns (DataSourceConfig.agentExtraCols) are mapped
+// using the SAME DsSlotCard/DsPreviewTable mechanism as the fixed slots
+// above, via a synthetic slot key namespaced with this prefix so activeSlot/
+// activeAgentSlot state can tell the two kinds apart without a second parallel
+// UI. See mapAgentCol (legacy table) and AgentSourceCard's mapCol (per source).
+const EXTRA_AGENT_COL_PREFIX = 'agentExtraCol:'
+function extraAgentColColor(i: number) { return EXTRA_COLORS[i % EXTRA_COLORS.length] }
+
 // ── Module-level sub-components — MUST be outside DataSourcesTab ─────────────
 // If defined inside, React remounts them on every render → scroll resets.
 
@@ -568,8 +576,9 @@ const ColSelect = React.memo(({ cols, value, onChange, emptyLabel }: {
 // column instead of the static `label` (covers "one table, already split by
 // team/queue column" — e.g. ZenBusiness's team_name — vs "one source per
 // physical table" — e.g. Hippo's Licensed Agents + Level 1).
-function AgentSourceCard({ source, tables, supaUrl, supaKey, onChange, onRemove }: {
+function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onChange, onRemove }: {
   source: AgentSource; tables: string[]; supaUrl: string; supaKey: string
+  extraCols: AgentExtraColumn[]
   onChange: (patch: Partial<AgentSource>) => void; onRemove: () => void
 }) {
   const [preview, setPreview] = useState<Record<string, any>[]>([])
@@ -595,9 +604,14 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, onChange, onRemove 
   // instead, which is the normal, valid place for them.
   const mapCol = useCallback((colName: string) => {
     if (!activeSlot) return
-    onChange({ [activeSlot]: colName } as Partial<AgentSource>)
+    if (activeSlot.startsWith(EXTRA_AGENT_COL_PREFIX)) {
+      const key = activeSlot.slice(EXTRA_AGENT_COL_PREFIX.length)
+      onChange({ extraCols: { ...source.extraCols, [key]: colName } })
+    } else {
+      onChange({ [activeSlot]: colName } as Partial<AgentSource>)
+    }
     setActiveSlot(null)
-  }, [activeSlot, onChange])
+  }, [activeSlot, onChange, source.extraCols])
 
   return (
     <div className="ds-group" style={{ marginBottom: 10 }}>
@@ -622,11 +636,21 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, onChange, onRemove 
           isActive={activeSlot === s.key} value={(source as any)[s.key] || ''}
           onToggle={k => setActiveSlot(cur => cur === k ? null : k)}
           onClear={k => onChange({ [k]: '' } as Partial<AgentSource>)} />)}
+        {extraCols.map((c, i) => {
+          const slotKey = EXTRA_AGENT_COL_PREFIX + c.key
+          return <DsSlotCard key={slotKey} slotKey={slotKey} label={c.label} hint="Custom column — mapped from this source's table"
+            isActive={activeSlot === slotKey} value={source.extraCols?.[c.key] || ''}
+            onToggle={k => setActiveSlot(cur => cur === k ? null : k)}
+            onClear={() => { const ec = { ...source.extraCols }; delete ec[c.key]; onChange({ extraCols: ec }) }} />
+        })}
       </div>
       {activeSlot && (
         <div className="ds-active-bar">
           <i className="bx bx-crosshair" style={{ fontSize: 16 }} />
-          <strong>{AGENT_SOURCE_SLOTS.find(s => s.key === activeSlot)?.label}</strong> is active — click a column header below
+          <strong>{
+            AGENT_SOURCE_SLOTS.find(s => s.key === activeSlot)?.label
+            ?? extraCols.find(c => EXTRA_AGENT_COL_PREFIX + c.key === activeSlot)?.label
+          }</strong> is active — click a column header below
         </div>
       )}
       {source.table && (
@@ -635,7 +659,10 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, onChange, onRemove 
             <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>Loading preview...</div>
           ) : (
             <DsPreviewTable rows={preview} hasActiveSlot={!!activeSlot} onMap={mapCol}
-              mappedCols={AGENT_SOURCE_SLOTS.reduce((acc, s) => { const v = (source as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key] || '#888'; return acc }, {} as Record<string, string>)} />
+              mappedCols={{
+                ...AGENT_SOURCE_SLOTS.reduce((acc, s) => { const v = (source as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key] || '#888'; return acc }, {} as Record<string, string>),
+                ...extraCols.reduce((acc, c, i) => { const v = source.extraCols?.[c.key]; if (v) acc[v] = extraAgentColColor(i); return acc }, {} as Record<string, string>),
+              }} />
           )}
         </div>
       )}
@@ -747,7 +774,48 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
     })
   }, [])
   const mapAgentCol = useCallback((colName: string) => {
-    setActiveAgentSlot(cur => { if (cur) setLocalDs(prev => ({ ...prev, [cur]: colName })); return null })
+    setActiveAgentSlot(cur => {
+      if (cur) setLocalDs(prev => {
+        // Custom column slots write into agentExtraColsMap (legacy single
+        // table's mapping) instead of a flat top-level field.
+        if (cur.startsWith(EXTRA_AGENT_COL_PREFIX)) {
+          const key = cur.slice(EXTRA_AGENT_COL_PREFIX.length)
+          return { ...prev, agentExtraColsMap: { ...prev.agentExtraColsMap, [key]: colName } }
+        }
+        return { ...prev, [cur]: colName }
+      })
+      return null
+    })
+  }, [])
+
+  // ── Custom Agent Status table columns — defined ONCE for the whole account
+  // (shown as an extra column on the Dashboard's Agent Status table for every
+  // source), same add/rename/remove pattern as Extra KPI Tiles but with no
+  // thresholds (a plain display column, not a KPI). Each source (legacy table
+  // + every AgentSource) maps this key to its OWN column name separately —
+  // see agentExtraColsMap below and AgentSourceCard's extraCols prop.
+  const addAgentExtraCol = useCallback(() => {
+    setLocalDs(prev => ({ ...prev, agentExtraCols: [...prev.agentExtraCols,
+      { key: 'agentcol_' + genId(), label: `Column ${prev.agentExtraCols.length + 1}` }] }))
+  }, [])
+  const renameAgentExtraCol = useCallback((key: string, label: string) => {
+    setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c => c.key === key ? { ...c, label } : c) }))
+  }, [])
+  const removeAgentExtraCol = useCallback((key: string) => {
+    setLocalDs(prev => {
+      const agentExtraColsMap = { ...prev.agentExtraColsMap }; delete agentExtraColsMap[key]
+      return {
+        ...prev,
+        agentExtraCols: prev.agentExtraCols.filter(c => c.key !== key),
+        agentExtraColsMap,
+        agentSources: prev.agentSources.map(s => {
+          if (!(key in (s.extraCols || {}))) return s
+          const extraCols = { ...s.extraCols }; delete extraCols[key]
+          return { ...s, extraCols }
+        }),
+      }
+    })
+    setActiveAgentSlot(cur => cur === EXTRA_AGENT_COL_PREFIX + key ? null : cur)
   }, [])
 
   // ── Multiple agent sources — covers both "agent status split across several
@@ -1011,6 +1079,29 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         )}
       </div>
 
+      {/* Custom Agent Table columns — defined ONCE, mapped per source below
+          (legacy table's slot grid, and each AgentSource card). */}
+      <div className="ds-section">
+        <div className="ds-section-title">CUSTOM AGENT TABLE COLUMNS</div>
+        <p className="ds-hint">
+          Add columns beyond the default Agent / Status / Duration on the Dashboard's Agent Status
+          table. Name it here, then map it below (and in each additional source, if it has its own
+          differently-named column for the same data) — a source that doesn't map a column just
+          shows it blank for its rows.
+        </p>
+        <div className="ds-extra-wrap">
+          {localDs.agentExtraCols.map((c, i) => (
+            <div key={c.key} className="ds-extra-row">
+              <span className="ds-label-dot" style={{ background: extraAgentColColor(i) }} />
+              <input className="acc-add-input ds-extra-name" value={c.label}
+                onChange={e => renameAgentExtraCol(c.key, e.target.value)} placeholder="Column name" />
+              <button className="ds-x" onClick={() => removeAgentExtraCol(c.key)}><i className="bx bx-trash" /></button>
+            </div>
+          ))}
+          <button className="ds-add-btn" onClick={addAgentExtraCol}><i className="bx bx-plus" /> Add Column</button>
+        </div>
+      </div>
+
       {/* Agent Section (column-based) */}
       <div className="ds-section">
         <div className="ds-section-title">AGENT DATA SOURCE</div>
@@ -1030,11 +1121,21 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             isActive={activeAgentSlot === s.key} value={(localDs as any)[s.key] || ''}
             onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
             onClear={k => setField(k, '')} />)}
+          {localDs.agentExtraCols.map((c, i) => {
+            const slotKey = EXTRA_AGENT_COL_PREFIX + c.key
+            return <DsSlotCard key={slotKey} slotKey={slotKey} label={c.label} hint="Custom column — mapped from the legacy table"
+              isActive={activeAgentSlot === slotKey} value={localDs.agentExtraColsMap[c.key] || ''}
+              onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
+              onClear={() => setLocalDs(prev => { const m = { ...prev.agentExtraColsMap }; delete m[c.key]; return { ...prev, agentExtraColsMap: m } })} />
+          })}
         </div>
         {activeAgentSlot && (
           <div className="ds-active-bar">
             <i className="bx bx-crosshair" style={{ fontSize: 16 }} />
-            <strong>{AGENT_SLOTS.find(s => s.key === activeAgentSlot)?.label}</strong> is active — click a column header below
+            <strong>{
+              AGENT_SLOTS.find(s => s.key === activeAgentSlot)?.label
+              ?? localDs.agentExtraCols.find(c => EXTRA_AGENT_COL_PREFIX + c.key === activeAgentSlot)?.label
+            }</strong> is active — click a column header below
           </div>
         )}
         {localDs.agentTable && (
@@ -1043,7 +1144,10 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
               <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>Loading preview...</div>
             ) : (
               <DsPreviewTable rows={agtPreview} hasActiveSlot={!!activeAgentSlot} onMap={mapAgentCol}
-                mappedCols={AGENT_SLOTS.reduce((acc, s) => { const v = (localDs as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key] || '#888'; return acc }, {} as Record<string, string>)} />
+                mappedCols={{
+                  ...AGENT_SLOTS.reduce((acc, s) => { const v = (localDs as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key] || '#888'; return acc }, {} as Record<string, string>),
+                  ...localDs.agentExtraCols.reduce((acc, c, i) => { const v = localDs.agentExtraColsMap[c.key]; if (v) acc[v] = extraAgentColColor(i); return acc }, {} as Record<string, string>),
+                }} />
             )}
           </div>
         )}
@@ -1063,6 +1167,7 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         </p>
         {localDs.agentSources.map(source => (
           <AgentSourceCard key={source.id} source={source} tables={tables} supaUrl={supaUrl} supaKey={supaKey}
+            extraCols={localDs.agentExtraCols}
             onChange={patch => updateAgentSource(source.id, patch)} onRemove={() => removeAgentSource(source.id)} />
         ))}
         <button className="ds-add-btn" onClick={addAgentSource}><i className="bx bx-plus" /> Add Agent Source</button>

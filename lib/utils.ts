@@ -48,7 +48,7 @@ export function newAgentSource(label = ''): AgentSource {
   return {
     id: genId(), label, table: '',
     accountCol: 'account_id', nameCol: '', statusCol: '', durationCol: '', durationSecsCol: '',
-    groupByCol: '',
+    groupByCol: '', extraCols: {},
   }
 }
 
@@ -117,6 +117,8 @@ export const PRESET_AIRCALL: DataSourceConfig = {
   agentStatusCol:   'status',
   agentDurationCol: 'duration',
   agentDurationSecs:'',
+  agentExtraColsMap:{},
+  agentExtraCols:   [],
   agentSources:     []
 }
 
@@ -140,6 +142,8 @@ export const PRESET_TALKDESK: DataSourceConfig = {
   agentStatusCol:   'status',
   agentDurationCol: 'duration',
   agentDurationSecs:'duration_secs',
+  agentExtraColsMap:{},
+  agentExtraCols:   [],
   agentSources:     []
 }
 
@@ -159,6 +163,8 @@ export const DEFAULT_DATA_SOURCE: DataSourceConfig = {
   agentStatusCol:   'state',
   agentDurationCol: 'duration',
   agentDurationSecs:'',
+  agentExtraColsMap:{},
+  agentExtraCols:   [],
   agentSources:     []
 }
 
@@ -174,7 +180,13 @@ export function migrateDataSource(raw: any): DataSourceConfig {
       kpiLabels:    { ...DEFAULT_KPI_LABELS, ...(raw.kpiLabels || {}) },
       extraTiles:   Array.isArray(raw.extraTiles) ? raw.extraTiles : [],
       groups:       raw.groups.length ? raw.groups : [newGroup()],
-      agentSources: Array.isArray(raw.agentSources) ? raw.agentSources : [],
+      agentExtraColsMap: (raw.agentExtraColsMap && typeof raw.agentExtraColsMap === 'object') ? raw.agentExtraColsMap : {},
+      agentExtraCols:    Array.isArray(raw.agentExtraCols) ? raw.agentExtraCols : [],
+      // Older saved sources predate AgentSource.extraCols — default it per
+      // entry so DsPreviewTable/mapCol always have an object to spread into.
+      agentSources: (Array.isArray(raw.agentSources) ? raw.agentSources : []).map((s: any) => ({
+        ...s, extraCols: (s.extraCols && typeof s.extraCols === 'object') ? s.extraCols : {},
+      })),
     }
   }
 
@@ -201,6 +213,8 @@ export function migrateDataSource(raw: any): DataSourceConfig {
     agentStatusCol:   raw.agentStatusCol   || 'state',
     agentDurationCol: raw.agentDurationCol || 'duration',
     agentDurationSecs:raw.agentDurationSecs|| '',
+    agentExtraColsMap:{},
+    agentExtraCols:   [],
     agentSources:     [],
   }
 }
@@ -495,6 +509,8 @@ export const PRESET_FIVE9: DataSourceConfig = {
   agentStatusCol:   'state',
   agentDurationCol: 'duration',
   agentDurationSecs:'',
+  agentExtraColsMap:{},
+  agentExtraCols:   [],
   agentSources:     []
 }
 

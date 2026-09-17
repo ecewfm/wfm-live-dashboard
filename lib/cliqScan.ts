@@ -64,6 +64,7 @@ async function fetchAccountData(ds: DataSourceConfig, accountId: string): Promis
       table: ds.agentTable, accountCol: ds.agentAccountCol,
       nameCol: ds.agentNameCol, statusCol: ds.agentStatusCol,
       durationCol: ds.agentDurationCol, durationSecsCol: ds.agentDurationSecs,
+      extraCols: {}, // breach scanning never needs custom display columns
     })
   }
   if (ds.agentSources) agentSourcesToFetch.push(...ds.agentSources)

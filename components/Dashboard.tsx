@@ -56,14 +56,26 @@ async function fetchAgentSource(src: AgentSource, accId: string): Promise<any[]>
   }
 
   const rows = (res.data as any[]) ?? []
-  return rows.map(r => ({
-    ...r,
-    _agentGroup:   src.groupByCol ? String(r[src.groupByCol] ?? '') : src.label,
-    _name:         String(r[src.nameCol]     ?? ''),
-    _status:       String(r[src.statusCol]   ?? ''),
-    _duration:     String(r[src.durationCol] ?? ''),
-    _durationSecs: src.durationSecsCol ? String(r[src.durationSecsCol] ?? '') : '',
-  }))
+  // Custom Agent Table columns (DataSourceConfig.agentExtraCols) — each one's
+  // VALUE comes from whichever raw column THIS source mapped it to
+  // (src.extraCols[key]); a key this source never mapped is simply left off
+  // the row, and the table renders it blank for those agents.
+  const extraKeys = Object.keys(src.extraCols || {})
+  return rows.map(r => {
+    const out: Record<string, any> = {
+      ...r,
+      _agentGroup:   src.groupByCol ? String(r[src.groupByCol] ?? '') : src.label,
+      _name:         String(r[src.nameCol]     ?? ''),
+      _status:       String(r[src.statusCol]   ?? ''),
+      _duration:     String(r[src.durationCol] ?? ''),
+      _durationSecs: src.durationSecsCol ? String(r[src.durationSecsCol] ?? '') : '',
+    }
+    extraKeys.forEach(key => {
+      const col = src.extraCols[key]
+      if (col) out[`_extra_${key}`] = String(r[col] ?? '')
+    })
+    return out
+  })
 }
 
 // ── Main Dashboard component ──────────────────────────────────────────────────
@@ -143,6 +155,7 @@ export default function Dashboard() {
           table: src.agentTable, accountCol: src.agentAccountCol,
           nameCol: src.agentNameCol, statusCol: src.agentStatusCol,
           durationCol: src.agentDurationCol, durationSecsCol: src.agentDurationSecs,
+          extraCols: src.agentExtraColsMap || {},
         })
       }
       if (src.agentSources) agentSourcesToFetch.push(...src.agentSources)
@@ -986,42 +999,48 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
                   onSort={() => toggleAgentSort('status')} />
                 <SortableTh label="Duration" active={agentSort?.col === 'duration'} dir={agentSort?.dir ?? 'asc'}
                   onClick={() => toggleAgentSort('duration')} />
+                {(ds.agentExtraCols ?? []).map(col => (
+                  <th key={col.key}>{col.label}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {agents.length === 0
-                ? <tr><td colSpan={3} className="no-data">No agent data</td></tr>
-                : (() => {
-                  const body = Array.from(agentGroups.entries()).flatMap(([groupName, groupAgents]) => {
-                    const filtered = sortAgentRows(groupAgents.filter(passesAgentFilters))
-                    if (filtered.length === 0) return []
-                    const rows = filtered.map((a, i) => {
-                      const name = String(a._name ?? '')
-                      const key  = `${accountId}:${name}`
-                      const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
-                      return (
-                        <tr key={`${groupName}-${i}`}>
-                          <td style={{ fontWeight: 600 }}>{name}</td>
-                          <td><span className={getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
-                          <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
-                        </tr>
-                      )
-                    })
-                    if (!showAgentGroupHeaders || !groupName) return rows
-                    return [
-                      <tr key={`${groupName}-hdr`}>
-                        <td colSpan={3} style={{
-                          background: 'var(--bg-secondary, rgba(127,127,127,.08))', fontWeight: 700,
-                          fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px',
-                          color: 'var(--text-muted)', padding: '6px 12px',
-                        }}>{groupName}</td>
-                      </tr>,
-                      ...rows,
-                    ]
+              {(() => {
+                const extraCols = ds.agentExtraCols ?? []
+                const colCount = 3 + extraCols.length
+                if (agents.length === 0) return <tr><td colSpan={colCount} className="no-data">No agent data</td></tr>
+                const body = Array.from(agentGroups.entries()).flatMap(([groupName, groupAgents]) => {
+                  const filtered = sortAgentRows(groupAgents.filter(passesAgentFilters))
+                  if (filtered.length === 0) return []
+                  const rows = filtered.map((a, i) => {
+                    const name = String(a._name ?? '')
+                    const key  = `${accountId}:${name}`
+                    const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+                    return (
+                      <tr key={`${groupName}-${i}`}>
+                        <td style={{ fontWeight: 600 }}>{name}</td>
+                        <td><span className={getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
+                        <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
+                        {extraCols.map(col => (
+                          <td key={col.key}>{String(a[`_extra_${col.key}`] ?? '')}</td>
+                        ))}
+                      </tr>
+                    )
                   })
-                  return body.length > 0 ? body : <tr><td colSpan={3} className="no-data">No agents match the current filter</td></tr>
-                })()
-              }
+                  if (!showAgentGroupHeaders || !groupName) return rows
+                  return [
+                    <tr key={`${groupName}-hdr`}>
+                      <td colSpan={colCount} style={{
+                        background: 'var(--bg-secondary, rgba(127,127,127,.08))', fontWeight: 700,
+                        fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px',
+                        color: 'var(--text-muted)', padding: '6px 12px',
+                      }}>{groupName}</td>
+                    </tr>,
+                    ...rows,
+                  ]
+                })
+                return body.length > 0 ? body : <tr><td colSpan={colCount} className="no-data">No agents match the current filter</td></tr>
+              })()}
             </tbody>
           </table>
         </LayoutPanel>

@@ -129,6 +129,15 @@ export interface DataSourceConfig {
   agentStatusCol:   string
   agentDurationCol: string    // duration as string e.g. "5:23"
   agentDurationSecs:string    // duration in seconds ('' if N/A)
+  // Legacy single-table mapping for agentExtraCols (see AgentExtraColumn) —
+  // key -> raw column name in `agentTable`. Mirrors AgentSource.extraCols.
+  agentExtraColsMap: Record<string, string>
+
+  // Custom Agent Status table columns, defined once for the whole account —
+  // see AgentExtraColumn. Where each one's value comes from (which raw
+  // column, per table) is mapped separately: agentExtraColsMap above for the
+  // legacy single table, AgentSource.extraCols for each additional source.
+  agentExtraCols: AgentExtraColumn[]
 
   // Multiple agent tables and/or one table split into groups. Covers two
   // cases: (1) agent status is scraped into several physical tables (e.g.
@@ -194,4 +203,24 @@ export interface AgentSource {
   durationCol:      string
   durationSecsCol:  string
   groupByCol:       string   // '' = use `label` for every row; else group rows by this column's own value (e.g. "team_name")
+  // Custom Agent Table columns (see AgentExtraColumn) — maps each column's
+  // key to the raw column name in THIS source's table. Different sources can
+  // point the same custom column at a differently-named column (or leave it
+  // unmapped, which renders blank for that source's rows).
+  extraCols:        Record<string, string>
+}
+
+// ── Custom Agent Status table columns ─────────────────────────────────────────
+// User-defined columns added to the Agent Status table beyond the fixed
+// Agent/Status/Duration ones (see components/Dashboard.tsx's agent table).
+// Defined ONCE per account (shown as an extra <th> for every agent row,
+// regardless of which AgentSource/legacy table produced it) — same
+// add/rename/remove pattern as ExtraTile, but with no thresholds since this
+// is a plain display column, not a KPI. Where each column's VALUE actually
+// comes from is mapped separately per source: DataSourceConfig.
+// agentExtraColsMap (legacy single-table) and AgentSource.extraCols (each
+// additional source), both keyed by this key.
+export interface AgentExtraColumn {
+  key:   string   // stable id, e.g. "agentcol_1699..."
+  label: string   // shown as the table's column header
 }
