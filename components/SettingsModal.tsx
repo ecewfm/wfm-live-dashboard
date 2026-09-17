@@ -453,11 +453,15 @@ function extraAgentColColor(i: number) { return EXTRA_COLORS[i % EXTRA_COLORS.le
 // ── Module-level sub-components — MUST be outside DataSourcesTab ─────────────
 // If defined inside, React remounts them on every render → scroll resets.
 
-const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle, onClear }: {
+const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle, onClear, color: colorOverride, editableLabel, onLabelChange, onRemove }: {
   slotKey: string; label: string; hint: string
   isActive: boolean; value: string; onToggle: (k: string) => void; onClear?: (k: string) => void
+  color?: string           // override SLOT_COLORS lookup — needed for custom columns (no fixed slot color)
+  editableLabel?: boolean  // custom columns only — renders `label` as a rename-in-place input
+  onLabelChange?: (label: string) => void
+  onRemove?: () => void    // custom columns only — deletes the whole column, distinct from onClear's "unmap"
 }) => {
-  const color = SLOT_COLORS[slotKey] || '#888'
+  const color = colorOverride || SLOT_COLORS[slotKey] || '#888'
   // Empty slot → click arms it for picking (existing behavior). Already-armed
   // slot → click cancels. Already-mapped, not-armed slot → click clears it —
   // otherwise there was no way back to "unmapped" short of picking a
@@ -476,9 +480,20 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
       title={!isActive && value && onClear ? `${hint} — click to clear` : hint}>
       <div style={{ background: color, padding: '5px 10px', color: '#fff',
         fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span>{label}</span>
-        {value && <i className={`bx ${onClear ? 'bx-x' : 'bx-check'}`} style={{ fontSize: 12 }} />}
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4 }}>
+        {editableLabel ? (
+          <input value={label} onClick={e => e.stopPropagation()}
+            onChange={e => onLabelChange?.(e.target.value)}
+            placeholder="Column name"
+            style={{ background: 'transparent', border: 'none', outline: 'none', color: '#fff',
+              fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px',
+              minWidth: 0, flex: 1, padding: 0 }} />
+        ) : <span>{label}</span>}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          {value && <i className={`bx ${onClear ? 'bx-x' : 'bx-check'}`} style={{ fontSize: 12 }} />}
+          {onRemove && <i className="bx bx-trash" title="Remove this column"
+            onClick={e => { e.stopPropagation(); onRemove() }} style={{ fontSize: 12, cursor: 'pointer' }} />}
+        </div>
       </div>
       <div style={{ padding: '6px 10px', fontSize: 12, fontWeight: 600,
         color: value ? color : 'var(--text-muted,#687d75)',
@@ -488,7 +503,19 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
       </div>
     </div>
   )
-}, (p, n) => p.isActive === n.isActive && p.value === n.value && p.onToggle === n.onToggle && p.onClear === n.onClear)
+})
+
+// "+" tile appended to a slot grid — adds a new custom Agent Table column.
+const AddSlotCard = React.memo(({ onClick }: { onClick: () => void }) => (
+  <div onClick={onClick} title="Add a custom column"
+    style={{ border: '2px dashed var(--border,#e1e6e4)', borderRadius: 8, cursor: 'pointer',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 54, minWidth: 60,
+      color: 'var(--text-muted)', transition: 'border-color 0.15s, color 0.15s' }}
+    onMouseEnter={e => { e.currentTarget.style.borderColor = '#d97a35'; e.currentTarget.style.color = '#d97a35' }}
+    onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border,#e1e6e4)'; e.currentTarget.style.color = 'var(--text-muted)' }}>
+    <i className="bx bx-plus" style={{ fontSize: 20 }} />
+  </div>
+))
 
 const DsPreviewTable = React.memo(({ rows, mappedCols, hasActiveSlot, onMap }: {
   rows: Record<string, any>[]; mappedCols: Record<string, string>
@@ -576,9 +603,12 @@ const ColSelect = React.memo(({ cols, value, onChange, emptyLabel }: {
 // column instead of the static `label` (covers "one table, already split by
 // team/queue column" — e.g. ZenBusiness's team_name — vs "one source per
 // physical table" — e.g. Hippo's Licensed Agents + Level 1).
-function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onChange, onRemove }: {
+function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExtraCol, onRenameExtraCol, onRemoveExtraCol, onChange, onRemove }: {
   source: AgentSource; tables: string[]; supaUrl: string; supaKey: string
   extraCols: AgentExtraColumn[]
+  onAddExtraCol: () => void
+  onRenameExtraCol: (key: string, label: string) => void
+  onRemoveExtraCol: (key: string) => void
   onChange: (patch: Partial<AgentSource>) => void; onRemove: () => void
 }) {
   const [preview, setPreview] = useState<Record<string, any>[]>([])
@@ -639,10 +669,12 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onChange
         {extraCols.map((c, i) => {
           const slotKey = EXTRA_AGENT_COL_PREFIX + c.key
           return <DsSlotCard key={slotKey} slotKey={slotKey} label={c.label} hint="Custom column — mapped from this source's table"
+            color={extraAgentColColor(i)} editableLabel onLabelChange={l => onRenameExtraCol(c.key, l)} onRemove={() => onRemoveExtraCol(c.key)}
             isActive={activeSlot === slotKey} value={source.extraCols?.[c.key] || ''}
             onToggle={k => setActiveSlot(cur => cur === k ? null : k)}
             onClear={() => { const ec = { ...source.extraCols }; delete ec[c.key]; onChange({ extraCols: ec }) }} />
         })}
+        <AddSlotCard onClick={onAddExtraCol} />
       </div>
       {activeSlot && (
         <div className="ds-active-bar">
@@ -1079,29 +1111,6 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         )}
       </div>
 
-      {/* Custom Agent Table columns — defined ONCE, mapped per source below
-          (legacy table's slot grid, and each AgentSource card). */}
-      <div className="ds-section">
-        <div className="ds-section-title">CUSTOM AGENT TABLE COLUMNS</div>
-        <p className="ds-hint">
-          Add columns beyond the default Agent / Status / Duration on the Dashboard's Agent Status
-          table. Name it here, then map it below (and in each additional source, if it has its own
-          differently-named column for the same data) — a source that doesn't map a column just
-          shows it blank for its rows.
-        </p>
-        <div className="ds-extra-wrap">
-          {localDs.agentExtraCols.map((c, i) => (
-            <div key={c.key} className="ds-extra-row">
-              <span className="ds-label-dot" style={{ background: extraAgentColColor(i) }} />
-              <input className="acc-add-input ds-extra-name" value={c.label}
-                onChange={e => renameAgentExtraCol(c.key, e.target.value)} placeholder="Column name" />
-              <button className="ds-x" onClick={() => removeAgentExtraCol(c.key)}><i className="bx bx-trash" /></button>
-            </div>
-          ))}
-          <button className="ds-add-btn" onClick={addAgentExtraCol}><i className="bx bx-plus" /> Add Column</button>
-        </div>
-      </div>
-
       {/* Agent Section (column-based) */}
       <div className="ds-section">
         <div className="ds-section-title">AGENT DATA SOURCE</div>
@@ -1115,7 +1124,10 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             <ColSelect cols={agtCols} value={localDs.agentAccountCol} onChange={v => setField('agentAccountCol', v)} />
           </div>
         </div>
-        <p className="ds-hint"><strong>Click a slot</strong>, then click a column header in the preview to map it.</p>
+        <p className="ds-hint">
+          <strong>Click a slot</strong>, then click a column header in the preview to map it. Click{' '}
+          <i className="bx bx-plus" /> to add a custom column beyond Agent/Status/Duration.
+        </p>
         <div className="ds-slot-grid">
           {AGENT_SLOTS.map(s => <DsSlotCard key={s.key} slotKey={s.key} label={s.label} hint={s.hint}
             isActive={activeAgentSlot === s.key} value={(localDs as any)[s.key] || ''}
@@ -1124,10 +1136,12 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
           {localDs.agentExtraCols.map((c, i) => {
             const slotKey = EXTRA_AGENT_COL_PREFIX + c.key
             return <DsSlotCard key={slotKey} slotKey={slotKey} label={c.label} hint="Custom column — mapped from the legacy table"
+              color={extraAgentColColor(i)} editableLabel onLabelChange={l => renameAgentExtraCol(c.key, l)} onRemove={() => removeAgentExtraCol(c.key)}
               isActive={activeAgentSlot === slotKey} value={localDs.agentExtraColsMap[c.key] || ''}
               onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
               onClear={() => setLocalDs(prev => { const m = { ...prev.agentExtraColsMap }; delete m[c.key]; return { ...prev, agentExtraColsMap: m } })} />
           })}
+          <AddSlotCard onClick={addAgentExtraCol} />
         </div>
         {activeAgentSlot && (
           <div className="ds-active-bar">
@@ -1168,6 +1182,7 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         {localDs.agentSources.map(source => (
           <AgentSourceCard key={source.id} source={source} tables={tables} supaUrl={supaUrl} supaKey={supaKey}
             extraCols={localDs.agentExtraCols}
+            onAddExtraCol={addAgentExtraCol} onRenameExtraCol={renameAgentExtraCol} onRemoveExtraCol={removeAgentExtraCol}
             onChange={patch => updateAgentSource(source.id, patch)} onRemove={() => removeAgentSource(source.id)} />
         ))}
         <button className="ds-add-btn" onClick={addAgentSource}><i className="bx bx-plus" /> Add Agent Source</button>
