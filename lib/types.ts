@@ -103,7 +103,33 @@ export interface KpiGroup {
   id:       string
   name:     string
   groupVal?: string                    // this group's value in kpiGroupCol (e.g. skill = "Team 1")
-  cells:    Record<string, CellBinding> // key: 'sla'|'aht'|'abn'|'wait'|<extra.key>
+  cells:    Record<string, CellBinding> // key: 'sla'|'aht'|'abn'|'wait'|<extra.key> — LEGACY groups only, see `tiles`
+  // NEW, optional: when set (non-empty), this group is fully self-contained —
+  // its own tile labels, cell bindings, AND breach thresholds, completely
+  // independent of every other group. Lets two groups on the same account
+  // (e.g. "Messaging SLA" vs "Email SLA") show entirely different metric
+  // names with entirely different threshold numbers, instead of every group
+  // being forced to share ds.kpiLabels/ds.extraTiles/the account-wide KPI
+  // Thresholds tab values. Absent/empty = LEGACY behavior: this group renders
+  // via the shared `cells` above + ds.kpiLabels/ds.extraTiles + the account's
+  // one global Thresholds object — unchanged from before this field existed,
+  // so no already-configured account needs to be touched or migrated.
+  tiles?:   GroupTile[]
+}
+
+// One independently-configured KPI tile within a single group — see
+// KpiGroup.tiles above. Combines what used to be spread across ds.kpiLabels/
+// ds.extraTiles (label) + group.cells (binding) + the account-wide Thresholds
+// object (warn/crit/targ/direction/excludeZero) into one self-contained record.
+export interface GroupTile {
+  key:          string   // stable id, e.g. 'tile_1699...' (or 'sla'/'wait'/etc./an extra.key when seeded from a legacy group's existing bindings)
+  label:        string
+  cell:         CellBinding | null
+  warn:         number
+  crit:         number
+  targ:         number
+  direction:    'asc' | 'desc'   // 'asc' = high values are bad, 'desc' = low values are bad (same convention as Thresholds)
+  excludeZero?: boolean
 }
 
 export interface DataSourceConfig {

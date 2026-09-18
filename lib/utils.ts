@@ -1,4 +1,4 @@
-import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, AgentSource, DashboardLayout, HeaderColors } from './types'
+import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, GroupTile, AgentSource, DashboardLayout, HeaderColors } from './types'
 
 // ── Status thresholds type ────────────────────────────────────────────────────
 // excluded: statuses like "Logged Out"/"Offline" that shouldn't be breach-
@@ -40,6 +40,13 @@ export function genId(): string {
 /** A fresh group with no cell bindings. */
 export function newGroup(name = 'Global'): KpiGroup {
   return { id: genId(), name, cells: {} }
+}
+
+/** A fresh independent tile for KpiGroup.tiles — see GroupTile. Defaults mirror
+ *  ExtraTile's own defaults (addExtra in SettingsModal.tsx) so a newly-added
+ *  independent tile behaves the same as adding an Extra KPI Tile used to. */
+export function newGroupTile(label = 'New Metric'): GroupTile {
+  return { key: 'tile_' + genId(), label, cell: null, warn: 10, crit: 20, targ: 5, direction: 'asc' }
 }
 
 /** A fresh agent source — one table + its column mapping, optionally grouped
@@ -179,7 +186,13 @@ export function migrateDataSource(raw: any): DataSourceConfig {
       ...raw,
       kpiLabels:    { ...DEFAULT_KPI_LABELS, ...(raw.kpiLabels || {}) },
       extraTiles:   Array.isArray(raw.extraTiles) ? raw.extraTiles : [],
-      groups:       raw.groups.length ? raw.groups : [newGroup()],
+      // Each group's `tiles` (see GroupTile) is optional/new — normalize a
+      // malformed or missing value to undefined rather than leaving whatever
+      // raw JSON had, so every consumer's `group.tiles?.length` check is safe.
+      groups:       (raw.groups.length ? raw.groups : [newGroup()]).map((g: any) => ({
+        ...g, cells: (g.cells && typeof g.cells === 'object') ? g.cells : {},
+        tiles: Array.isArray(g.tiles) && g.tiles.length ? g.tiles : undefined,
+      })),
       agentExtraColsMap: (raw.agentExtraColsMap && typeof raw.agentExtraColsMap === 'object') ? raw.agentExtraColsMap : {},
       agentExtraCols:    Array.isArray(raw.agentExtraCols) ? raw.agentExtraCols : [],
       // Older saved sources predate AgentSource.extraCols — default it per
@@ -438,7 +451,10 @@ export function formatSeconds(totalSec: number): string {
 
 export function extractPercent(str: string | null | undefined): number {
   if (!str || str === 'N/A' || str === '-') return NaN
-  const cleaned = String(str).replace(/\s+/g, '')
+  // Strip thousands-separator commas too — needed for plain-count metrics
+  // (e.g. a "Breached" ticket count like "1,256") which otherwise parsed as
+  // just "1" (parseFloat stops at the first non-numeric character).
+  const cleaned = String(str).replace(/\s+/g, '').replace(/,/g, '')
   const m = cleaned.match(/([\d.]+)%/)
   if (m) return parseFloat(m[1])
   const n = parseFloat(cleaned)

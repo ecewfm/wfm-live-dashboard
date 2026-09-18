@@ -61,6 +61,21 @@ export function buildBreaches(
   ;(ds.groups ?? []).forEach(group => {
     const g       = group.name || 'KPI'
     const rc      = (b: any) => resolveCell(kpiRows, b, ds.kpiGroupCol, group.groupVal)
+
+    // Independent-tiles group (see GroupTile in lib/types.ts) — every tile
+    // carries its OWN label/binding/thresholds, entirely separate from every
+    // other group, instead of sharing ds.kpiLabels/ds.extraTiles/kpiTh.
+    if (group.tiles && group.tiles.length) {
+      group.tiles.forEach(tile => {
+        if (!tile.cell) return
+        const raw = rc(tile.cell)
+        const num = extractPercent(raw)
+        checkKpi(num, tile, g, tile.label, raw.replace(/\s+/g, ''), String(tile.targ))
+      })
+      return
+    }
+
+    // Legacy shared-label/shared-threshold path — unchanged.
     const slaRaw  = rc(group.cells.sla)
     const waitRaw = rc(group.cells.wait)
     const ahtRaw  = rc(group.cells.aht)

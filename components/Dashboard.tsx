@@ -1054,6 +1054,23 @@ function KpiGrid({ group, rows, kpiTh, ds }: {
   group: KpiGroup; rows: Record<string, any>[]; kpiTh: Thresholds; ds: DataSourceConfig
 }) {
   const rc = (b: any) => resolveCell(rows, b, ds.kpiGroupCol, group.groupVal)
+
+  // Independent-tiles group (see GroupTile) — its own labels/bindings/
+  // thresholds, entirely separate from every other group on this account.
+  if (group.tiles && group.tiles.length) {
+    return (
+      <div className="kpi-grid">
+        {group.tiles.map(t => {
+          const raw = rc(t.cell || undefined)
+          return (
+            <KpiTile key={t.key} label={t.label} value={raw || '--'} numValue={extractPercent(raw)}
+              target={`Target ${t.direction === 'desc' ? '≥' : '<'}${t.targ}`} th={t} />
+          )
+        })}
+      </div>
+    )
+  }
+
   const slaVal = rc(group.cells.sla).replace(/\s+/g,'')
   const waitVal = rc(group.cells.wait)
   const ahtVal  = rc(group.cells.aht)
@@ -1289,6 +1306,23 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
         {/* KPI tiles — one set per manually-defined group */}
         {groups.map(group => {
           const rc      = (b: any) => resolveCell(kpiRows, b, ds.kpiGroupCol, group.groupVal)
+
+          // Independent-tiles group (see GroupTile) — own labels/bindings/
+          // thresholds, separate from every other group on this account.
+          if (group.tiles && group.tiles.length) {
+            return (
+              <div key={group.id} style={{ marginBottom: 10 }}>
+                <div className="ov-section-label">{group.name || 'Global'}</div>
+                <div className="ov-kpi-tiles">
+                  {group.tiles.map(t => {
+                    const raw = rc(t.cell || undefined)
+                    return <OvKpiTile key={t.key} label={t.label} value={raw} colorClass={getKpiColorClass(extractPercent(raw), t)} />
+                  })}
+                </div>
+              </div>
+            )
+          }
+
           const slaVal  = rc(group.cells.sla).replace(/\s+/g,'')
           const waitVal = rc(group.cells.wait)
           const ahtVal  = rc(group.cells.aht)

@@ -2,12 +2,12 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
   PRESET_AIRCALL, PRESET_TALKDESK, PRESET_FIVE9, PRESET_UNITERS,
-  DEFAULT_KPI_LABELS, genId, newGroup, newAgentSource,
+  DEFAULT_KPI_LABELS, genId, newGroup, newGroupTile, newAgentSource,
   fetchPublicTables
 } from '@/lib/utils'
 import { addAccount, removeAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
@@ -794,6 +794,7 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const clearCell = useCallback((groupId: string, kpiKey: string) => {
     setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => {
       if (g.id !== groupId) return g
+      if (g.tiles && g.tiles.length) return { ...g, tiles: g.tiles.map(t => t.key === kpiKey ? { ...t, cell: null } : t) }
       const cells = { ...g.cells }; delete cells[kpiKey]; return { ...g, cells }
     }) }))
   }, [])
@@ -823,6 +824,10 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         if (rk) { binding.matchCol = rk; binding.matchVal = String(row[rk] ?? '') }
         return { ...prev, groups: prev.groups.map(g => {
           if (g.id !== cur.groupId) return g
+          // Independent-tiles group — bind straight onto that tile's own `cell`.
+          if (g.tiles && g.tiles.length) {
+            return { ...g, tiles: g.tiles.map(t => t.key === cur.kpiKey ? { ...t, cell: binding } : t) }
+          }
           // groupVal is set by hand via the group's dropdown (see setGroupVal) —
           // it must NOT be auto-overwritten here. Every KPI key in this group
           // shares g.groupVal for highlight matching, so silently changing it
@@ -834,6 +839,45 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
       })
       return null
     })
+  }, [])
+
+  // ── Per-group independent tiles (see GroupTile in lib/types.ts) ────────────
+  // Toggling a group INTO independent-tile mode snapshots its current shared
+  // labels + bindings (so already-working mappings aren't lost) with generic
+  // starter thresholds — real numbers get set afterward on the KPI Thresholds
+  // tab, now rendered per-group for exactly this case. Toggling back out just
+  // drops `tiles`, reverting to the shared kpiLabels/extraTiles/cells path.
+  const setGroupCustomMode = useCallback((groupId: string, on: boolean) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => {
+      if (g.id !== groupId) return g
+      if (!on) return { ...g, tiles: undefined }
+      const dirDefault: Record<string, 'asc' | 'desc'> = { sla: 'desc', wait: 'asc', aht: 'asc', abn: 'asc' }
+      const boundKeys = ['sla', 'wait', 'aht', 'abn', ...prev.extraTiles.map(t => t.key)].filter(k => g.cells[k])
+      const tiles: GroupTile[] = boundKeys.length
+        ? boundKeys.map(k => {
+            const extra = prev.extraTiles.find(t => t.key === k)
+            const label = k === 'sla' || k === 'wait' || k === 'aht' || k === 'abn' ? prev.kpiLabels[k] : (extra?.label || k)
+            return {
+              key: k, label, cell: g.cells[k] || null,
+              warn: extra?.warn ?? 10, crit: extra?.crit ?? 20, targ: extra?.targ ?? 5,
+              direction: extra ? (extra.higherIsBetter ? 'desc' : 'asc') : (dirDefault[k] ?? 'asc'),
+            }
+          })
+        : [newGroupTile()]
+      return { ...g, tiles }
+    }) }))
+  }, [])
+  const addGroupTile = useCallback((groupId: string) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => g.id === groupId
+      ? { ...g, tiles: [...(g.tiles || []), newGroupTile(`Metric ${(g.tiles?.length || 0) + 1}`)] } : g) }))
+  }, [])
+  const removeGroupTile = useCallback((groupId: string, key: string) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => g.id === groupId
+      ? { ...g, tiles: (g.tiles || []).filter(t => t.key !== key) } : g) }))
+  }, [])
+  const updateGroupTileLabel = useCallback((groupId: string, key: string, label: string) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => g.id === groupId
+      ? { ...g, tiles: (g.tiles || []).map(t => t.key === key ? { ...t, label } : t) } : g) }))
   }, [])
   const mapAgentCol = useCallback((colName: string) => {
     setActiveAgentSlot(cur => {
@@ -981,6 +1025,10 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         .ds-cellcard-v { padding: 5px 8px; font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .ds-x { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 15px; padding: 4px 6px; border-radius: 6px; }
         .ds-x:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
+        .ds-mode-btn { display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; border-radius: 6px;
+          border: 1px solid rgba(75,139,156,0.3); background: rgba(75,139,156,0.1); color: #4b8b9c;
+          font-size: 11px; font-weight: 700; cursor: pointer; font-family: inherit; white-space: nowrap; }
+        .ds-mode-btn.on { border-color: rgba(217,122,53,0.35); background: rgba(217,122,53,0.12); color: #d97a35; }
         .ds-add-btn { display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; margin-top: 2px;
           border: 1px dashed var(--border,#e1e6e4); background: transparent; color: var(--text-muted); border-radius: 6px;
           font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
@@ -1044,7 +1092,12 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         </p>
 
         {/* Groups */}
-        {localDs.groups.map(group => (
+        {localDs.groups.map(group => {
+          const isCustom = !!(group.tiles && group.tiles.length)
+          const slots = isCustom
+            ? group.tiles!.map((t, i) => ({ key: t.key, label: t.label, binding: t.cell, color: EXTRA_COLORS[i % EXTRA_COLORS.length] }))
+            : allKpiKeys.map(k => ({ key: k, label: tileLabel(k), binding: group.cells[k], color: tileColor(k) }))
+          return (
           <div key={group.id} className="ds-group">
             <div className="ds-group-head">
               <input className="ds-group-name" value={group.name} onChange={e => renameGroup(group.id, e.target.value)} placeholder="Group name" />
@@ -1055,12 +1108,18 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                   {group.groupVal && !groupVals.includes(group.groupVal) && <option value={group.groupVal}>{group.groupVal}</option>}
                 </select>
               )}
+              <button className={`ds-mode-btn${isCustom ? ' on' : ''}`}
+                title={isCustom
+                  ? 'This group has its own independent tiles (labels, bindings, and — on the KPI Thresholds tab — thresholds), separate from every other group. Click to revert to the account-wide shared tiles.'
+                  : 'Give this group its own independent tiles — different labels, bindings, and thresholds from every other group (e.g. "Messaging SLA" vs "Email SLA" with completely different columns).'}
+                onClick={() => setGroupCustomMode(group.id, !isCustom)}>
+                <i className={`bx ${isCustom ? 'bx-git-branch' : 'bx-link'}`} /> {isCustom ? 'Independent tiles' : 'Shared tiles'}
+              </button>
               <button className="ds-x" title="Remove group" onClick={() => removeGroup(group.id)}><i className="bx bx-trash" /></button>
             </div>
             <div className="ds-slot-grid">
-              {allKpiKeys.map(k => {
-                const b = group.cells[k]
-                const color = tileColor(k)
+              {slots.map(slot => {
+                const { key: k, label, binding: b, color } = slot
                 const isActive = !!activeCell && activeCell.groupId === group.id && activeCell.kpiKey === k
                 const disp = b ? (b.matchVal ? `${b.matchVal} → ${b.valueCol}` : b.valueCol) : (isActive ? '← click a cell' : 'not set')
                 return (
@@ -1070,14 +1129,15 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                     <div className="ds-cellcard-h" style={{ background: color }}>
                       {/* Editable right on the card you already click to arm cell-picking —
                           stopPropagation so typing here doesn't also arm/disarm the card.
-                          Renames this KPI's tile label everywhere it's shown (Overview,
-                          Dashboard, breach text) — shared across every group, since there's
-                          one display name per KPI key, not one per group. */}
-                      <input value={tileLabel(k)} title="Click to rename this tile"
+                          Legacy (shared) tiles rename everywhere this KPI key is shown, since
+                          there's one shared display name per key. Independent tiles rename
+                          ONLY within this group — see GroupTile. */}
+                      <input value={label} title="Click to rename this tile"
                         onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}
                         onChange={e => {
                           const val = e.target.value
-                          if (k === 'sla' || k === 'wait' || k === 'aht' || k === 'abn') setLabel(k, val)
+                          if (isCustom) updateGroupTileLabel(group.id, k, val)
+                          else if (k === 'sla' || k === 'wait' || k === 'aht' || k === 'abn') setLabel(k, val)
                           else updateExtra(k, { label: val })
                         }}
                         style={{
@@ -1085,15 +1145,18 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                           fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.4px',
                           width: '100%', minWidth: 0, padding: 0, margin: 0, fontFamily: 'inherit', cursor: 'text',
                         }} />
-                      {b && <i className="bx bx-x" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); clearCell(group.id, k) }} />}
+                      {b && <i className="bx bx-x" title="Clear binding" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); clearCell(group.id, k) }} />}
+                      {isCustom && <i className="bx bx-trash" title="Remove this tile" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); removeGroupTile(group.id, k) }} />}
                     </div>
                     <div className="ds-cellcard-v" style={{ color: b ? color : 'var(--text-muted)', background: b ? `${color}12` : 'transparent' }}>{disp}</div>
                   </div>
                 )
               })}
+              {isCustom && <AddSlotCard onClick={() => addGroupTile(group.id)} />}
             </div>
           </div>
-        ))}
+          )
+        })}
         <button className="ds-add-btn" onClick={addGroup}><i className="bx bx-plus" /> Add Group</button>
 
         {/* Extra tiles */}
@@ -1409,6 +1472,15 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       [key]: { ...prev[key], excludeZero: !prev[key].excludeZero }
     }))
   }
+
+  // ── Per-group independent tile thresholds (see GroupTile in lib/types.ts) —
+  // a group that opted into "Independent tiles" on the Data Sources tab owns
+  // its own warn/crit/targ/direction/excludeZero PER TILE, edited here on `ds`
+  // directly rather than on the single shared `kpi` (Thresholds) object above.
+  const updateGroupTile = (groupId: string, tileKey: string, patch: Partial<GroupTile>) => {
+    setDs(prev => ({ ...prev, groups: prev.groups.map(g => g.id === groupId
+      ? { ...g, tiles: (g.tiles || []).map(t => t.key === tileKey ? { ...t, ...patch } : t) } : g) }))
+  }
   // Clearing a field (empty string) reverts that status to "N/A" (999 is the
   // existing "disabled, never breach" sentinel already used elsewhere in this
   // codebase, e.g. DEFAULT_STATUS_THRESHOLDS.Offline/Available) — so a newly
@@ -1508,57 +1580,114 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   Check <strong>Exclude 0</strong> for metrics where a reported value of 0 means there was
                   no volume to work (not an actual breach).
                 </p>
-                <div className="sm-section-title">KPI BREACH THRESHOLDS</div>
-                <table className="sm-table">
-                  <thead>
-                    <tr>
-                      <th style={{ width: '24%' }}>Metric</th>
-                      <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {KPI_ROWS.map(row => {
-                      const th = kpi[row.key]
-                      const isAsc = th.direction === 'asc'
-                      // Prefer this account's custom tile name (set on the Data
-                      // Sources tab) over the generic default, so a renamed KPI
-                      // (e.g. "AWAITING" → "Total Calls") shows the same name
-                      // here instead of reverting to the hardcoded default.
-                      const label = ds.kpiLabels?.[row.key] || row.label
-                      return (
-                        <tr key={row.key}>
-                          <td>
-                            <div className="sm-metric">{label}</div>
-                            <div className="sm-metric-sub">{row.sublabel}</div>
-                          </td>
-                          {(['warn','crit','targ'] as const).map(f => (
-                            <td key={f}>
-                              <div className="sm-input-cell">
-                                <input type="number" className="sm-input" value={(th as any)[f]} min={0}
-                                  onChange={e => updateKpi(row.key, f, e.target.value)} />
-                                {row.unit && <span className="sm-unit">{row.unit}</span>}
-                              </div>
-                            </td>
-                          ))}
-                          <td>
-                            <button type="button" className={`sm-dir-btn${isAsc ? ' asc' : ' desc'}`}
-                              onClick={() => toggleDirection(row.key)}>
-                              <i className={`bx ${isAsc ? 'bx-trending-up' : 'bx-trending-down'}`} />
-                              <span>{isAsc ? 'High = Bad' : 'Low = Bad'}</span>
-                            </button>
-                          </td>
-                          <td style={{ textAlign: 'center' }}>
-                            <input type="checkbox" checked={!!th.excludeZero} onChange={() => toggleExcludeZero(row.key)} />
-                          </td>
+
+                {/* Shared thresholds — apply to every group still using the
+                    account-wide kpiLabels/extraTiles path (Data Sources tab).
+                    Hidden once every group has switched to independent tiles,
+                    since none of them read these values anymore. */}
+                {ds.groups.some(g => !(g.tiles && g.tiles.length)) && (
+                  <>
+                    <div className="sm-section-title">
+                      KPI BREACH THRESHOLDS{ds.groups.some(g => g.tiles && g.tiles.length) ? ' — SHARED' : ''}
+                    </div>
+                    <table className="sm-table">
+                      <thead>
+                        <tr>
+                          <th style={{ width: '24%' }}>Metric</th>
+                          <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
                         </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-                <div className="sm-note">
-                  <i className="bx bx-info-circle" />
-                  <span>For SLA: <strong>Low = Bad</strong>. For Queue, ASA, ABN%: <strong>High = Bad</strong>.</span>
-                </div>
+                      </thead>
+                      <tbody>
+                        {KPI_ROWS.map(row => {
+                          const th = kpi[row.key]
+                          const isAsc = th.direction === 'asc'
+                          // Prefer this account's custom tile name (set on the Data
+                          // Sources tab) over the generic default, so a renamed KPI
+                          // (e.g. "AWAITING" → "Total Calls") shows the same name
+                          // here instead of reverting to the hardcoded default.
+                          const label = ds.kpiLabels?.[row.key] || row.label
+                          return (
+                            <tr key={row.key}>
+                              <td>
+                                <div className="sm-metric">{label}</div>
+                                <div className="sm-metric-sub">{row.sublabel}</div>
+                              </td>
+                              {(['warn','crit','targ'] as const).map(f => (
+                                <td key={f}>
+                                  <div className="sm-input-cell">
+                                    <input type="number" className="sm-input" value={(th as any)[f]} min={0}
+                                      onChange={e => updateKpi(row.key, f, e.target.value)} />
+                                    {row.unit && <span className="sm-unit">{row.unit}</span>}
+                                  </div>
+                                </td>
+                              ))}
+                              <td>
+                                <button type="button" className={`sm-dir-btn${isAsc ? ' asc' : ' desc'}`}
+                                  onClick={() => toggleDirection(row.key)}>
+                                  <i className={`bx ${isAsc ? 'bx-trending-up' : 'bx-trending-down'}`} />
+                                  <span>{isAsc ? 'High = Bad' : 'Low = Bad'}</span>
+                                </button>
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                <input type="checkbox" checked={!!th.excludeZero} onChange={() => toggleExcludeZero(row.key)} />
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                    <div className="sm-note">
+                      <i className="bx bx-info-circle" />
+                      <span>For SLA: <strong>Low = Bad</strong>. For Queue, ASA, ABN%: <strong>High = Bad</strong>.</span>
+                    </div>
+                  </>
+                )}
+
+                {/* Independent-tiles groups — each group's own tiles get their
+                    own thresholds, entirely separate from the shared table
+                    above and from every other group. See GroupTile. */}
+                {ds.groups.filter(g => g.tiles && g.tiles.length).map(group => (
+                  <div key={group.id} style={{ marginTop: 22 }}>
+                    <div className="sm-section-title">KPI BREACH THRESHOLDS — {group.name || 'Untitled group'}</div>
+                    <table className="sm-table">
+                      <thead>
+                        <tr>
+                          <th style={{ width: '24%' }}>Metric</th>
+                          <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {group.tiles!.map(tile => {
+                          const isAsc = tile.direction === 'asc'
+                          return (
+                            <tr key={tile.key}>
+                              <td><div className="sm-metric">{tile.label}</div></td>
+                              {(['warn','crit','targ'] as const).map(f => (
+                                <td key={f}>
+                                  <div className="sm-input-cell">
+                                    <input type="number" className="sm-input" value={tile[f]} min={0}
+                                      onChange={e => updateGroupTile(group.id, tile.key, { [f]: parseFloat(e.target.value) || 0 })} />
+                                  </div>
+                                </td>
+                              ))}
+                              <td>
+                                <button type="button" className={`sm-dir-btn${isAsc ? ' asc' : ' desc'}`}
+                                  onClick={() => updateGroupTile(group.id, tile.key, { direction: isAsc ? 'desc' : 'asc' })}>
+                                  <i className={`bx ${isAsc ? 'bx-trending-up' : 'bx-trending-down'}`} />
+                                  <span>{isAsc ? 'High = Bad' : 'Low = Bad'}</span>
+                                </button>
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                <input type="checkbox" checked={!!tile.excludeZero}
+                                  onChange={() => updateGroupTile(group.id, tile.key, { excludeZero: !tile.excludeZero })} />
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
               </>
             )}
 
