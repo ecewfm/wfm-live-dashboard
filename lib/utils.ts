@@ -55,7 +55,7 @@ export function newAgentSource(label = ''): AgentSource {
   return {
     id: genId(), label, table: '',
     accountCol: 'account_id', nameCol: '', statusCol: '', durationCol: '', durationSecsCol: '',
-    groupByCol: '', extraCols: {},
+    groupByCol: '', extraCols: {}, extraDurationCols: {},
   }
 }
 
@@ -194,11 +194,14 @@ export function migrateDataSource(raw: any): DataSourceConfig {
         tiles: Array.isArray(g.tiles) && g.tiles.length ? g.tiles : undefined,
       })),
       agentExtraColsMap: (raw.agentExtraColsMap && typeof raw.agentExtraColsMap === 'object') ? raw.agentExtraColsMap : {},
+      agentExtraDurationColsMap: (raw.agentExtraDurationColsMap && typeof raw.agentExtraDurationColsMap === 'object') ? raw.agentExtraDurationColsMap : {},
       agentExtraCols:    Array.isArray(raw.agentExtraCols) ? raw.agentExtraCols : [],
-      // Older saved sources predate AgentSource.extraCols — default it per
-      // entry so DsPreviewTable/mapCol always have an object to spread into.
+      // Older saved sources predate AgentSource.extraCols/extraDurationCols —
+      // default them per entry so DsPreviewTable/mapCol always have an
+      // object to spread into.
       agentSources: (Array.isArray(raw.agentSources) ? raw.agentSources : []).map((s: any) => ({
         ...s, extraCols: (s.extraCols && typeof s.extraCols === 'object') ? s.extraCols : {},
+        extraDurationCols: (s.extraDurationCols && typeof s.extraDurationCols === 'object') ? s.extraDurationCols : {},
       })),
     }
   }

@@ -155,9 +155,35 @@ export interface DataSourceConfig {
   agentStatusCol:   string
   agentDurationCol: string    // duration as string e.g. "5:23"
   agentDurationSecs:string    // duration in seconds ('' if N/A)
+  // Account-wide (not per-source) — the Agent Status table's Duration column
+  // is one visual column regardless of which source/table a given row came
+  // from, so its display label and running/static mode are single account-
+  // level settings rather than something each AgentSource sets independently.
+  // agentDurationLabel: custom header text, e.g. rename "Duration" to
+  // "Tickets Closed" when the mapped column isn't really a duration. '' = use
+  // the default "Duration" label.
+  agentDurationLabel?: string
+  // agentDurationStatic: true = the mapped column is NOT a real elapsed-time
+  // value (e.g. a ticket count) — shown exactly as scraped, no live 1s
+  // ticking, no parseDurationToSeconds/formatSeconds, and excluded from
+  // duration-based status-breach thresholds (see lib/breaches.ts). false/
+  // unset = default "running" behavior, unchanged from before this existed.
+  agentDurationStatic?: boolean
   // Legacy single-table mapping for agentExtraCols (see AgentExtraColumn) —
   // key -> raw column name in `agentTable`. Mirrors AgentSource.extraCols.
   agentExtraColsMap: Record<string, string>
+  // Optional companion mapping, ONLY meaningful for an extra column that has
+  // a breachText trigger set (e.g. Wyze's Adherence column, breachText "Out
+  // of adherence"): key -> a SEPARATE raw column holding a human-readable
+  // duration (e.g. Wyze's own "adherence_duration", "55s"). When mapped,
+  // lib/breaches.ts shows THIS value as the Breach table's "Value" for that
+  // breach instead of the raw matched text ("Out of adherence") — which is
+  // redundant with the Threshold column already showing that same trigger
+  // text, whereas a duration ("how long have they been out of adherence")
+  // is actually useful there. Unmapped = unchanged behavior (raw breach text
+  // shown as Value, exactly as before this existed). Mirrors
+  // AgentSource.extraDurationCols for additional sources.
+  agentExtraDurationColsMap?: Record<string, string>
 
   // Custom Agent Status table columns, defined once for the whole account —
   // see AgentExtraColumn. Where each one's value comes from (which raw
@@ -234,6 +260,11 @@ export interface AgentSource {
   // point the same custom column at a differently-named column (or leave it
   // unmapped, which renders blank for that source's rows).
   extraCols:        Record<string, string>
+  // Optional companion mapping — mirrors DataSourceConfig.agentExtraDurationColsMap,
+  // see its comment for the full reasoning. Per-source since each source can
+  // point the same extra column's duration companion at a differently-named
+  // column, same as extraCols above.
+  extraDurationCols?: Record<string, string>
 }
 
 // ── Custom Agent Status table columns ─────────────────────────────────────────

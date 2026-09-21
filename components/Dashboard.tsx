@@ -73,6 +73,12 @@ async function fetchAgentSource(src: AgentSource, accId: string): Promise<any[]>
     extraKeys.forEach(key => {
       const col = src.extraCols[key]
       if (col) out[`_extra_${key}`] = String(r[col] ?? '')
+      // Optional companion duration column (see AgentSource.extraDurationCols) —
+      // only meaningful for extra columns with a breachText trigger; read
+      // by lib/breaches.ts to show a real duration as the breach's Value
+      // instead of the raw matched text.
+      const durCol = src.extraDurationCols?.[key]
+      if (durCol) out[`_extraDuration_${key}`] = String(r[durCol] ?? '')
     })
     return out
   })
@@ -156,6 +162,7 @@ export default function Dashboard() {
           nameCol: src.agentNameCol, statusCol: src.agentStatusCol,
           durationCol: src.agentDurationCol, durationSecsCol: src.agentDurationSecs,
           extraCols: src.agentExtraColsMap || {},
+          extraDurationCols: src.agentExtraDurationColsMap || {},
         })
       }
       if (src.agentSources) agentSourcesToFetch.push(...src.agentSources)
@@ -193,7 +200,13 @@ export default function Dashboard() {
           const raw  = String(a._durationSecs || a._duration || '')
           const secs = parseDurationToSeconds(raw)
           next[key] = secs
-          if (isCoarseDuration(raw)) coarseKeysRef.current.add(key)
+          // Static mode (DataSourceConfig.agentDurationStatic — see Settings'
+          // Data Sources tab): the mapped column isn't really elapsed time
+          // (e.g. a ticket count), so never let the 1s clock below tick it up
+          // — same mechanism already used for day/hour-only coarse durations,
+          // just forced on unconditionally instead of only when the text
+          // itself looks coarse.
+          if (src.agentDurationStatic || isCoarseDuration(raw)) coarseKeysRef.current.add(key)
           else coarseKeysRef.current.delete(key)
         })
         return next
@@ -1004,7 +1017,7 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
                   onApply={setStatusFilter}
                   sortActive={agentSort?.col === 'status'} sortDir={agentSort?.dir ?? 'asc'}
                   onSort={() => toggleAgentSort('status')} />
-                <SortableTh label="Duration" active={agentSort?.col === 'duration'} dir={agentSort?.dir ?? 'asc'}
+                <SortableTh label={ds.agentDurationLabel || 'Duration'} active={agentSort?.col === 'duration'} dir={agentSort?.dir ?? 'asc'}
                   onClick={() => toggleAgentSort('duration')} />
                 {(ds.agentExtraCols ?? []).map(col => (
                   <th key={col.key}>{col.label}</th>
@@ -1023,11 +1036,17 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
                     const name = String(a._name ?? '')
                     const key  = `${accountId}:${name}`
                     const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+                    // Static mode (see Settings' Data Sources tab's Duration
+                    // slot toggle): the mapped column isn't real elapsed time
+                    // (e.g. a ticket count), so show it exactly as scraped
+                    // instead of running it through formatSeconds(), which
+                    // would otherwise misread e.g. "27" as "27 seconds".
+                    const durationDisplay = ds.agentDurationStatic ? (a._duration || '--') : formatSeconds(secs)
                     return (
                       <tr key={`${groupName}-${i}`}>
                         <td style={{ fontWeight: 600 }}>{name}</td>
                         <td><span className={getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
-                        <td style={{ fontVariantNumeric: 'tabular-nums' }}>{formatSeconds(secs)}</td>
+                        <td style={{ fontVariantNumeric: 'tabular-nums' }}>{durationDisplay}</td>
                         {extraCols.map(col => (
                           <td key={col.key}>{String(a[`_extra_${col.key}`] ?? '')}</td>
                         ))}

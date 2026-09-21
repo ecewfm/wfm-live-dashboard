@@ -111,9 +111,12 @@ export function buildBreaches(
     // Adherence/etc. value was left over from before they went offline.
     if (statusTh[status]?.excluded) return
 
-    // Duration-based: how long the agent has been in this status.
+    // Duration-based: how long the agent has been in this status. Skipped
+    // entirely in "static" mode (ds.agentDurationStatic — see Settings' Data
+    // Sources tab) since the mapped column isn't real elapsed time there
+    // (e.g. a ticket count) — there's no meaningful "how long" to threshold.
     const thSt = statusTh[status]
-    if (thSt && thSt.crit < 999) {
+    if (thSt && thSt.crit < 999 && !ds.agentDurationStatic) {
       const key  = `${accountId}:${name}`
       const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
       const mins = secs / 60
@@ -133,7 +136,13 @@ export function buildBreaches(
       if (!trigger) return
       const raw = String(a[`_extra_${col.key}`] ?? '')
       if (raw.toLowerCase().includes(trigger.toLowerCase())) {
-        rows.push({ entity: name, metric: col.label, value: raw, threshold: trigger, severity: col.breachSeverity || 'critical' })
+        // An optional companion duration column (see DataSourceConfig.
+        // agentExtraDurationColsMap/AgentSource.extraDurationCols) shows
+        // something more useful as the breach's Value — e.g. "how long has
+        // this agent been out of adherence" — instead of just repeating the
+        // trigger text, which the Threshold column already shows.
+        const durationVal = String(a[`_extraDuration_${col.key}`] ?? '').trim()
+        rows.push({ entity: name, metric: col.label, value: durationVal || raw, threshold: trigger, severity: col.breachSeverity || 'critical' })
       }
     })
   })

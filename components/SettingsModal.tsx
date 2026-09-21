@@ -495,26 +495,44 @@ const AGENT_SLOTS = [
 // activeAgentSlot state can tell the two kinds apart without a second parallel
 // UI. See mapAgentCol (legacy table) and AgentSourceCard's mapCol (per source).
 const EXTRA_AGENT_COL_PREFIX = 'agentExtraCol:'
+// Same idea, for the OPTIONAL companion "duration" column an extra column
+// can have when it's a breachText trigger (see DataSourceConfig.
+// agentExtraDurationColsMap's comment in lib/types.ts) — a second, separate
+// slot per extra column, only rendered when that column has a breachText set.
+const EXTRA_AGENT_DURATION_COL_PREFIX = 'agentExtraDurationCol:'
 function extraAgentColColor(i: number) { return EXTRA_COLORS[i % EXTRA_COLORS.length] }
 
 // ── Module-level sub-components — MUST be outside DataSourcesTab ─────────────
 // If defined inside, React remounts them on every render → scroll resets.
 
-const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle, onClear, color: colorOverride, editableLabel, onLabelChange, onRemove, breachText, onBreachTextChange, breachSeverity, onBreachSeverityToggle }: {
+const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle, onClear, color: colorOverride, editableLabel, onLabelChange, onRemove, breachText, onBreachTextChange, breachSeverity, onBreachSeverityToggle, durationMode, onToggleDurationMode }: {
   slotKey: string; label: string; hint: string
   isActive: boolean; value: string; onToggle: (k: string) => void; onClear?: (k: string) => void
   color?: string           // override SLOT_COLORS lookup — needed for custom columns (no fixed slot color)
-  editableLabel?: boolean  // custom columns only — renders `label` as a rename-in-place input
+  editableLabel?: boolean  // renders `label` as a rename-in-place input — custom columns, and now the Duration slot too
   onLabelChange?: (label: string) => void
   onRemove?: () => void    // custom columns only — deletes the whole column, distinct from onClear's "unmap"
   // Custom columns only — text-based breach trigger (see AgentExtraColumn).
   // Shown/edited on every card this column appears in (legacy table + every
   // AgentSource) since it's one shared property of the column definition,
-  // not a per-source mapping.
+  // not a per-source mapping. Guarded on onBreachTextChange specifically
+  // (not editableLabel, which the Duration slot below now also sets) so the
+  // two bottom-row extras below never both try to render on the same card.
   breachText?: string
   onBreachTextChange?: (v: string) => void
   breachSeverity?: 'warning' | 'critical'
   onBreachSeverityToggle?: () => void
+  // Duration slot only (legacy table's agentDurationCol, and each AgentSource's
+  // durationCol) — lets the mapped value be marked "static" (e.g. a plain
+  // scraped count like tickets_closed) instead of "running" (the default:
+  // parsed as elapsed time and ticked up live client-side, same as every
+  // other duration column always did before this existed). See
+  // lib/breaches.ts and components/Dashboard.tsx for where this is actually
+  // read — static mode skips both the live 1s ticking AND duration-based
+  // status-breach thresholds, and shows the raw scraped value as-is instead
+  // of running it through formatSeconds().
+  durationMode?: 'running' | 'static'
+  onToggleDurationMode?: () => void
 }) => {
   const color = colorOverride || SLOT_COLORS[slotKey] || '#888'
   // Empty slot → click arms it for picking (existing behavior). Already-armed
@@ -556,7 +574,7 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
         background: value ? `${color}12` : 'transparent' }}>
         {value || (isActive ? '← click a column' : 'Not mapped')}
       </div>
-      {editableLabel && (
+      {onBreachTextChange && (
         <div onClick={e => e.stopPropagation()}
           style={{ display: 'flex', gap: 4, alignItems: 'center', padding: '5px 8px 7px', borderTop: '1px solid var(--border,#e1e6e4)' }}>
           <input value={breachText ?? ''} onChange={e => onBreachTextChange?.(e.target.value)}
@@ -572,6 +590,22 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
               {breachSeverity === 'warning' ? 'WARN' : 'CRIT'}
             </button>
           )}
+        </div>
+      )}
+      {durationMode && (
+        <div onClick={e => e.stopPropagation()}
+          style={{ padding: '5px 8px 7px', borderTop: '1px solid var(--border,#e1e6e4)' }}>
+          <button onClick={() => onToggleDurationMode?.()}
+            title={durationMode === 'running'
+              ? 'Running: treated as elapsed time — parsed and ticked up live every second, and eligible for duration-based status-breach thresholds. Click to switch to Static.'
+              : 'Static: shown exactly as scraped (no live ticking, no elapsed-time parsing) — use this when the mapped column isn’t really a duration (e.g. a ticket count). Duration-based status-breach thresholds are skipped in this mode. Click to switch to Running.'}
+            style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+              fontSize: 10, fontWeight: 700, padding: '4px 6px', borderRadius: 5, border: 'none',
+              cursor: 'pointer', color: '#fff',
+              background: durationMode === 'running' ? '#4b8b9c' : '#888' }}>
+            <i className={`bx ${durationMode === 'running' ? 'bx-timer' : 'bx-pause-circle'}`} style={{ fontSize: 12 }} />
+            {durationMode === 'running' ? 'Running (live timer)' : 'Static (shown as-is)'}
+          </button>
         </div>
       )}
     </div>
@@ -709,14 +743,17 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExt
   // instead, which is the normal, valid place for them.
   const mapCol = useCallback((colName: string) => {
     if (!activeSlot) return
-    if (activeSlot.startsWith(EXTRA_AGENT_COL_PREFIX)) {
+    if (activeSlot.startsWith(EXTRA_AGENT_DURATION_COL_PREFIX)) {
+      const key = activeSlot.slice(EXTRA_AGENT_DURATION_COL_PREFIX.length)
+      onChange({ extraDurationCols: { ...(source.extraDurationCols || {}), [key]: colName } })
+    } else if (activeSlot.startsWith(EXTRA_AGENT_COL_PREFIX)) {
       const key = activeSlot.slice(EXTRA_AGENT_COL_PREFIX.length)
       onChange({ extraCols: { ...source.extraCols, [key]: colName } })
     } else {
       onChange({ [activeSlot]: colName } as Partial<AgentSource>)
     }
     setActiveSlot(null)
-  }, [activeSlot, onChange, source.extraCols])
+  }, [activeSlot, onChange, source.extraCols, source.extraDurationCols])
 
   return (
     <div className="ds-group" style={{ marginBottom: 10 }}>
@@ -743,13 +780,25 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExt
           onClear={k => onChange({ [k]: '' } as Partial<AgentSource>)} />)}
         {extraCols.map((c, i) => {
           const slotKey = EXTRA_AGENT_COL_PREFIX + c.key
-          return <DsSlotCard key={slotKey} slotKey={slotKey} label={c.label} hint="Custom column — mapped from this source's table"
-            color={extraAgentColColor(i)} editableLabel onLabelChange={l => onRenameExtraCol(c.key, l)} onRemove={() => onRemoveExtraCol(c.key)}
-            breachText={c.breachText} onBreachTextChange={v => onSetExtraColBreachText(c.key, v)}
-            breachSeverity={c.breachSeverity} onBreachSeverityToggle={() => onToggleExtraColSeverity(c.key)}
-            isActive={activeSlot === slotKey} value={source.extraCols?.[c.key] || ''}
-            onToggle={k => setActiveSlot(cur => cur === k ? null : k)}
-            onClear={() => { const ec = { ...source.extraCols }; delete ec[c.key]; onChange({ extraCols: ec }) }} />
+          const durSlotKey = EXTRA_AGENT_DURATION_COL_PREFIX + c.key
+          const hasBreachTrigger = !!(c.breachText || '').trim()
+          return <React.Fragment key={slotKey}>
+            <DsSlotCard slotKey={slotKey} label={c.label} hint="Custom column — mapped from this source's table"
+              color={extraAgentColColor(i)} editableLabel onLabelChange={l => onRenameExtraCol(c.key, l)} onRemove={() => onRemoveExtraCol(c.key)}
+              breachText={c.breachText} onBreachTextChange={v => onSetExtraColBreachText(c.key, v)}
+              breachSeverity={c.breachSeverity} onBreachSeverityToggle={() => onToggleExtraColSeverity(c.key)}
+              isActive={activeSlot === slotKey} value={source.extraCols?.[c.key] || ''}
+              onToggle={k => setActiveSlot(cur => cur === k ? null : k)}
+              onClear={() => { const ec = { ...source.extraCols }; delete ec[c.key]; onChange({ extraCols: ec }) }} />
+            {hasBreachTrigger && (
+              <DsSlotCard slotKey={durSlotKey} label={`${c.label} Duration`}
+                hint="Optional — maps a SEPARATE column holding a duration (e.g. how long an agent has been in this state). When mapped, the Breach table shows THIS as the Value instead of just repeating the trigger text."
+                color={extraAgentColColor(i)}
+                isActive={activeSlot === durSlotKey} value={source.extraDurationCols?.[c.key] || ''}
+                onToggle={k => setActiveSlot(cur => cur === k ? null : k)}
+                onClear={() => { const ec = { ...(source.extraDurationCols || {}) }; delete ec[c.key]; onChange({ extraDurationCols: ec }) }} />
+            )}
+          </React.Fragment>
         })}
         <AddSlotCard onClick={onAddExtraCol} />
       </div>
@@ -759,6 +808,8 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExt
           <strong>{
             AGENT_SOURCE_SLOTS.find(s => s.key === activeSlot)?.label
             ?? extraCols.find(c => EXTRA_AGENT_COL_PREFIX + c.key === activeSlot)?.label
+            ?? (extraCols.find(c => EXTRA_AGENT_DURATION_COL_PREFIX + c.key === activeSlot)?.label
+                ? `${extraCols.find(c => EXTRA_AGENT_DURATION_COL_PREFIX + c.key === activeSlot)!.label} Duration` : undefined)
           }</strong> is active — click a column header below
         </div>
       )}
@@ -771,6 +822,7 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExt
               mappedCols={{
                 ...AGENT_SOURCE_SLOTS.reduce((acc, s) => { const v = (source as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key] || '#888'; return acc }, {} as Record<string, string>),
                 ...extraCols.reduce((acc, c, i) => { const v = source.extraCols?.[c.key]; if (v) acc[v] = extraAgentColColor(i); return acc }, {} as Record<string, string>),
+                ...extraCols.reduce((acc, c, i) => { const v = source.extraDurationCols?.[c.key]; if (v) acc[v] = extraAgentColColor(i); return acc }, {} as Record<string, string>),
               }} />
           )}
         </div>
@@ -822,6 +874,9 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
     setLocalDs(JSON.parse(JSON.stringify(preset))); setActiveCell(null); setActiveAgentSlot(null)
   }, [])
   const setField = useCallback((key: string, val: string) => { setLocalDs(prev => ({ ...prev, [key]: val })) }, [])
+  const toggleAgentDurationStatic = useCallback(() => {
+    setLocalDs(prev => ({ ...prev, agentDurationStatic: !prev.agentDurationStatic }))
+  }, [])
   const setLabel = useCallback((key: 'sla'|'aht'|'abn'|'wait', val: string) => {
     setLocalDs(prev => ({ ...prev, kpiLabels: { ...prev.kpiLabels, [key]: val } }))
   }, [])
@@ -931,6 +986,10 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
       if (cur) setLocalDs(prev => {
         // Custom column slots write into agentExtraColsMap (legacy single
         // table's mapping) instead of a flat top-level field.
+        if (cur.startsWith(EXTRA_AGENT_DURATION_COL_PREFIX)) {
+          const key = cur.slice(EXTRA_AGENT_DURATION_COL_PREFIX.length)
+          return { ...prev, agentExtraDurationColsMap: { ...(prev.agentExtraDurationColsMap || {}), [key]: colName } }
+        }
         if (cur.startsWith(EXTRA_AGENT_COL_PREFIX)) {
           const key = cur.slice(EXTRA_AGENT_COL_PREFIX.length)
           return { ...prev, agentExtraColsMap: { ...prev.agentExtraColsMap, [key]: colName } }
@@ -964,18 +1023,21 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const removeAgentExtraCol = useCallback((key: string) => {
     setLocalDs(prev => {
       const agentExtraColsMap = { ...prev.agentExtraColsMap }; delete agentExtraColsMap[key]
+      const agentExtraDurationColsMap = { ...(prev.agentExtraDurationColsMap || {}) }; delete agentExtraDurationColsMap[key]
       return {
         ...prev,
         agentExtraCols: prev.agentExtraCols.filter(c => c.key !== key),
         agentExtraColsMap,
+        agentExtraDurationColsMap,
         agentSources: prev.agentSources.map(s => {
-          if (!(key in (s.extraCols || {}))) return s
+          if (!(key in (s.extraCols || {})) && !(key in (s.extraDurationCols || {}))) return s
           const extraCols = { ...s.extraCols }; delete extraCols[key]
-          return { ...s, extraCols }
+          const extraDurationCols = { ...(s.extraDurationCols || {}) }; delete extraDurationCols[key]
+          return { ...s, extraCols, extraDurationCols }
         }),
       }
     })
-    setActiveAgentSlot(cur => cur === EXTRA_AGENT_COL_PREFIX + key ? null : cur)
+    setActiveAgentSlot(cur => (cur === EXTRA_AGENT_COL_PREFIX + key || cur === EXTRA_AGENT_DURATION_COL_PREFIX + key) ? null : cur)
   }, [])
 
   // ── Multiple agent sources — covers both "agent status split across several
@@ -1276,19 +1338,39 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
           <i className="bx bx-plus" /> to add a custom column beyond Agent/Status/Duration.
         </p>
         <div className="ds-slot-grid">
-          {AGENT_SLOTS.map(s => <DsSlotCard key={s.key} slotKey={s.key} label={s.label} hint={s.hint}
-            isActive={activeAgentSlot === s.key} value={(localDs as any)[s.key] || ''}
-            onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
-            onClear={k => setField(k, '')} />)}
+          {AGENT_SLOTS.map(s => {
+            const isDuration = s.key === 'agentDurationCol'
+            return <DsSlotCard key={s.key} slotKey={s.key} hint={s.hint}
+              label={isDuration ? (localDs.agentDurationLabel || s.label) : s.label}
+              editableLabel={isDuration || undefined}
+              onLabelChange={isDuration ? (l => setField('agentDurationLabel', l)) : undefined}
+              durationMode={isDuration ? (localDs.agentDurationStatic ? 'static' : 'running') : undefined}
+              onToggleDurationMode={isDuration ? toggleAgentDurationStatic : undefined}
+              isActive={activeAgentSlot === s.key} value={(localDs as any)[s.key] || ''}
+              onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
+              onClear={k => setField(k, '')} />
+          })}
           {localDs.agentExtraCols.map((c, i) => {
             const slotKey = EXTRA_AGENT_COL_PREFIX + c.key
-            return <DsSlotCard key={slotKey} slotKey={slotKey} label={c.label} hint="Custom column — mapped from the legacy table"
-              color={extraAgentColColor(i)} editableLabel onLabelChange={l => renameAgentExtraCol(c.key, l)} onRemove={() => removeAgentExtraCol(c.key)}
-              breachText={c.breachText} onBreachTextChange={v => setAgentExtraColBreachText(c.key, v)}
-              breachSeverity={c.breachSeverity} onBreachSeverityToggle={() => toggleAgentExtraColSeverity(c.key)}
-              isActive={activeAgentSlot === slotKey} value={localDs.agentExtraColsMap[c.key] || ''}
-              onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
-              onClear={() => setLocalDs(prev => { const m = { ...prev.agentExtraColsMap }; delete m[c.key]; return { ...prev, agentExtraColsMap: m } })} />
+            const durSlotKey = EXTRA_AGENT_DURATION_COL_PREFIX + c.key
+            const hasBreachTrigger = !!(c.breachText || '').trim()
+            return <React.Fragment key={slotKey}>
+              <DsSlotCard slotKey={slotKey} label={c.label} hint="Custom column — mapped from the legacy table"
+                color={extraAgentColColor(i)} editableLabel onLabelChange={l => renameAgentExtraCol(c.key, l)} onRemove={() => removeAgentExtraCol(c.key)}
+                breachText={c.breachText} onBreachTextChange={v => setAgentExtraColBreachText(c.key, v)}
+                breachSeverity={c.breachSeverity} onBreachSeverityToggle={() => toggleAgentExtraColSeverity(c.key)}
+                isActive={activeAgentSlot === slotKey} value={localDs.agentExtraColsMap[c.key] || ''}
+                onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
+                onClear={() => setLocalDs(prev => { const m = { ...prev.agentExtraColsMap }; delete m[c.key]; return { ...prev, agentExtraColsMap: m } })} />
+              {hasBreachTrigger && (
+                <DsSlotCard slotKey={durSlotKey} label={`${c.label} Duration`}
+                  hint="Optional — maps a SEPARATE column holding a duration (e.g. how long an agent has been in this state). When mapped, the Breach table shows THIS as the Value instead of just repeating the trigger text."
+                  color={extraAgentColColor(i)}
+                  isActive={activeAgentSlot === durSlotKey} value={localDs.agentExtraDurationColsMap?.[c.key] || ''}
+                  onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
+                  onClear={() => setLocalDs(prev => { const m = { ...(prev.agentExtraDurationColsMap || {}) }; delete m[c.key]; return { ...prev, agentExtraDurationColsMap: m } })} />
+              )}
+            </React.Fragment>
           })}
           <AddSlotCard onClick={addAgentExtraCol} />
         </div>
@@ -1298,6 +1380,8 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             <strong>{
               AGENT_SLOTS.find(s => s.key === activeAgentSlot)?.label
               ?? localDs.agentExtraCols.find(c => EXTRA_AGENT_COL_PREFIX + c.key === activeAgentSlot)?.label
+              ?? (localDs.agentExtraCols.find(c => EXTRA_AGENT_DURATION_COL_PREFIX + c.key === activeAgentSlot)?.label
+                  ? `${localDs.agentExtraCols.find(c => EXTRA_AGENT_DURATION_COL_PREFIX + c.key === activeAgentSlot)!.label} Duration` : undefined)
             }</strong> is active — click a column header below
           </div>
         )}
@@ -1310,6 +1394,7 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                 mappedCols={{
                   ...AGENT_SLOTS.reduce((acc, s) => { const v = (localDs as any)[s.key]; if (v) acc[v] = SLOT_COLORS[s.key] || '#888'; return acc }, {} as Record<string, string>),
                   ...localDs.agentExtraCols.reduce((acc, c, i) => { const v = localDs.agentExtraColsMap[c.key]; if (v) acc[v] = extraAgentColColor(i); return acc }, {} as Record<string, string>),
+                  ...localDs.agentExtraCols.reduce((acc, c, i) => { const v = localDs.agentExtraDurationColsMap?.[c.key]; if (v) acc[v] = extraAgentColColor(i); return acc }, {} as Record<string, string>),
                 }} />
             )}
           </div>
