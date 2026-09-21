@@ -1978,7 +1978,20 @@ export default function SettingsModal(props: Props) {
   // .dark .sm-* selectors inside MODAL_STYLES resolve correctly
   return createPortal(
     <div className={props.isDark ? 'dark' : ''}>
-      <SettingsContent {...props} />
+      {/* key={props.accountId} — CONFIRMED root cause of a real data-loss
+          incident (2026-09-21): SettingsContent seeds its kpi/stat/ds state
+          ONCE via useState(props.*) at mount and never re-syncs from props
+          afterward. Clicking "Configure" on a DIFFERENT account from the
+          Accounts tab (onConfigureAccount -> switchAccount) changes
+          `accountId` while the modal stays open, but WITHOUT this key,
+          React keeps the same component instance — its kpi/stat/ds state
+          stays frozen on whatever account was open when it first mounted.
+          Clicking "Save Changes" after that silently wrote one account's
+          entire config onto a DIFFERENT account's row (flex's real "Messaging
+          SLA"/"Email SLA" KPI mapping got overwritten with wyze's). The key
+          forces a full remount — and fresh useState(props.*) — every time
+          the account being configured changes. */}
+      <SettingsContent key={props.accountId} {...props} />
     </div>,
     document.body
   )

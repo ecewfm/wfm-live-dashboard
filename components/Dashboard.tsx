@@ -472,7 +472,7 @@ export default function Dashboard() {
         <SettingsModal
           isDark={isDark}
           accountId={currentAccount || accounts[0] || ''}
-          accounts={accounts.map(id => ({ id, display_name: id, active: true, sort_order: 0 }))}
+          accounts={accounts.map(id => ({ id, display_name: displayNames[id] || id, active: true, sort_order: 0 }))}
           kpiThresholds={kpiThresholds[currentAccount] ?? DEFAULT_THRESHOLDS}
           statusThresholds={statusThresholds[currentAccount] ?? DEFAULT_STATUS_THRESHOLDS}
           dataSource={dataSources[currentAccount] ?? DEFAULT_DATA_SOURCE}
@@ -487,6 +487,13 @@ export default function Dashboard() {
             const configs = await loadAccounts()
             const ids = configs.map(a => a.id)
             setAccounts(ids)
+            // Refresh display names for EVERY account, not just new ones —
+            // covers a rename (Accounts tab's pencil icon) on an existing
+            // account, which otherwise wouldn't show up here until a full
+            // page reload even though it already saved correctly.
+            const nameMap: Record<string, string> = {}
+            configs.forEach(a => { nameMap[a.id] = a.display_name || a.id })
+            setDisplayNames(nameMap)
             // Load settings for any new accounts
             const newIds = ids.filter(id => !kpiThresholds[id])
             if (newIds.length > 0) {
