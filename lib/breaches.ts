@@ -142,13 +142,15 @@ export function buildBreaches(
         // this agent been out of adherence" — instead of just repeating the
         // trigger text, which the Threshold column already shows.
         const durationVal = String(a[`_extraDuration_${col.key}`] ?? '').trim()
-        // breachMetricFromStatus (see AgentExtraColumn) — show the agent's
-        // CURRENT STATUS as Metric instead of the fixed column label, e.g.
-        // "Away" instead of always "Adherence" — combined with the duration
-        // above, a row reads "Junnel | Away | 4m 26s | Out of adherence"
-        // instead of "Junnel | Adherence | Out of adherence | Out of adherence".
-        const metric = (col.breachMetricFromStatus && status) ? status : col.label
-        rows.push({ entity: name, metric, value: durationVal || raw, threshold: trigger, severity: col.breachSeverity || 'critical' })
+        // An optional companion metric column (see DataSourceConfig.
+        // agentExtraMetricColsMap/AgentSource.extraMetricCols) — same idea as
+        // the duration companion, but for Metric: any raw column's per-agent
+        // value (commonly the account's own status column) replaces this
+        // column's fixed label. Combined with the duration above, a row
+        // reads "Junnel | Away | 4m 26s | Out of adherence" instead of
+        // "Junnel | Adherence | Out of adherence | Out of adherence".
+        const metricVal = String(a[`_extraMetric_${col.key}`] ?? '').trim()
+        rows.push({ entity: name, metric: metricVal || col.label, value: durationVal || raw, threshold: trigger, severity: col.breachSeverity || 'critical' })
       }
     })
   })

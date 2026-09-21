@@ -184,6 +184,14 @@ export interface DataSourceConfig {
   // shown as Value, exactly as before this existed). Mirrors
   // AgentSource.extraDurationCols for additional sources.
   agentExtraDurationColsMap?: Record<string, string>
+  // Same idea as agentExtraDurationColsMap, for the Breach table's "Metric"
+  // column instead of "Value": key -> a raw column whose per-agent value
+  // replaces this column's own `label` as Metric (e.g. mapping to the
+  // account's status column shows "Away"/"Offline" per row instead of
+  // always "Adherence" — but any column can be mapped, not just status).
+  // Unmapped = unchanged behavior (this column's label shown as Metric for
+  // every row). Mirrors AgentSource.extraMetricCols for additional sources.
+  agentExtraMetricColsMap?: Record<string, string>
 
   // Custom Agent Status table columns, defined once for the whole account —
   // see AgentExtraColumn. Where each one's value comes from (which raw
@@ -265,6 +273,8 @@ export interface AgentSource {
   // point the same extra column's duration companion at a differently-named
   // column, same as extraCols above.
   extraDurationCols?: Record<string, string>
+  // Mirrors DataSourceConfig.agentExtraMetricColsMap — see its comment.
+  extraMetricCols?: Record<string, string>
 }
 
 // ── Custom Agent Status table columns ─────────────────────────────────────────
@@ -288,14 +298,4 @@ export interface AgentExtraColumn {
   // column — a purely informational display column, the default.
   breachText?:     string
   breachSeverity?: 'warning' | 'critical'   // only meaningful when breachText is set; defaults to 'critical'
-  // Only meaningful when breachText is set. Default (false/unset): the
-  // Breach table's Metric column shows this column's own `label` for every
-  // row (e.g. always "Adherence"). true: shows the agent's CURRENT STATUS
-  // instead (`_status`, e.g. "Away", "Offline") — more useful when the
-  // interesting question is "what were they doing while out of adherence"
-  // rather than just restating which column triggered it. No new column
-  // mapping needed for this — `_status` is already fetched for every agent
-  // row regardless of account (see components/Dashboard.tsx's
-  // fetchAgentSource), unlike the duration companion column above.
-  breachMetricFromStatus?: boolean
 }

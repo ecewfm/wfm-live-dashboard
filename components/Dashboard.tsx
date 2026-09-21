@@ -79,6 +79,12 @@ async function fetchAgentSource(src: AgentSource, accId: string): Promise<any[]>
       // instead of the raw matched text.
       const durCol = src.extraDurationCols?.[key]
       if (durCol) out[`_extraDuration_${key}`] = String(r[durCol] ?? '')
+      // Optional companion metric column (see AgentSource.extraMetricCols) —
+      // read by lib/breaches.ts to show a real per-agent value (e.g. their
+      // current status) as the Breach table's Metric instead of this
+      // column's own fixed label.
+      const metricCol = src.extraMetricCols?.[key]
+      if (metricCol) out[`_extraMetric_${key}`] = String(r[metricCol] ?? '')
     })
     return out
   })
@@ -163,6 +169,7 @@ export default function Dashboard() {
           durationCol: src.agentDurationCol, durationSecsCol: src.agentDurationSecs,
           extraCols: src.agentExtraColsMap || {},
           extraDurationCols: src.agentExtraDurationColsMap || {},
+          extraMetricCols: src.agentExtraMetricColsMap || {},
         })
       }
       if (src.agentSources) agentSourcesToFetch.push(...src.agentSources)
