@@ -288,4 +288,14 @@ export interface AgentExtraColumn {
   // column — a purely informational display column, the default.
   breachText?:     string
   breachSeverity?: 'warning' | 'critical'   // only meaningful when breachText is set; defaults to 'critical'
+  // Only meaningful when breachText is set. Default (false/unset): the
+  // Breach table's Metric column shows this column's own `label` for every
+  // row (e.g. always "Adherence"). true: shows the agent's CURRENT STATUS
+  // instead (`_status`, e.g. "Away", "Offline") — more useful when the
+  // interesting question is "what were they doing while out of adherence"
+  // rather than just restating which column triggered it. No new column
+  // mapping needed for this — `_status` is already fetched for every agent
+  // row regardless of account (see components/Dashboard.tsx's
+  // fetchAgentSource), unlike the duration companion column above.
+  breachMetricFromStatus?: boolean
 }
