@@ -423,6 +423,19 @@ export async function addAccount(id: string, displayName?: string): Promise<void
   if (error) throw new Error(error.message || JSON.stringify(error))
 }
 
+/** Rename an account's display name (shown on the Overview cards, the account
+ *  switcher, etc.) — throws on error so the UI can show it. Does not touch
+ *  `id`, which every other table's account_id columns are keyed on. */
+export async function renameAccount(id: string, displayName: string): Promise<void> {
+  const trimmed = displayName.trim()
+  if (!trimmed) throw new Error('Display name cannot be empty')
+  const { error } = await supabase
+    .from('wfm_accounts')
+    .update({ display_name: trimmed })
+    .eq('id', id)
+  if (error) throw new Error(error.message || JSON.stringify(error))
+}
+
 /** Remove (deactivate) an account — throws on error */
 export async function removeAccount(id: string): Promise<void> {
   const { error } = await supabase

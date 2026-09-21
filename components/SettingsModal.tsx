@@ -10,7 +10,7 @@ import {
   DEFAULT_KPI_LABELS, genId, newGroup, newGroupTile, newAgentSource,
   fetchPublicTables
 } from '@/lib/utils'
-import { addAccount, removeAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
+import { addAccount, removeAccount, renameAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
 import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
 
 type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq'
@@ -188,8 +188,12 @@ const MODAL_STYLES = `
   .acc-row:hover { border-color: #d97a35; }
   .dark .acc-row { background: #111; border-color: #2e2e2e; }
   .acc-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; flex-shrink: 0; }
-  .acc-name { flex: 1; font-size: 13px; font-weight: 600; color: var(--text-main, #2c3b36); }
+  .acc-name { flex: 1; font-size: 13px; font-weight: 600; color: var(--text-main, #2c3b36); display: flex; align-items: center; gap: 6px; }
   .dark .acc-name { color: #e0e0e0; }
+  .acc-rename-icon { font-size: 13px; color: var(--text-muted, #687d75); cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s; }
+  .acc-row:hover .acc-rename-icon { opacity: 1; }
+  .acc-rename-icon:hover { color: #d97a35; }
+  .acc-rename-input { flex: 1; padding: 5px 8px; font-size: 13px; font-weight: 600; }
   .acc-type { font-size: 11px; color: var(--text-muted, #687d75); background: rgba(0,0,0,0.05); padding: 2px 8px; border-radius: 10px; }
   .dark .acc-type { background: rgba(255,255,255,0.07); }
   .acc-btn {
@@ -281,6 +285,9 @@ function AccountsTab({
   const [saving,   setSaving]   = useState(false)
   const [error,    setError]    = useState('')
   const [removing, setRemoving] = useState<string | null>(null)
+  const [renamingId,   setRenamingId]   = useState<string | null>(null)
+  const [renameValue,  setRenameValue]  = useState('')
+  const [renameSaving, setRenameSaving] = useState(false)
 
   const handleAdd = async () => {
     const trimId = newId.trim()
@@ -307,6 +314,27 @@ function AccountsTab({
       alert(`Failed to remove: ${e.message}`)
     }
     setRemoving(null)
+  }
+
+  const startRename = (acc: AccountConfig) => {
+    setRenamingId(acc.id)
+    setRenameValue(acc.display_name || acc.id)
+  }
+  const cancelRename = () => { setRenamingId(null); setRenameValue('') }
+  const saveRename = async (id: string) => {
+    const trimmed = renameValue.trim()
+    // No-op edits (unchanged, or cleared back to blank) just close the editor
+    // rather than round-tripping an update or throwing "cannot be empty".
+    if (!trimmed || trimmed === (accounts.find(a => a.id === id)?.display_name || id)) { cancelRename(); return }
+    setRenameSaving(true)
+    try {
+      await renameAccount(id, trimmed)
+      cancelRename()
+      onRefresh()
+    } catch (e: any) {
+      alert(`Failed to rename: ${e.message}`)
+    }
+    setRenameSaving(false)
   }
 
   return (
@@ -378,8 +406,27 @@ function AccountsTab({
           {accounts.map(acc => (
             <div key={acc.id} className="acc-row">
               <div className="acc-dot" />
-              <div className="acc-name">{acc.display_name || acc.id}</div>
-              {acc.display_name && acc.display_name !== acc.id && (
+              {renamingId === acc.id ? (
+                <input
+                  className="acc-add-input acc-rename-input"
+                  autoFocus
+                  value={renameValue}
+                  onChange={e => setRenameValue(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') saveRename(acc.id)
+                    if (e.key === 'Escape') cancelRename()
+                  }}
+                  onBlur={() => saveRename(acc.id)}
+                  disabled={renameSaving}
+                />
+              ) : (
+                <div className="acc-name">
+                  {acc.display_name || acc.id}
+                  <i className="bx bx-pencil acc-rename-icon" title="Rename — shown on the Overview cards and account switcher"
+                    onClick={() => startRename(acc)} />
+                </div>
+              )}
+              {acc.display_name && acc.display_name !== acc.id && renamingId !== acc.id && (
                 <div style={{ fontSize: 10, color: '#687d75' }}>{acc.id}</div>
               )}
               <button className="acc-btn acc-btn-cfg" onClick={() => onConfigure(acc.id)}>
