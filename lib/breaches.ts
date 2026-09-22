@@ -125,6 +125,25 @@ export function buildBreaches(
       else if (mins >= thSt.warn) rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning'  })
     }
 
+    // Static-mode Duration: a plain NUMERIC threshold on the value itself
+    // (e.g. breach when "Ticket Solved" is at/below a number) — see
+    // DataSourceConfig.agentDurationStaticThreshold's comment. Independent of
+    // (and the direct replacement for) the minutes-in-status check above,
+    // which is skipped in static mode since there's no real elapsed time.
+    if (ds.agentDurationStatic && ds.agentDurationStaticThreshold) {
+      const th  = ds.agentDurationStaticThreshold
+      const raw = String(a._duration ?? '')
+      const num = extractPercent(raw)
+      if (!isNaN(num) && !(th.excludeZero && num === 0)) {
+        const isCrit = th.direction === 'desc' ? num <= th.crit : num >= th.crit
+        const isWarn = th.direction === 'desc' ? num <= th.warn : num >= th.warn
+        const label  = ds.agentDurationLabel || 'Duration'
+        const cmp    = th.direction === 'desc' ? '≤' : '≥'
+        if (isCrit)      rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.crit}`, severity: 'critical' })
+        else if (isWarn) rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.warn}`, severity: 'warning'  })
+      }
+    }
+
     // Text-based: some CRMs flag a problem as a literal status word instead
     // of a duration (e.g. Wyze's Adherence column reading "Out of
     // adherence") — checked against every custom Agent Table column that has
@@ -140,8 +159,18 @@ export function buildBreaches(
         // agentExtraDurationColsMap/AgentSource.extraDurationCols) shows
         // something more useful as the breach's Value — e.g. "how long has
         // this agent been out of adherence" — instead of just repeating the
-        // trigger text, which the Threshold column already shows.
-        const durationVal = String(a[`_extraDuration_${col.key}`] ?? '').trim()
+        // trigger text, which the Threshold column already shows. Governed
+        // by the SAME account-wide agentDurationStatic setting as the main
+        // Duration column (not a separate toggle) — Running ticks this value
+        // live too (via the compound agentTimers key Dashboard.tsx seeds for
+        // it), Static shows it exactly as scraped, same as the main column.
+        const extraDurRaw = String(a[`_extraDuration_${col.key}`] ?? '').trim()
+        let durationVal = extraDurRaw
+        if (extraDurRaw && !ds.agentDurationStatic) {
+          const durKey = `${accountId}:${name}:extraDur:${col.key}`
+          const durSecs = agentTimers[durKey] ?? parseDurationToSeconds(extraDurRaw)
+          durationVal = formatSeconds(durSecs)
+        }
         // An optional companion metric column (see DataSourceConfig.
         // agentExtraMetricColsMap/AgentSource.extraMetricCols) — same idea as
         // the duration companion, but for Metric: any raw column's per-agent

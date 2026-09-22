@@ -530,7 +530,7 @@ function extraAgentColColor(i: number) { return EXTRA_COLORS[i % EXTRA_COLORS.le
 // ── Module-level sub-components — MUST be outside DataSourcesTab ─────────────
 // If defined inside, React remounts them on every render → scroll resets.
 
-const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle, onClear, color: colorOverride, editableLabel, onLabelChange, onRemove, breachText, onBreachTextChange, breachSeverity, onBreachSeverityToggle, durationMode, onToggleDurationMode }: {
+const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle, onClear, color: colorOverride, editableLabel, onLabelChange, onRemove, breachText, onBreachTextChange, breachSeverity, onBreachSeverityToggle, durationMode, onToggleDurationMode, staticThreshold, onStaticThresholdChange, onClearStaticThreshold }: {
   slotKey: string; label: string; hint: string
   isActive: boolean; value: string; onToggle: (k: string) => void; onClear?: (k: string) => void
   color?: string           // override SLOT_COLORS lookup — needed for custom columns (no fixed slot color)
@@ -558,6 +558,16 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
   // of running it through formatSeconds().
   durationMode?: 'running' | 'static'
   onToggleDurationMode?: () => void
+  // Only shown/meaningful when durationMode === 'static' — a plain numeric
+  // breach threshold on the static value itself (e.g. Ticket Solved), since
+  // the Status Durations tab's minutes-in-status model doesn't apply here.
+  // See DataSourceConfig.agentDurationStaticThreshold.
+  staticThreshold?: { warn: number; crit: number; direction: 'asc' | 'desc' }
+  onStaticThresholdChange?: (patch: Partial<{ warn: number; crit: number; direction: 'asc' | 'desc' }>) => void
+  // Fully REMOVES the threshold config (vs. zeroing warn/crit, which would
+  // leave a still-truthy {warn:0,crit:0} object that keeps firing for any
+  // agent whose value is legitimately exactly 0).
+  onClearStaticThreshold?: () => void
 }) => {
   const color = colorOverride || SLOT_COLORS[slotKey] || '#888'
   // Empty slot → click arms it for picking (existing behavior). Already-armed
@@ -631,6 +641,42 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
             <i className={`bx ${durationMode === 'running' ? 'bx-timer' : 'bx-pause-circle'}`} style={{ fontSize: 12 }} />
             {durationMode === 'running' ? 'Running (live timer)' : 'Static (shown as-is)'}
           </button>
+          {durationMode === 'static' && onStaticThresholdChange && (
+            staticThreshold ? (
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginTop: 5 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, color: 'var(--text-muted)', fontWeight: 700 }}>W
+                  <input type="number" value={staticThreshold.warn}
+                    onChange={e => onStaticThresholdChange?.({ warn: parseFloat(e.target.value) || 0 })}
+                    style={{ width: 36, padding: '3px 4px', borderRadius: 4, fontSize: 10, textAlign: 'center',
+                      border: '1px solid var(--border,#e1e6e4)', background: 'var(--bg-body,#f0f2f1)', color: 'var(--text-main)' }} />
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, color: 'var(--text-muted)', fontWeight: 700 }}>C
+                  <input type="number" value={staticThreshold.crit}
+                    onChange={e => onStaticThresholdChange?.({ crit: parseFloat(e.target.value) || 0 })}
+                    style={{ width: 36, padding: '3px 4px', borderRadius: 4, fontSize: 10, textAlign: 'center',
+                      border: '1px solid var(--border,#e1e6e4)', background: 'var(--bg-body,#f0f2f1)', color: 'var(--text-main)' }} />
+                </label>
+                <button onClick={() => onStaticThresholdChange?.({ direction: staticThreshold.direction === 'asc' ? 'desc' : 'asc' })}
+                  title="Toggle whether high or low values are bad"
+                  style={{ flex: 1, fontSize: 9, fontWeight: 700, padding: '3px 4px', borderRadius: 4, border: '1px solid rgba(75,139,156,0.3)',
+                    cursor: 'pointer', color: '#4b8b9c', background: 'rgba(75,139,156,0.1)' }}>
+                  {staticThreshold.direction === 'desc' ? 'Low = Bad' : 'High = Bad'}
+                </button>
+                {onClearStaticThreshold && (
+                  <i className="bx bx-x" title="Remove this threshold — stop breach-checking this value entirely"
+                    onClick={() => onClearStaticThreshold()}
+                    style={{ fontSize: 14, cursor: 'pointer', color: 'var(--text-muted)', flexShrink: 0 }} />
+                )}
+              </div>
+            ) : (
+              <button onClick={() => onStaticThresholdChange?.({})}
+                title="Add a numeric breach threshold on this static value (e.g. breach when Ticket Solved drops too low)"
+                style={{ width: '100%', marginTop: 5, fontSize: 9, fontWeight: 700, padding: '4px 6px', borderRadius: 5,
+                  border: '1px dashed var(--border,#e1e6e4)', cursor: 'pointer', color: 'var(--text-muted)', background: 'transparent' }}>
+                <i className="bx bx-plus" style={{ fontSize: 11, verticalAlign: 'middle' }} /> Add breach threshold
+              </button>
+            )
+          )}
         </div>
       )}
     </div>
@@ -909,6 +955,17 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const setField = useCallback((key: string, val: string) => { setLocalDs(prev => ({ ...prev, [key]: val })) }, [])
   const toggleAgentDurationStatic = useCallback(() => {
     setLocalDs(prev => ({ ...prev, agentDurationStatic: !prev.agentDurationStatic }))
+  }, [])
+  const updateAgentDurationStaticThreshold = useCallback((patch: Partial<{ warn: number; crit: number; direction: 'asc' | 'desc' }>) => {
+    setLocalDs(prev => ({ ...prev, agentDurationStaticThreshold: {
+      // Same starter defaults as addExtra's Extra KPI Tiles, not 0/0 — an
+      // all-zero threshold looks "off" but isn't (it still breach-checks
+      // any value that's legitimately exactly 0).
+      warn: 10, crit: 20, direction: 'asc' as const, ...(prev.agentDurationStaticThreshold || {}), ...patch,
+    } }))
+  }, [])
+  const clearAgentDurationStaticThreshold = useCallback(() => {
+    setLocalDs(prev => { const next = { ...prev }; delete next.agentDurationStaticThreshold; return next })
   }, [])
   const setLabel = useCallback((key: 'sla'|'aht'|'abn'|'wait', val: string) => {
     setLocalDs(prev => ({ ...prev, kpiLabels: { ...prev.kpiLabels, [key]: val } }))
@@ -1386,6 +1443,9 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
               onLabelChange={isDuration ? (l => setField('agentDurationLabel', l)) : undefined}
               durationMode={isDuration ? (localDs.agentDurationStatic ? 'static' : 'running') : undefined}
               onToggleDurationMode={isDuration ? toggleAgentDurationStatic : undefined}
+              staticThreshold={isDuration ? localDs.agentDurationStaticThreshold : undefined}
+              onStaticThresholdChange={isDuration ? updateAgentDurationStaticThreshold : undefined}
+              onClearStaticThreshold={isDuration ? clearAgentDurationStaticThreshold : undefined}
               isActive={activeAgentSlot === s.key} value={(localDs as any)[s.key] || ''}
               onToggle={k => setActiveAgentSlot(cur => cur === k ? null : k)}
               onClear={k => setField(k, '')} />

@@ -215,6 +215,24 @@ export default function Dashboard() {
           // itself looks coarse.
           if (src.agentDurationStatic || isCoarseDuration(raw)) coarseKeysRef.current.add(key)
           else coarseKeysRef.current.delete(key)
+
+          // Breach-table companion duration columns (see AgentExtraColumn /
+          // agentExtraDurationColsMap) — governed by the SAME account-wide
+          // running/static setting as the main Duration column above, not a
+          // separate one: toggling Duration to Running makes these tick live
+          // too, toggling to Static freezes them too, matching what a single
+          // "is this account's time data live" setting should mean. Stored
+          // under a compound key in the same agentTimers map (arbitrary
+          // string keys already), ticked by the same 1s clock below.
+          ;(src.agentExtraCols ?? []).forEach(col => {
+            const extraDurRaw = a[`_extraDuration_${col.key}`]
+            if (extraDurRaw === undefined) return
+            const durKey = `${accId}:${String(a._name ?? '')}:extraDur:${col.key}`
+            const durRawStr = String(extraDurRaw || '')
+            next[durKey] = parseDurationToSeconds(durRawStr)
+            if (src.agentDurationStatic || isCoarseDuration(durRawStr)) coarseKeysRef.current.add(durKey)
+            else coarseKeysRef.current.delete(durKey)
+          })
         })
         return next
       })
@@ -407,6 +425,16 @@ export default function Dashboard() {
   // loaded, so it reloads itself to pick it up. Skips while Settings is open
   // so an in-progress edit isn't interrupted — it'll just check again next
   // interval once closed.
+  //
+  // Checks on TWO triggers, not just the interval: this dashboard is the
+  // kind of thing people leave open on a monitor or in a background tab for
+  // hours, and browsers throttle setInterval heavily (sometimes to once a
+  // minute or less) once a tab is backgrounded — so relying on the interval
+  // alone meant a backgrounded tab could sit on a stale build far longer
+  // than the interval's own period suggests. Also checking immediately on
+  // `visibilitychange` (tab regains focus) catches that case reliably
+  // regardless of how long it was backgrounded or how throttled the timer
+  // was, without waiting for the next tick.
   useEffect(() => {
     const BUILD_SHA = process.env.NEXT_PUBLIC_BUILD_SHA
     if (!BUILD_SHA || BUILD_SHA === 'dev') return // skip in local dev
@@ -421,8 +449,13 @@ export default function Dashboard() {
         }
       } catch {}
     }
-    const interval = setInterval(checkVersion, 5 * 60 * 1000)
-    return () => clearInterval(interval)
+    const interval = setInterval(checkVersion, 60 * 1000)
+    const onVisible = () => { if (document.visibilityState === 'visible') checkVersion() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [settingsOpen])
 
   // ── All breaches ───────────────────────────────────────────────────────────

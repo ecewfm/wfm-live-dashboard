@@ -169,6 +169,14 @@ export interface DataSourceConfig {
   // duration-based status-breach thresholds (see lib/breaches.ts). false/
   // unset = default "running" behavior, unchanged from before this existed.
   agentDurationStatic?: boolean
+  // Only meaningful when agentDurationStatic is true — a plain NUMERIC
+  // threshold on the static value itself (e.g. breach when "Ticket Solved"
+  // drops to/below a number), same shape as a KPI's own threshold (see
+  // Thresholds in this file) rather than the minutes-in-status model the
+  // Status Durations tab uses (which doesn't apply here — there's no real
+  // elapsed time once Duration is static). Unset = no numeric breach check
+  // on this value at all (purely informational), same as before this existed.
+  agentDurationStaticThreshold?: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
   // Legacy single-table mapping for agentExtraCols (see AgentExtraColumn) —
   // key -> raw column name in `agentTable`. Mirrors AgentSource.extraCols.
   agentExtraColsMap: Record<string, string>
