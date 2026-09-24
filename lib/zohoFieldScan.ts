@@ -33,6 +33,7 @@
 import { getZohoAccessToken } from './zohoAuth'
 import { getSupabaseAdmin } from './supabaseAdmin'
 import { OWNER_NAME, APP_LINK_NAME, FORM_LINK_NAME } from './zohoCreator'
+import { FORM_LINK_NAME as RTA_LOGS_FORM_LINK_NAME } from './zohoWebappRequest'
 
 const CREATOR_API_BASE = 'https://www.zohoapis.com/creator/v2.1'
 const REPORT_LINK_NAME = 'All_Workforce_Logs_RTA_View'
@@ -153,15 +154,22 @@ export async function scanZohoFields(): Promise<FieldScanResult> {
   const l = (msg: string) => log.push(msg)
   const token = await getZohoAccessToken()
 
-  // Confirm (or flag a mismatch in) the FORM_LINK_NAME guess used for writes
+  // Confirm (or flag a mismatch in) the two FORM_LINK_NAME constants used for
+  // writes — Workforce Logs (lib/zohoCreator.ts) and Workforce RTA Logs
+  // (lib/zohoWebappRequest.ts) write to two DIFFERENT forms in this same app
   // — no builder click-through needed, just read the app's own form list.
   const forms = await listFormLinkNames(token)
+  const formChecks: Array<[string, string]> = [
+    [FORM_LINK_NAME, 'Workforce Logs (lib/zohoCreator.ts)'],
+    [RTA_LOGS_FORM_LINK_NAME, 'Workforce RTA Logs (lib/zohoWebappRequest.ts)'],
+  ]
   if (forms.length === 0) {
-    l(`Could not list forms (check ZohoCreator.meta.READ scope / re-authorize) — cannot verify FORM_LINK_NAME="${FORM_LINK_NAME}".`)
-  } else if (forms.includes(FORM_LINK_NAME)) {
-    l(`FORM_LINK_NAME="${FORM_LINK_NAME}" confirmed — it exists in this app's form list.`)
+    l(`Could not list forms (check ZohoCreator.meta.READ scope / re-authorize) — cannot verify FORM_LINK_NAME constants.`)
   } else {
-    l(`WARNING: FORM_LINK_NAME="${FORM_LINK_NAME}" was NOT found among this app's forms: [${forms.join(', ')}]. Update the constant in lib/zohoCreator.ts to the correct one before relying on Workforce Logs reporting.`)
+    for (const [name, label] of formChecks) {
+      if (forms.includes(name)) l(`${label} FORM_LINK_NAME="${name}" confirmed — it exists in this app's form list.`)
+      else l(`WARNING: ${label} FORM_LINK_NAME="${name}" was NOT found among this app's forms: [${forms.join(', ')}]. Update the constant to the correct one before relying on this integration.`)
+    }
   }
 
   // Same check for the three REPORT link names this scan reads — Get Records

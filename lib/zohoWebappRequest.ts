@@ -28,12 +28,11 @@ import { OWNER_NAME, APP_LINK_NAME } from './zohoCreator'
 
 const CREATOR_API_BASE = 'https://www.zohoapis.com/creator/v2.1'
 
-// UNVERIFIED against a live write — assumed same for form and report (unlike
-// Workforce_RTA_Logs, which needed correcting once already; see
-// lib/zohoCreator.ts's file header for that history). If a write here 404s
-// the same way that one did, the real form link name needs the same Meta-API
-// cross-check lib/zohoFieldScan.ts already does for the other form.
-const FORM_LINK_NAME = 'All_Webapp_Api_Requests'
+// CONFIRMED via Zoho's Meta API (lib/zohoFieldScan.ts's scan lists every form
+// in the app and cross-checks this against it) — the app's actual form list
+// has "WebApp_API_Requests" (no "All_" prefix, unlike the original guess
+// "All_Webapp_Api_Requests", which was NOT in the list and would have 404'd).
+export const FORM_LINK_NAME = 'WebApp_API_Requests'
 
 const FORM_TYPE = 'Workforce RTA Logs'
 

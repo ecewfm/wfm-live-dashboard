@@ -153,13 +153,19 @@ No env vars for any of this — none of it is a secret, so it's all plain
 constants at the top of `lib/zohoCreator.ts`/`lib/zohoFieldScan.ts`:
 - `OWNER_NAME` (`ececonsultinggroup`), `APP_LINK_NAME` (`ece-time-tracker`) —
   known from the client's own app URL.
-- `FORM_LINK_NAME` (`lib/zohoCreator.ts`) — **CONFIRMED**, no longer a guess.
-  The Creator Add-Record API writes to a *form*, not the
-  `All_Workforce_Logs_RTA_View` *report* the client linked (forms are for
-  submitting data, reports are filtered views of it). Set to
-  `'Workforce_RTA_Logs'` — confirmed via the field-scan feature below's Meta
-  API cross-check (the app's actual form list includes `Workforce_RTA_Logs`,
-  a near-exact match for the report name, just reordered).
+- `FORM_LINK_NAME` (`lib/zohoCreator.ts`) — set to `'Workforce_RTA_Logs'`, and
+  a re-run of the field-scan's Meta API cross-check on 2026-09-24 shows this
+  form is genuinely gone/renamed (client renamed it to `All_Workforce_Rta_Logs`
+  — the scan will keep logging a WARNING every run for this constant).
+  **Deliberately left unfixed, per user (2026-09-24)**: this direct-write path
+  isn't the intended mechanism for getting records into Zoho's "All Workforce
+  RTA Logs" list anymore (if it ever was) — that happens exclusively through
+  the webapp-request portal below (`lib/zohoWebappRequest.ts`), where a
+  Zoho-side Deluge script does its OWN lookup/validation across every field
+  (account, category, sub-category, site) before creating the record, instead
+  of us pre-resolving Zoho record IDs ourselves. Don't chase this warning or
+  try to "fix" `FORM_LINK_NAME`/`createWorkforceLogRecord()` — it's expected
+  to stay broken and unused.
 
 Status on every auto-created record is hardcoded `Resolved` (client's explicit
 choice — these are being treated as an audit log, not something needing
@@ -236,11 +242,24 @@ live via a debug log for an existing, unrelated "Dispute Log" `Form` type
   history if that needs to change). No Zoho lookup resolution at all — unlike
   Workforce Logs' `x_Account`/`Category`/etc., this sends the plain
   `accountId` string directly, no ID/master-list matching needed.
-- `FORM_LINK_NAME` (`'All_Webapp_Api_Requests'`) — **UNVERIFIED against a live
-  write**, assumed same for form and report (unlike `Workforce_RTA_Logs`,
-  which needed correcting once already — see above). If a write here 404s the
-  same way that one did, it needs the same Meta-API form-list cross-check
-  `lib/zohoFieldScan.ts` already does for the other form.
+- `FORM_LINK_NAME` (`'WebApp_API_Requests'`) — **CONFIRMED** via
+  `lib/zohoFieldScan.ts`'s Meta API form-list cross-check (2026-09-24) — the
+  original guess `'All_Webapp_Api_Requests'` was NOT in the app's form list
+  and would have 404'd; the real name has no `All_` prefix and different
+  casing. Every scan re-checks this constant automatically going forward.
+- `category`/`sub_category` (fixed to `"Service Level & Volume Management"` /
+  `"Understaffing Alert"`) — both confirmed to be REAL values in Zoho's own
+  master lists (`wfm_zoho_field_options`, field_name `Category`/
+  `Sub_Categories`, populated by the scan below) — `"Understaffing Alert"`'s
+  `parent_zoho_id` correctly points at `"Service Level & Volume Management"`.
+  Other real sub-categories exist under the same parent that map more
+  precisely to specific breach types (e.g. `"High Abandonment Rate"`,
+  `"SLA Escalation Incident P0/P1 Event"`, `"Queue Surge/Low Queue Alert"`,
+  `"Overstaffing Alert"`) — not used per-breach-type since `BreachRow.metric`
+  is free-form/user-customizable text (KPI labels are editable in Settings),
+  making reliable string-matching to one of these fragile; the single fixed
+  sub-category remains the deliberate scope decision it always was (see
+  chat history if per-breach-type mapping is wanted later).
 - `lib/cliqScan.ts` — per-account gate is just `rta_logs_enabled` (no account
   link requirement, unlike Workforce Logs, since there's no lookup to
   resolve). Cooldown (`wfm_settings.rta_logs_last_sent_at`) reuses the same
