@@ -21,7 +21,14 @@ const ZOHO_AUTH_URL = 'https://accounts.zoho.com/oauth/v2/auth'
 // covers both — re-run this authorize flow (same button in Settings) any
 // time a new scope is added here, since Zoho only grants what was requested
 // at consent time.
-const CLIQ_SCOPE     = 'ZohoCliq.Webhooks.CREATE,ZohoCliq.channels.read,ZohoCreator.report.CREATE,ZohoCreator.report.READ,ZohoCreator.meta.READ'
+// ZohoCreator.form.CREATE is the correct scope for the Add Record API (POSTs
+// to /form/{form_link_name} — used by createWorkforceLogRecord AND
+// createAccountBreachRtaLog/testAccountBreachRtaLog). The previous
+// "ZohoCreator.report.CREATE" here isn't a real Zoho Creator scope — Creator
+// writes only happen via forms, never reports — which is why a live write
+// failed with "invalid oauthscope" (code 2945) even though reads (report.READ)
+// and the Meta API listings (meta.READ) worked fine.
+const CLIQ_SCOPE     = 'ZohoCliq.Webhooks.CREATE,ZohoCliq.channels.read,ZohoCreator.form.CREATE,ZohoCreator.report.READ,ZohoCreator.meta.READ'
 const STATE_COOKIE   = 'zoho_oauth_state'
 
 export async function GET(request: Request) {
