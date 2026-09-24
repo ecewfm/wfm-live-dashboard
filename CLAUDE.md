@@ -213,20 +213,39 @@ and shows up in a later scan.
 
 A SEPARATE Zoho integration from Workforce Logs above — different intake,
 different payload shape, no shared code beyond the same app/owner constants
-and the same `lib/zohoAuth.ts` token (Creator record-create scope on this
-self-client already covers the whole `ece-time-tracker` app, not per-form, so
-no new OAuth scope/re-authorization was needed). Runs in the SAME scan as
-Cliq + Workforce Logs (`lib/cliqScan.ts`) — gated ONLY by its own per-account
-toggle, same "no global switch" posture as Workforce Logs.
+and the same `lib/zohoAuth.ts` token. The first live write attempt
+(2026-09-24, via the "Test Workforce RTA Logs" button) failed with Zoho error
+2945 "invalid oauthscope" — turned out `ZohoCreator.report.CREATE` (the scope
+requested at authorize time) isn't a real Zoho Creator scope; Creator writes
+only ever go through forms, never reports, so the correct scope is
+`ZohoCreator.form.CREATE` — fixed in `app/api/zoho/authorize/route.ts`. A
+re-authorize (the same "Authorize with Zoho" Settings button) was required
+after this fix, since Zoho only grants what was requested at consent time.
+Runs in the SAME scan as Cliq + Workforce Logs (`lib/cliqScan.ts`) — gated
+ONLY by its own per-account toggle, same "no global switch" posture as
+Workforce Logs.
 
 Submits to a generic Zoho-side "webapp request" intake (the
-`All_Webapp_Api_Requests` form, same app) that a Zoho-side Deluge script
-watches, dispatching processing based on a `Form` field's value — confirmed
-live via a debug log for an existing, unrelated "Dispute Log" `Form` type
-(that script fills in `Synced`/`ID`/`Added_Time`/`Function_Notes` itself
-*after* processing a submission — none of those four are ours to set). Our
-`Form` value is `"Workforce RTA Logs"`; the actual payload rides inside a
-`Values_field` string (JSON-encoded).
+`WebApp_API_Requests` form, same app). An existing, unrelated `Form` type in
+this same intake ("Dispute Log") IS processed asynchronously by a Zoho-side
+script that fills in `Synced`/`ID`/`Added_Time`/`Function_Notes` itself after
+the fact — but per the user (2026-09-24), there's no equivalent script for
+OUR `Form` type, so we submit a COMPLETE row ourselves instead of leaving
+those to be filled in later:
+- `Form` = `"Workforce RTA Logs"`
+- `Added_User` = `"wfm_live_dashboard"` (this app's own submitter identity —
+  NOT copied from the Dispute Log example's `"powerbi_ececontactcenters24"`,
+  which is that other integration's own service identity; flag if this
+  should actually match something specific instead)
+- `ID` = a self-generated, distinctly-namespaced string (`wfm-rta-<uuid>`,
+  `generateRequestId()`) — NOT Zoho's own reserved/auto-assigned record ID
+  field (the 19-digit numbers seen elsewhere throughout this app), which
+  can't be set via the API anyway; this is just our own tracking id, kept far
+  from that numeric format so it can never collide with one.
+- `Values_field` = the JSON payload (shape below), JSON-encoded to a string.
+- `Function_Notes` = a plain-text one-line summary of the submission
+  (`buildFunctionNotes()`), so a human scanning the report doesn't have to
+  decode `Values_field`'s JSON to see what it is.
 
 - `lib/zohoWebappRequest.ts` — `createAccountBreachRtaLog(accountId, remarks)`.
   Builds the "Account Wide" shape (one of three `selection_type` variants the

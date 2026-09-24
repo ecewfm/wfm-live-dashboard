@@ -1,15 +1,19 @@
 // lib/zohoWebappRequest.ts
 // Server-side only — submits to the client's generic Zoho "webapp request"
 // intake (the "All_Webapp_Api_Requests" form/report, SAME app as Workforce
-// Logs: ece-time-tracker / ececonsultinggroup — see lib/zohoCreator.ts). A
-// Zoho-side Deluge script watches this intake and dispatches processing based
-// on the `Form` field's value — confirmed live for an existing "Dispute Log"
-// Form type (a completely separate integration, not ours) via a debug log
-// showing it filled in `Synced`/`ID`/`Added_Time`/`Function_Notes` itself
-// AFTER processing a submission — none of those four are ours to set. We only
-// ever write `Form`, `Values_field` (a JSON-encoded string, shape below), and
-// `Added_User` (identifies OUR system as the submitter, mirroring how that
-// existing Dispute Log submission carried its own submitter's name there).
+// Logs: ece-time-tracker / ececonsultinggroup — see lib/zohoCreator.ts).
+//
+// Unlike the "Dispute Log" Form type also seen in this same intake (a
+// completely separate integration, not ours — a Zoho-side script processes
+// THAT one asynchronously and fills in Synced/ID/Added_Time/Function_Notes
+// itself afterward), there's no evidence of an equivalent processing script
+// for our "Workforce RTA Logs" Form type — so per the user (2026-09-24), we
+// submit a COMPLETE row ourselves: `Form`, `Added_User`, `ID` (our own
+// generated identifier — NOT Zoho's reserved record ID field; a distinctly
+// namespaced string so it can never collide with one), `Values_field` (the
+// JSON payload, shape below), and `Function_Notes` (a plain-text summary of
+// what this submission contains, for a human scanning the report to read
+// without having to decode Values_field's JSON).
 //
 // Our Form type is "Workforce RTA Logs" — three selection_type shapes exist
 // (per 3 example JSONs the Zoho programmer sent): "Site Wide" (sites[] only),
@@ -19,9 +23,9 @@
 // use cases outside this app's scope.
 //
 // Uses the SAME stored Zoho refresh token as Cliq/Workforce Logs
-// (lib/zohoAuth.ts) — confirmed no new scope needed: Creator's Add Record
-// API just needs {owner}/{app}/form/{form_link_name}, and record-create scope
-// on this self-client already covers the whole app, not per-form.
+// (lib/zohoAuth.ts) — needs ZohoCreator.form.CREATE scope specifically (the
+// Add Record API writes to a form, never a report — see
+// app/api/zoho/authorize/route.ts for the scope list/history).
 
 import { getZohoAccessToken } from './zohoAuth'
 import { OWNER_NAME, APP_LINK_NAME } from './zohoCreator'
@@ -74,6 +78,26 @@ export interface WebappRequestResult {
   responseBody: any
 }
 
+// A human-readable one-liner describing this submission, written into
+// Function_Notes so anyone scanning the report can tell what it is without
+// decoding Values_field's JSON.
+function buildFunctionNotes(valuesField: WorkforceRtaLogPayload): string {
+  const target = valuesField.selection_type === 'Employees'
+    ? valuesField.employee
+    : [...valuesField.sites, ...valuesField.accounts].join(', ')
+  return `WFM Live Dashboard automated submission — ${valuesField.selection_type} (${target}), `
+    + `${valuesField.category} / ${valuesField.sub_category}. Remarks: ${valuesField.remarks}`
+}
+
+// Our OWN identifier for this submission — Zoho's actual record ID (its
+// reserved, auto-assigned "ID" field, e.g. the 19-digit numbers seen on every
+// other Zoho record throughout this app) is never something we can choose,
+// so this is deliberately namespaced (never purely numeric) to guarantee it
+// can't collide with one.
+function generateRequestId(): string {
+  return `wfm-rta-${crypto.randomUUID()}`
+}
+
 async function submitWebappRequest(valuesField: WorkforceRtaLogPayload): Promise<WebappRequestResult> {
   const token = await getZohoAccessToken()
 
@@ -81,8 +105,10 @@ async function submitWebappRequest(valuesField: WorkforceRtaLogPayload): Promise
   const requestBody = {
     data: {
       Form: FORM_TYPE,
-      Values_field: JSON.stringify(valuesField),
       Added_User: ADDED_USER,
+      ID: generateRequestId(),
+      Values_field: JSON.stringify(valuesField),
+      Function_Notes: buildFunctionNotes(valuesField),
     },
   }
   const res = await fetch(url, {
