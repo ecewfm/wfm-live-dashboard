@@ -28,7 +28,12 @@ const ZOHO_AUTH_URL = 'https://accounts.zoho.com/oauth/v2/auth'
 // writes only happen via forms, never reports — which is why a live write
 // failed with "invalid oauthscope" (code 2945) even though reads (report.READ)
 // and the Meta API listings (meta.READ) worked fine.
-const CLIQ_SCOPE     = 'ZohoCliq.Webhooks.CREATE,ZohoCliq.channels.read,ZohoCreator.form.CREATE,ZohoCreator.report.READ,ZohoCreator.meta.READ'
+// AaaServer.profile.READ lets lib/zohoAuth.ts's getZohoAuthorizedAccountInfo()
+// identify which Zoho account is actually behind the stored token (surfaced
+// in Settings' "Test Workforce RTA Logs" result) — added specifically to
+// debug code 2899 "Permission denied to add record(s)" errors, which depend
+// on the CONSENTING account's own Zoho Creator permissions, not OAuth scope.
+const CLIQ_SCOPE     = 'ZohoCliq.Webhooks.CREATE,ZohoCliq.channels.read,ZohoCreator.form.CREATE,ZohoCreator.report.READ,ZohoCreator.meta.READ,AaaServer.profile.READ'
 const STATE_COOKIE   = 'zoho_oauth_state'
 
 export async function GET(request: Request) {

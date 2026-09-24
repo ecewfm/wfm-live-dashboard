@@ -58,3 +58,28 @@ export async function getZohoAccessToken(): Promise<string> {
   _accessTokenExpiresAt = Date.now() + (data.expires_in || 3600) * 1000
   return _accessToken as string
 }
+
+// ── Identify which Zoho account the stored token actually belongs to ───────
+// Needed because Zoho's permission errors (e.g. code 2899 "Permission denied
+// to add record(s)") depend on the CONSENTING account's own Zoho Creator app
+// permissions, not on OAuth scope — and Zoho gives no account hint anywhere
+// in a failed write's response. This calls Zoho's own identity endpoint so
+// Settings' "Test Workforce RTA Logs" button can show exactly which account
+// is behind the current token, instead of guessing from browser screenshots.
+// Requires the AaaServer.profile.READ scope — added alongside the Creator
+// scopes in app/api/zoho/authorize/route.ts; an older stored token minted
+// before that scope was added will fail this specific call (caught below)
+// without affecting the actual Creator write attempt.
+export async function getZohoAuthorizedAccountInfo(): Promise<{ email: string; displayName: string } | null> {
+  try {
+    const token = await getZohoAccessToken()
+    const res = await fetch('https://accounts.zoho.com/oauth/user/info', {
+      headers: { Authorization: `Zoho-oauthtoken ${token}` },
+    })
+    const data: any = await res.json().catch(() => ({}))
+    if (!res.ok || !data.Email) return null
+    return { email: data.Email, displayName: data.Display_Name || `${data.First_Name || ''} ${data.Last_Name || ''}`.trim() }
+  } catch {
+    return null
+  }
+}

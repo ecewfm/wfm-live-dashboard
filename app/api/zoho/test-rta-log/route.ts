@@ -6,6 +6,7 @@
 // security posture (see the other force-* routes in this same directory).
 
 import { testAccountBreachRtaLog } from '@/lib/zohoWebappRequest'
+import { getZohoAuthorizedAccountInfo } from '@/lib/zohoAuth'
 
 export async function POST(req: Request) {
   let accountId: string | undefined
@@ -20,11 +21,20 @@ export async function POST(req: Request) {
     return Response.json({ error: 'accountId is required' }, { status: 400 })
   }
 
-  try {
-    const result = await testAccountBreachRtaLog(accountId)
-    return Response.json(result)
-  } catch (e: any) {
-    console.error('[zoho/test-rta-log] failed:', e)
-    return Response.json({ error: e.message }, { status: 500 })
+  // Runs alongside the actual write attempt (not blocking it) — identifies
+  // which Zoho account the stored token belongs to, so a permission error
+  // (code 2899) can be diagnosed without guessing from browser screenshots.
+  // Soft-fails to null (e.g. token minted before AaaServer.profile.READ was
+  // added to the scope list) without affecting the write attempt itself.
+  const [result, authorizedAs] = await Promise.all([
+    testAccountBreachRtaLog(accountId).catch((e: any) => ({ __threw: true, message: e.message })),
+    getZohoAuthorizedAccountInfo(),
+  ])
+
+  if (result && (result as any).__threw) {
+    console.error('[zoho/test-rta-log] failed:', (result as any).message)
+    return Response.json({ error: (result as any).message, authorizedAs }, { status: 500 })
   }
+
+  return Response.json({ ...result, authorizedAs })
 }

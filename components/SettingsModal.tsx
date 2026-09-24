@@ -1725,6 +1725,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [fieldOptionsRefresh, setFieldOptionsRefresh] = useState(0)
   const [rtaTesting, setRtaTesting]   = useState(false)
   const [rtaTestOkAt, setRtaTestOkAt] = useState<string | null>(null)
+  const [rtaTestAuthorizedAs, setRtaTestAuthorizedAs] = useState<{ email: string; displayName: string } | null>(null)
   const [rtaTestError, setRtaTestError] = useState<{
     message: string; status?: number; requestUrl?: string; requestBody?: any; responseBody?: any
   } | null>(null)
@@ -1770,6 +1771,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const handleTestRtaLog = async () => {
     setRtaTesting(true)
     setRtaTestOkAt(null)
+    setRtaTestAuthorizedAs(null)
     setRtaTestError(null)
     try {
       const res  = await fetch('/api/zoho/test-rta-log', {
@@ -1778,6 +1780,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
         body: JSON.stringify({ accountId }),
       })
       const data = await res.json()
+      setRtaTestAuthorizedAs(data.authorizedAs ?? null)
       if (!res.ok || data.error) {
         setRtaTestError({ message: data.error || `Request failed (HTTP ${res.status})`, status: res.status })
       } else if (!data.ok) {
@@ -2279,6 +2282,11 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     Zoho accepted the submission at {rtaTestOkAt} — go check the Workforce RTA Logs list.
                   </div>
                 )}
+                {(rtaTestOkAt || rtaTestError) && (
+                  <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
+                    Authorized Zoho account: <strong>{rtaTestAuthorizedAs ? `${rtaTestAuthorizedAs.displayName} <${rtaTestAuthorizedAs.email}>` : 'Unknown (could not read identity — token may predate the profile-read scope; re-authorize to pick it up)'}</strong>
+                  </div>
+                )}
 
                 <div className="sm-section-title" style={{ marginTop: 20 }}>SCAN ZOHO FIELD OPTIONS</div>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
@@ -2359,6 +2367,10 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             </div>
             <div className="sm-err-body">
               <p style={{ margin: '0 0 12px', fontSize: 13 }}>{rtaTestError.message}</p>
+              <div className="sm-err-row">
+                <strong>Authorized Zoho account:</strong>{' '}
+                {rtaTestAuthorizedAs ? `${rtaTestAuthorizedAs.displayName} <${rtaTestAuthorizedAs.email}>` : 'Unknown (could not read identity — re-authorize to pick up the profile-read scope)'}
+              </div>
               {rtaTestError.status != null && (
                 <div className="sm-err-row"><strong>HTTP Status:</strong> {rtaTestError.status}</div>
               )}
