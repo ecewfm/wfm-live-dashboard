@@ -603,7 +603,7 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
             onClick={e => { e.stopPropagation(); onRemove() }} style={{ fontSize: 12, cursor: 'pointer' }} />}
         </div>
       </div>
-      <div style={{ padding: '6px 10px', fontSize: 12, fontWeight: 600,
+      <div title={value || undefined} style={{ padding: '6px 10px', fontSize: 12, fontWeight: 600,
         color: value ? color : 'var(--text-muted,#687d75)',
         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         background: value ? `${color}12` : 'transparent' }}>
@@ -736,6 +736,7 @@ const DsPreviewTable = React.memo(({ rows, mappedCols, hasActiveSlot, onMap }: {
             <tr key={ri} style={{ background: ri%2===0 ? 'transparent' : 'rgba(0,0,0,0.02)' }}>
               {cols.map(col => (
                 <td key={col} onClick={() => hasActiveSlot && onMap(col)}
+                  title={String(row[col] ?? '')}
                   style={{ padding:'5px 10px', borderBottom:'1px solid var(--border,#e1e6e4)',
                     cursor: hasActiveSlot ? 'pointer' : 'default', color:'var(--text-main)',
                     maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
@@ -1401,6 +1402,7 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                           const hi = cellColor(row, c, ri)
                           return (
                             <td key={c} className="ds-td"
+                              title={String(row[c] ?? '')}
                               style={{ cursor: activeCell ? 'pointer' : 'default', background: hi ? `${hi}22` : undefined, outline: hi ? `2px solid ${hi}` : 'none' }}
                               onClick={() => activeCell && pickCell(row, c)}>
                               {String(row[c] ?? '')}
