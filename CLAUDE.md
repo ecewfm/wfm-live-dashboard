@@ -153,16 +153,13 @@ No env vars for any of this — none of it is a secret, so it's all plain
 constants at the top of `lib/zohoCreator.ts`/`lib/zohoFieldScan.ts`:
 - `OWNER_NAME` (`ececonsultinggroup`), `APP_LINK_NAME` (`ece-time-tracker`) —
   known from the client's own app URL.
-- `FORM_LINK_NAME` (`lib/zohoCreator.ts`) — **best guess, needs confirming.**
+- `FORM_LINK_NAME` (`lib/zohoCreator.ts`) — **CONFIRMED**, no longer a guess.
   The Creator Add-Record API writes to a *form*, not the
   `All_Workforce_Logs_RTA_View` *report* the client linked (forms are for
-  submitting data, reports are filtered views of it). Currently set to
-  `'Workforce_Logs'`, guessed from Zoho's own naming convention (a default
-  report is auto-named `All_<FormName>`, and this one has an extra
-  `_RTA_View` suffix on top of that pattern). Confirm/fix by opening the
-  Forms panel in the `ece-time-tracker` builder and checking the link name
-  in the URL bar (same `#Form:xxx`/`#Report:xxx` pattern already seen for
-  the report link).
+  submitting data, reports are filtered views of it). Set to
+  `'Workforce_RTA_Logs'` — confirmed via the field-scan feature below's Meta
+  API cross-check (the app's actual form list includes `Workforce_RTA_Logs`,
+  a near-exact match for the report name, just reordered).
 
 Status on every auto-created record is hardcoded `Resolved` (client's explicit
 choice — these are being treated as an audit log, not something needing
@@ -205,3 +202,65 @@ A brand-new account/category/site that's never appeared in an existing Zoho
 record won't show up as a suggestion — the combobox's free-text fallback
 covers that case (stored as `_text`, no `_id`) until it's been written once
 and shows up in a later scan.
+
+## Zoho "Workforce RTA Logs" webapp-request reporting
+
+A SEPARATE Zoho integration from Workforce Logs above — different intake,
+different payload shape, no shared code beyond the same app/owner constants
+and the same `lib/zohoAuth.ts` token (Creator record-create scope on this
+self-client already covers the whole `ece-time-tracker` app, not per-form, so
+no new OAuth scope/re-authorization was needed). Runs in the SAME scan as
+Cliq + Workforce Logs (`lib/cliqScan.ts`) — gated ONLY by its own per-account
+toggle, same "no global switch" posture as Workforce Logs.
+
+Submits to a generic Zoho-side "webapp request" intake (the
+`All_Webapp_Api_Requests` form, same app) that a Zoho-side Deluge script
+watches, dispatching processing based on a `Form` field's value — confirmed
+live via a debug log for an existing, unrelated "Dispute Log" `Form` type
+(that script fills in `Synced`/`ID`/`Added_Time`/`Function_Notes` itself
+*after* processing a submission — none of those four are ours to set). Our
+`Form` value is `"Workforce RTA Logs"`; the actual payload rides inside a
+`Values_field` string (JSON-encoded).
+
+- `lib/zohoWebappRequest.ts` — `createAccountBreachRtaLog(accountId, remarks)`.
+  Builds the "Account Wide" shape (one of three `selection_type` variants the
+  Zoho programmer's example JSONs showed — "Site Wide"/"Employees" are for
+  different, non-breach use cases and aren't implemented here):
+  `{ selection_type: "Account Wide", sites: [], accounts: [accountId],
+  employee: "", category, sub_category, remarks, url_link: "",
+  recommendation: "", status: "Pending", requested_by:
+  "rta@ececontactcenters.com" }`. `category`/`sub_category` are FIXED to
+  `"Service Level & Volume Management"` / `"Understaffing Alert"` for every
+  report regardless of the underlying breach type (SLA, queue, agent-status,
+  etc.) — an explicit scope decision, not a per-breach-type mapping (see chat
+  history if that needs to change). No Zoho lookup resolution at all — unlike
+  Workforce Logs' `x_Account`/`Category`/etc., this sends the plain
+  `accountId` string directly, no ID/master-list matching needed.
+- `FORM_LINK_NAME` (`'All_Webapp_Api_Requests'`) — **UNVERIFIED against a live
+  write**, assumed same for form and report (unlike `Workforce_RTA_Logs`,
+  which needed correcting once already — see above). If a write here 404s the
+  same way that one did, it needs the same Meta-API form-list cross-check
+  `lib/zohoFieldScan.ts` already does for the other form.
+- `lib/cliqScan.ts` — per-account gate is just `rta_logs_enabled` (no account
+  link requirement, unlike Workforce Logs, since there's no lookup to
+  resolve). Cooldown (`wfm_settings.rta_logs_last_sent_at`) reuses the same
+  global "Re-alert Frequency" setting as Cliq/Workforce Logs. `remarks` is the
+  exact same `BreachRow[] -> text` formatting (`formatWorkforceLogRemarks`)
+  Workforce Logs already uses — one shared formatter, two different Zoho
+  destinations.
+- `sql/zoho_rta_logs.sql` — adds `rta_logs_enabled` + `rta_logs_last_sent_at`
+  to `wfm_settings`.
+- Settings UI: Settings → **Zoho Integrations** tab → "WORKFORCE RTA LOGS —
+  {account}" section, below Workforce Logs Reporting. Just a checkbox — no
+  lookup comboboxes, since category/sub_category are fixed constants and the
+  account is sent as a plain string.
+- **"Test Workforce RTA Logs" button** — same section, always visible
+  (independent of the enable toggle). No Zoho sandbox exists for this intake,
+  so this sends a REAL submission tagged `[TEST]` in its remarks (safe to
+  delete in Zoho afterward) via `testAccountBreachRtaLog()` in
+  `lib/zohoWebappRequest.ts` → `POST /api/zoho/test-rta-log`. On success shows
+  an inline confirmation; on failure (bad token, Zoho rejecting the payload,
+  wrong `FORM_LINK_NAME`, etc.) opens a popup showing the HTTP status, the
+  exact request payload sent, and Zoho's raw response body — this is the
+  fastest way to confirm/fix the still-unverified `FORM_LINK_NAME` guess above
+  without digging through Vercel logs.

@@ -53,6 +53,49 @@ const MODAL_STYLES = `
     to   { opacity: 1; transform: scale(1) translateY(0); }
   }
   .dark .sm-modal { background: #252525; border-color: #333333; }
+  .sm-err-overlay {
+    position: fixed !important;
+    top: 0 !important; left: 0 !important;
+    right: 0 !important; bottom: 0 !important;
+    z-index: 100000 !important;
+    background: rgba(0,0,0,0.65);
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .sm-err-modal {
+    background: var(--bg-card, #ffffff);
+    border: 1px solid var(--border, #e1e6e4);
+    border-radius: 12px;
+    width: 100%; max-width: 620px;
+    max-height: 85vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.45);
+    overflow: hidden;
+    animation: sm-appear 0.18s ease-out;
+    font-family: var(--font-sans, 'Poppins', Arial, sans-serif);
+  }
+  .dark .sm-err-modal { background: #252525; border-color: #333333; }
+  .sm-err-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px;
+    background: linear-gradient(135deg, #b0413e 0%, #7a2b28 100%);
+    flex-shrink: 0;
+  }
+  .sm-err-title { font-size: 14.5px; font-weight: 700; color: #fff; }
+  .sm-err-body { padding: 18px 20px; overflow-y: auto; color: var(--text-main); }
+  .sm-err-row { font-size: 12.5px; margin-bottom: 4px; word-break: break-all; }
+  .sm-err-pre {
+    margin: 6px 0 0; padding: 10px; max-height: 220px; overflow: auto;
+    background: var(--bg-body,#f0f2f1); border: 1px solid var(--border,#e1e6e4);
+    border-radius: 6px; font-size: 11.5px; line-height: 1.5; white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .sm-err-footer {
+    display: flex; justify-content: flex-end;
+    padding: 14px 20px; border-top: 1px solid var(--border,#e1e6e4); flex-shrink: 0;
+  }
   .sm-header {
     display: flex; align-items: center; justify-content: space-between;
     padding: 18px 24px;
@@ -261,9 +304,10 @@ interface Props {
   cliqChannel:       string               // this account's Cliq channel unique name ('' = alerts off)
   cliqGlobalSettings: CliqGlobalSettings   // shared across every account
   wfLogsEnabled:     boolean              // this account's Zoho Workforce Logs reporting toggle
+  rtaLogsEnabled:    boolean              // this account's Zoho "Workforce RTA Logs" webapp-request toggle (a DIFFERENT Zoho intake — see lib/zohoWebappRequest.ts)
   zohoLookups:       ZohoLookups          // this account's x_Account/Category/Sub_Categories/Site picks
   alarmSound:        string               // this account's Overview-card breach alarm sound ('' = silent)
-  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string) => void
+  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean) => void
   onSaveCliqGlobal: (settings: CliqGlobalSettings) => void
   onAccountsChange: () => void           // called after add/remove
   onConfigureAccount: (id: string) => void  // switch active account + go to Data Sources
@@ -1663,7 +1707,7 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, 
 }
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
@@ -1673,11 +1717,17 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [cliqScanning, setCliqScanning] = useState(false)
   const [cliqScanLog, setCliqScanLog]   = useState<string[] | null>(null)
   const [wfLogsOn, setWfLogsOn]         = useState(wfLogsEnabled)
+  const [rtaLogsOn, setRtaLogsOn]       = useState(rtaLogsEnabled)
   const [zohoLu, setZohoLu]             = useState<ZohoLookups>(JSON.parse(JSON.stringify(zohoLookups)))
   const [alarmSnd, setAlarmSnd]         = useState(alarmSound || 'none')
   const [fieldScanning, setFieldScanning] = useState(false)
   const [fieldScanLog, setFieldScanLog]   = useState<string[] | null>(null)
   const [fieldOptionsRefresh, setFieldOptionsRefresh] = useState(0)
+  const [rtaTesting, setRtaTesting]   = useState(false)
+  const [rtaTestOkAt, setRtaTestOkAt] = useState<string | null>(null)
+  const [rtaTestError, setRtaTestError] = useState<{
+    message: string; status?: number; requestUrl?: string; requestBody?: any; responseBody?: any
+  } | null>(null)
 
   // ── Force an immediate Cliq scan (bypasses cooldown, not staleness) ─────────
   const handleForceScan = async () => {
@@ -1712,6 +1762,37 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       setFieldScanLog([`Request failed: ${e.message}`])
     }
     setFieldScanning(false)
+  }
+
+  // ── Test the Workforce RTA Logs payload against Zoho for real (no sandbox
+  // exists for this intake) — surfaces success inline, and a full request/
+  // response breakdown in a popup on failure ─────────────────────────────────
+  const handleTestRtaLog = async () => {
+    setRtaTesting(true)
+    setRtaTestOkAt(null)
+    setRtaTestError(null)
+    try {
+      const res  = await fetch('/api/zoho/test-rta-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId }),
+      })
+      const data = await res.json()
+      if (!res.ok || data.error) {
+        setRtaTestError({ message: data.error || `Request failed (HTTP ${res.status})`, status: res.status })
+      } else if (!data.ok) {
+        setRtaTestError({
+          message: 'Zoho rejected the submission — see details below.',
+          status: data.status, requestUrl: data.requestUrl,
+          requestBody: data.requestBody, responseBody: data.responseBody,
+        })
+      } else {
+        setRtaTestOkAt(new Date().toLocaleString())
+      }
+    } catch (e: any) {
+      setRtaTestError({ message: `Request failed: ${e.message}` })
+    }
+    setRtaTesting(false)
   }
 
   // ── Dynamic status discovery ────────────────────────────────────────────────
@@ -2164,6 +2245,41 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   hint="Optional — leave blank to not set Site on this account's records."
                   value={zohoLu.site} onChange={v => setZohoLu(prev => ({ ...prev, site: v }))} />
 
+                <div className="sm-section-title" style={{ marginTop: 20 }}>WORKFORCE RTA LOGS — {accountId}</div>
+                <p className="sm-desc" style={{ marginBottom: 10 }}>
+                  A SEPARATE Zoho intake from Workforce Logs above — submits a &quot;Workforce RTA
+                  Logs&quot; webapp request (account-wide, category fixed to Service Level &amp; Volume
+                  Management / Understaffing Alert) instead of a Workforce Logs record. No lookup
+                  fields to configure — just the account&apos;s own id and a plain-text breach summary.
+                </p>
+                <table className="sm-table">
+                  <tbody>
+                    <tr>
+                      <td><div className="sm-metric">Enable Workforce RTA Logs Reporting</div><div className="sm-metric-sub">Submits a Workforce RTA Logs webapp request for this account&apos;s breaches</div></td>
+                      <td style={{ textAlign: 'center' }}>
+                        <input type="checkbox" checked={rtaLogsOn}
+                          onChange={() => setRtaLogsOn(prev => !prev)} />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p className="sm-desc" style={{ marginTop: 10, marginBottom: 10 }}>
+                  There&apos;s no Zoho sandbox for this intake, so the button below sends a real,
+                  clearly-tagged <code>[TEST]</code> submission for <strong>{accountId}</strong> — check
+                  Zoho&apos;s own list to confirm it arrived (safe to delete it there afterward).
+                </p>
+                <button type="button" className="acc-btn acc-btn-cfg" disabled={rtaTesting}
+                  style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleTestRtaLog}>
+                  <i className={`bx ${rtaTesting ? 'bx-loader-alt bx-spin' : 'bx-send'}`} style={{ marginRight: 6 }} />
+                  {rtaTesting ? 'Sending...' : 'Test Workforce RTA Logs'}
+                </button>
+                {rtaTestOkAt && (
+                  <div style={{ marginTop: 10, fontSize: 12.5, color: '#2f9e5b', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <i className="bx bx-check-circle" style={{ fontSize: 16 }} />
+                    Zoho accepted the submission at {rtaTestOkAt} — go check the Workforce RTA Logs list.
+                  </div>
+                )}
+
                 <div className="sm-section-title" style={{ marginTop: 20 }}>SCAN ZOHO FIELD OPTIONS</div>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
                   Scans every existing record in Zoho&apos;s Workforce Logs report to refresh the
@@ -2189,10 +2305,10 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
 
                 <div className="sm-section-title" style={{ marginTop: 20 }}>FORCE BREACH SCAN</div>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
-                  Runs the breach scan (Cliq alert + Workforce Logs record) immediately instead of
-                  waiting for the next scheduled minute — bypasses the cooldown above, but not the
-                  staleness suppression (an account whose data hasn&apos;t updated recently still
-                  won&apos;t send).
+                  Runs the breach scan (Cliq alert + Workforce Logs record + Workforce RTA Logs
+                  request) immediately instead of waiting for the next scheduled minute — bypasses
+                  the cooldown above, but not the staleness suppression (an account whose data
+                  hasn&apos;t updated recently still won&apos;t send).
                 </p>
                 <button type="button" className="acc-btn acc-btn-cfg" disabled={cliqScanning}
                   style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleForceScan}>
@@ -2222,7 +2338,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd); onSaveCliqGlobal(cliqGlobal); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>
@@ -2230,6 +2346,44 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
 
         </div>
       </div>
+
+      {rtaTestError && (
+        <div className="sm-err-overlay" onMouseDown={e => { if (e.target === e.currentTarget) setRtaTestError(null) }}>
+          <div className="sm-err-modal">
+            <div className="sm-err-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <i className="bx bx-error-circle" style={{ fontSize: 22, color: '#d9534f' }} />
+                <span className="sm-err-title">Workforce RTA Logs test failed</span>
+              </div>
+              <button className="sm-close" onClick={() => setRtaTestError(null)}><i className="bx bx-x" /></button>
+            </div>
+            <div className="sm-err-body">
+              <p style={{ margin: '0 0 12px', fontSize: 13 }}>{rtaTestError.message}</p>
+              {rtaTestError.status != null && (
+                <div className="sm-err-row"><strong>HTTP Status:</strong> {rtaTestError.status}</div>
+              )}
+              {rtaTestError.requestUrl && (
+                <div className="sm-err-row"><strong>Request URL:</strong> {rtaTestError.requestUrl}</div>
+              )}
+              {rtaTestError.requestBody && (
+                <>
+                  <div className="sm-err-row" style={{ marginTop: 10 }}><strong>Request Payload:</strong></div>
+                  <pre className="sm-err-pre">{JSON.stringify(rtaTestError.requestBody, null, 2)}</pre>
+                </>
+              )}
+              {rtaTestError.responseBody && (
+                <>
+                  <div className="sm-err-row" style={{ marginTop: 10 }}><strong>Zoho Response:</strong></div>
+                  <pre className="sm-err-pre">{JSON.stringify(rtaTestError.responseBody, null, 2)}</pre>
+                </>
+              )}
+            </div>
+            <div className="sm-err-footer">
+              <button className="sm-btn-cancel" onClick={() => setRtaTestError(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }

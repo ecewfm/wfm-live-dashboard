@@ -28,6 +28,7 @@ export interface AccountSettings {
   headerColors: HeaderColors
   cliqChannel: string
   wfLogsEnabled: boolean
+  rtaLogsEnabled: boolean
   zohoLookups: ZohoLookups
   alarmSound: string
 }
@@ -41,6 +42,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
       .select(`
         kpi_thresholds, status_thresholds, data_source, dashboard_layout,
         header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
+        rta_logs_enabled,
         zoho_account_name, zoho_account_id,
         zoho_category_text, zoho_category_id,
         zoho_subcategory_text, zoho_subcategory_id,
@@ -49,8 +51,8 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
       .eq('id', accountId)
       .maybeSingle()
 
-    // Each retry step drops the newest-added columns first (alarm_sound,
-    // then zoho_*/wf_logs_enabled) — PostgREST errors the WHOLE select on
+    // Each retry step drops the newest-added columns first (alarm_sound and
+    // rta_logs_enabled, then zoho_*/wf_logs_enabled) — PostgREST errors the WHOLE select on
     // any one unknown column, so an account whose migrations haven't all
     // been run yet still gets everything that DOES exist, rather than
     // falling straight to the localStorage-only fallback below.
@@ -113,6 +115,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
                   : localColors,
         cliqChannel: data.cliq_channel || '',
         wfLogsEnabled: !!(data as any).wf_logs_enabled,
+        rtaLogsEnabled: !!(data as any).rta_logs_enabled,
         zohoLookups: {
           account:     { id: (data as any).zoho_account_id     || '', text: (data as any).zoho_account_name    || '' },
           category:    { id: (data as any).zoho_category_id    || '', text: (data as any).zoho_category_text   || '' },
@@ -139,6 +142,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     headerColors: loadHeaderColorsLocal(accountId),
     cliqChannel: '',
     wfLogsEnabled: false,
+    rtaLogsEnabled: false,
     zohoLookups: { ...DEFAULT_ZOHO_LOOKUPS },
     alarmSound: '',
   }
@@ -281,7 +285,8 @@ export async function saveSettings(
   cliqChannel: string = '',
   wfLogsEnabled: boolean = false,
   zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS,
-  alarmSound: string = ''
+  alarmSound: string = '',
+  rtaLogsEnabled: boolean = false
 ): Promise<boolean> {
   // 1. Always write to localStorage immediately (instant, works offline)
   saveKpiThresholds(accountId, kpi)
@@ -309,10 +314,11 @@ export async function saveSettings(
         zoho_site_text:        zohoLookups.site.text,
         zoho_site_id:          zohoLookups.site.id,
         alarm_sound:           alarmSound,
+        rta_logs_enabled:      rtaLogsEnabled,
         updated_at:            new Date().toISOString(),
       })
-    // Each retry step drops the newest-added columns first (alarm_sound,
-    // then zoho_*/wf_logs_enabled) — PostgREST rejects the WHOLE upsert on
+    // Each retry step drops the newest-added columns first (alarm_sound and
+    // rta_logs_enabled, then zoho_*/wf_logs_enabled) — PostgREST rejects the WHOLE upsert on
     // any one unknown column, so an account whose migrations haven't all
     // been run yet still saves everything that DOES exist.
     if (error) {

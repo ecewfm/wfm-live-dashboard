@@ -7,11 +7,14 @@
 // config the Settings modal edits — there is only one implementation of
 // "what counts as a breach", never a second copy to drift out of sync.
 //
-// Two independent per-account outputs can fire off the same detected
+// Three independent per-account outputs can fire off the same detected
 // breaches: a Zoho Cliq channel message (gated by the global Cliq
-// enable toggle + a per-account channel), and a Zoho Creator "Workforce
+// enable toggle + a per-account channel), a Zoho Creator "Workforce
 // Logs" record (gated ONLY by a per-account toggle — no separate global
-// switch was asked for). An account can have either, both, or neither.
+// switch was asked for), and a "Workforce RTA Logs" webapp-request
+// submission (lib/zohoWebappRequest.ts — a DIFFERENT Zoho intake/form from
+// Workforce Logs, also gated only by its own per-account toggle). An
+// account can have any combination of the three, or none.
 //
 // Migrated from an older Google Apps Script tool's CliqNotifier.gs (per-
 // account cooldown, staleness suppression, [TEST]-prefixed messages) — same
@@ -23,6 +26,7 @@ import { buildBreaches, mostRecentUpdatedAt, type BreachRow } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
+import { createAccountBreachRtaLog } from './zohoWebappRequest'
 import type { AccountData, AgentSource, DataSourceConfig, Thresholds } from './types'
 import type { StatusThresholds } from './utils'
 
@@ -120,6 +124,8 @@ interface AccountSettingsRow {
   zoho_site_text: string | null
   zoho_site_id: string | null
   wf_logs_last_sent_at: string | null
+  rta_logs_enabled: boolean | null
+  rta_logs_last_sent_at: string | null
 }
 
 export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<ScanResult> {
@@ -148,6 +154,7 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
     .select(`
       id, data_source, kpi_thresholds, status_thresholds, cliq_channel, cliq_last_sent_at,
       wf_logs_enabled, wf_logs_last_sent_at,
+      rta_logs_enabled, rta_logs_last_sent_at,
       zoho_account_name, zoho_account_id,
       zoho_category_text, zoho_category_id,
       zoho_subcategory_text, zoho_subcategory_id,
@@ -161,11 +168,12 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
 
   const qualifying = ((accounts as any[]) ?? []).filter((a): a is AccountSettingsRow => {
     if (!a.data_source) return false
-    const wantsCliq   = globalSettings.enabled && !!a.cliq_channel
-    const wantsWfLogs = !!a.wf_logs_enabled && !!(a.zoho_account_id || a.zoho_account_name)
-    return wantsCliq || wantsWfLogs
+    const wantsCliq    = globalSettings.enabled && !!a.cliq_channel
+    const wantsWfLogs  = !!a.wf_logs_enabled && !!(a.zoho_account_id || a.zoho_account_name)
+    const wantsRtaLogs = !!a.rta_logs_enabled
+    return wantsCliq || wantsWfLogs || wantsRtaLogs
   })
-  l(`${(accounts ?? []).length} account(s) total, ${qualifying.length} qualifying (Cliq and/or Workforce Logs).`)
+  l(`${(accounts ?? []).length} account(s) total, ${qualifying.length} qualifying (Cliq and/or Workforce Logs and/or RTA Logs).`)
 
   for (const acc of qualifying) {
     try {
@@ -255,6 +263,27 @@ async function processAccount(
       }
     } else {
       l(`${accountId}: Workforce Logs within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
+    }
+  }
+
+  // ── "Workforce RTA Logs" webapp-request submission ──────────────────────
+  // A DIFFERENT Zoho intake from Workforce Logs above (lib/zohoWebappRequest.ts)
+  // — no Zoho account lookup needed, just the raw accountId string, so this
+  // only needs its own toggle to qualify (no hasAccountLink requirement).
+  if (acc.rta_logs_enabled) {
+    const lastSent = acc.rta_logs_last_sent_at ? new Date(acc.rta_logs_last_sent_at).getTime() : 0
+    if (forceSend || Date.now() - lastSent >= cooldownMs) {
+      try {
+        const remarks = formatWorkforceLogRemarks(accountId, breaches)
+        await createAccountBreachRtaLog(accountId, remarks)
+        l(`${accountId}: RTA Log webapp request submitted.`)
+        updates.rta_logs_last_sent_at = new Date().toISOString()
+        didAnything = true
+      } catch (e: any) {
+        l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
+      }
+    } else {
+      l(`${accountId}: RTA Logs within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
     }
   }
 

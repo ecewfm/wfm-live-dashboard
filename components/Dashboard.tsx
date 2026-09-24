@@ -109,6 +109,7 @@ export default function Dashboard() {
   const [headerColors, setHeaderColors]         = useState<Record<string, HeaderColors>>({})
   const [cliqChannels, setCliqChannels]         = useState<Record<string, string>>({})
   const [wfLogsEnabledMap, setWfLogsEnabledMap] = useState<Record<string, boolean>>({})
+  const [rtaLogsEnabledMap, setRtaLogsEnabledMap] = useState<Record<string, boolean>>({})
   const [zohoLookupsMap, setZohoLookupsMap]     = useState<Record<string, ZohoLookups>>({})
   const [alarmSounds, setAlarmSounds]           = useState<Record<string, string>>({})
   const [cliqGlobal, setCliqGlobal]             = useState<CliqGlobalSettings>(DEFAULT_CLIQ_GLOBAL_SETTINGS)
@@ -283,6 +284,7 @@ export default function Dashboard() {
       const colorMap: Record<string, HeaderColors>      = {}
       const cliqChanMap: Record<string, string>         = {}
       const wfLogsMap: Record<string, boolean>          = {}
+      const rtaLogsMap: Record<string, boolean>         = {}
       const zohoLuMap: Record<string, ZohoLookups>      = {}
       const alarmMap: Record<string, string>            = {}
       ids.forEach(id => {
@@ -293,6 +295,7 @@ export default function Dashboard() {
         colorMap[id]    = allSettings[id].headerColors
         cliqChanMap[id] = allSettings[id].cliqChannel
         wfLogsMap[id]   = allSettings[id].wfLogsEnabled
+        rtaLogsMap[id]  = allSettings[id].rtaLogsEnabled
         zohoLuMap[id]   = allSettings[id].zohoLookups
         alarmMap[id]    = allSettings[id].alarmSound
       })
@@ -303,6 +306,7 @@ export default function Dashboard() {
       setHeaderColors(colorMap)
       setCliqChannels(cliqChanMap)
       setWfLogsEnabledMap(wfLogsMap)
+      setRtaLogsEnabledMap(rtaLogsMap)
       setZohoLookupsMap(zohoLuMap)
       setAlarmSounds(alarmMap)
       loadCliqSettings().then(setCliqGlobal)
@@ -476,7 +480,7 @@ export default function Dashboard() {
   const handleSaveSettings = async (
     kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string,
     wfLogsEnabled: boolean = false, zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS,
-    alarmSound: string = ''
+    alarmSound: string = '', rtaLogsEnabled: boolean = false
   ) => {
     // Update local state immediately (instant UI feedback)
     setKpiThresholds(prev => ({ ...prev, [currentAccount]: kpi }))
@@ -484,12 +488,13 @@ export default function Dashboard() {
     setDataSources(prev => ({ ...prev, [currentAccount]: ds }))
     setCliqChannels(prev => ({ ...prev, [currentAccount]: cliqChannel }))
     setWfLogsEnabledMap(prev => ({ ...prev, [currentAccount]: wfLogsEnabled }))
+    setRtaLogsEnabledMap(prev => ({ ...prev, [currentAccount]: rtaLogsEnabled }))
     setZohoLookupsMap(prev => ({ ...prev, [currentAccount]: zohoLookups }))
     setAlarmSounds(prev => ({ ...prev, [currentAccount]: alarmSound }))
     // Re-fetch with new data source
     fetchAccount(currentAccount, ds)
     // Persist to Supabase (shared) + localStorage (cache)
-    await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups, alarmSound)
+    await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups, alarmSound, rtaLogsEnabled)
   }
 
   // ── Save one account's Overview header colors — instant, like layout drag ──
@@ -532,6 +537,7 @@ export default function Dashboard() {
           cliqChannel={cliqChannels[currentAccount] ?? ''}
           cliqGlobalSettings={cliqGlobal}
           wfLogsEnabled={wfLogsEnabledMap[currentAccount] ?? false}
+          rtaLogsEnabled={rtaLogsEnabledMap[currentAccount] ?? false}
           zohoLookups={zohoLookupsMap[currentAccount] ?? DEFAULT_ZOHO_LOOKUPS}
           alarmSound={alarmSounds[currentAccount] ?? ''}
           onSave={handleSaveSettings}
@@ -558,6 +564,7 @@ export default function Dashboard() {
               setHeaderColors(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].headerColors }); return n })
               setCliqChannels(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].cliqChannel }); return n })
               setWfLogsEnabledMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].wfLogsEnabled }); return n })
+              setRtaLogsEnabledMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].rtaLogsEnabled }); return n })
               setZohoLookupsMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].zohoLookups }); return n })
               setAlarmSounds(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].alarmSound }); return n })
             }
