@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
@@ -695,16 +695,59 @@ const AddSlotCard = React.memo(({ onClick }: { onClick: () => void }) => (
   </div>
 ))
 
+// ── Shared sort comparator for preview tables ────────────────────────────────
+// Numeric-aware: if both values parse as numbers, compares numerically (so
+// "9" sorts before "10"); otherwise falls back to a case-insensitive string
+// compare. Blank/nullish values always sort last, in either direction, so a
+// column with mostly-empty values doesn't scatter its few real entries
+// throughout the sort.
+function comparePreviewValues(a: unknown, b: unknown): number {
+  const av = a ?? '', bv = b ?? ''
+  const aBlank = String(av).trim() === '', bBlank = String(bv).trim() === ''
+  if (aBlank && bBlank) return 0
+  if (aBlank) return 1
+  if (bBlank) return -1
+  const an = parseFloat(String(av).replace(/,/g, '')), bn = parseFloat(String(bv).replace(/,/g, ''))
+  if (!isNaN(an) && !isNaN(bn)) return an - bn
+  return String(av).localeCompare(String(bv), undefined, { sensitivity: 'base' })
+}
+
+function SortArrow({ dir }: { dir: 'asc' | 'desc' }) {
+  return <i className={`bx bx-chevron-${dir === 'asc' ? 'up' : 'down'}`} style={{ fontSize: 12, marginLeft: 3 }} />
+}
+
 const DsPreviewTable = React.memo(({ rows, mappedCols, hasActiveSlot, onMap }: {
   rows: Record<string, any>[]; mappedCols: Record<string, string>
   hasActiveSlot: boolean; onMap: (col: string) => void
 }) => {
+  // Hooks must run unconditionally (before the early "no rows" return below).
+  const [sortCol, setSortCol] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+
+  const sortedRows = useMemo(() => {
+    if (!sortCol || !rows.length) return rows
+    const copy = [...rows]
+    copy.sort((r1, r2) => {
+      const cmp = comparePreviewValues(r1[sortCol], r2[sortCol])
+      return sortDir === 'asc' ? cmp : -cmp
+    })
+    return copy
+  }, [rows, sortCol, sortDir])
+
   if (!rows.length) return (
     <div style={{ padding:'16px 24px', fontSize:12, color:'var(--text-muted)', textAlign:'center' }}>
       No preview data — table may be empty
     </div>
   )
   const cols = Object.keys(rows[0])
+  // A slot being actively placed takes priority — header click maps the
+  // column, same as before. Only sort when nothing is being placed, so
+  // there's no ambiguity about what a header click does at any given moment.
+  const headerClick = (col: string) => {
+    if (hasActiveSlot) { onMap(col); return }
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortCol(col); setSortDir('asc') }
+  }
   return (
     <div style={{ overflowX:'auto', overflowY:'auto', maxHeight:200, fontSize:11 }}>
       <table style={{ borderCollapse:'collapse', width:'100%', minWidth:'max-content' }}>
@@ -713,26 +756,28 @@ const DsPreviewTable = React.memo(({ rows, mappedCols, hasActiveSlot, onMap }: {
             {cols.map(col => {
               const color = mappedCols[col]
               return (
-                <th key={col} onClick={() => hasActiveSlot && onMap(col)}
+                <th key={col} onClick={() => headerClick(col)}
+                  title={hasActiveSlot ? undefined : 'Click to sort'}
                   style={{ padding:'6px 10px', textAlign:'left', whiteSpace:'nowrap',
                     position:'sticky', top:0, zIndex:2,
                     background: color ? `${color}22` : 'var(--bg-body,#f0f2f1)',
                     color: color || (hasActiveSlot ? '#d97a35' : 'var(--text-muted)'),
                     fontWeight:700, fontSize:10, textTransform:'uppercase', letterSpacing:'0.5px',
-                    cursor: hasActiveSlot ? 'pointer' : 'default',
+                    cursor: 'pointer',
                     borderBottom:`2px solid ${color||(hasActiveSlot?'#d97a35':'var(--border)')}`,
                     transition:'all 0.15s' }}>
                   {color && <span style={{ display:'inline-block', width:6, height:6,
                     borderRadius:'50%', background:color, marginRight:4 }} />}
                   {col}
                   {hasActiveSlot && !color && <span style={{ marginLeft:4, color:'#d97a35' }}>←</span>}
+                  {!hasActiveSlot && sortCol === col && <SortArrow dir={sortDir} />}
                 </th>
               )
             })}
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, ri) => (
+          {sortedRows.map((row, ri) => (
             <tr key={ri} style={{ background: ri%2===0 ? 'transparent' : 'rgba(0,0,0,0.02)' }}>
               {cols.map(col => (
                 <td key={col} onClick={() => hasActiveSlot && onMap(col)}
@@ -924,6 +969,8 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const [activeAgentSlot, setActiveAgentSlot] = useState<string | null>(null)
   const [loadingKpi, setLoadingKpi] = useState(false)
   const [loadingAgt, setLoadingAgt] = useState(false)
+  const [kpiSortCol, setKpiSortCol] = useState<string | null>(null)
+  const [kpiSortDir, setKpiSortDir] = useState<'asc' | 'desc'>('asc')
 
   const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
   const supaKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -1165,6 +1212,24 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const allKpiKeys = ['sla', 'wait', 'aht', 'abn', ...localDs.extraTiles.map(t => t.key)]
   const kpiCols = kpiPreview.length ? Object.keys(kpiPreview[0]) : []
   const agtCols = agtPreview.length ? Object.keys(agtPreview[0]) : []
+  // Carries each row's ORIGINAL index alongside it — cellColor() below pins
+  // "no filter configured" bindings to the first row by POSITION (ri === 0),
+  // so sorting must not change which row that logic considers "first";
+  // sortedKpiPreview only changes display order, never what's passed to
+  // cellColor as the row's index.
+  const sortedKpiPreview = useMemo(() => {
+    const withIndex = kpiPreview.map((row, i) => ({ row, i }))
+    if (!kpiSortCol) return withIndex
+    withIndex.sort((a, b) => {
+      const cmp = comparePreviewValues(a.row[kpiSortCol], b.row[kpiSortCol])
+      return kpiSortDir === 'asc' ? cmp : -cmp
+    })
+    return withIndex
+  }, [kpiPreview, kpiSortCol, kpiSortDir])
+  const handleKpiHeaderClick = (col: string) => {
+    if (kpiSortCol === col) setKpiSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setKpiSortCol(col); setKpiSortDir('asc') }
+  }
   const groupVals = localDs.kpiGroupCol
     ? Array.from(new Set(kpiPreview.map(r => String(r[localDs.kpiGroupCol] ?? '')).filter(Boolean)))
     : []
@@ -1394,12 +1459,18 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             ) : (
               <div style={{ overflow: 'auto', maxHeight: 260, fontSize: 11 }}>
                 <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 'max-content' }}>
-                  <thead><tr>{kpiCols.map(c => <th key={c} className="ds-th">{c}</th>)}</tr></thead>
+                  <thead><tr>{kpiCols.map(c => (
+                    <th key={c} className="ds-th" onClick={() => handleKpiHeaderClick(c)}
+                      style={{ cursor: 'pointer' }} title="Click to sort">
+                      {c}
+                      {kpiSortCol === c && <SortArrow dir={kpiSortDir} />}
+                    </th>
+                  ))}</tr></thead>
                   <tbody>
-                    {kpiPreview.map((row, ri) => (
+                    {sortedKpiPreview.map(({ row, i }, ri) => (
                       <tr key={ri} style={{ background: ri % 2 === 0 ? 'transparent' : 'rgba(0,0,0,0.02)' }}>
                         {kpiCols.map(c => {
-                          const hi = cellColor(row, c, ri)
+                          const hi = cellColor(row, c, i)
                           return (
                             <td key={c} className="ds-td"
                               title={String(row[c] ?? '')}
