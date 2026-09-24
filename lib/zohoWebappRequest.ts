@@ -30,7 +30,19 @@
 import { getZohoAccessToken } from './zohoAuth'
 import { OWNER_NAME, APP_LINK_NAME } from './zohoCreator'
 
-const CREATOR_API_BASE = 'https://www.zohoapis.com/creator/v2.1'
+// Deliberately the OLDER Creator REST API v2 (creator.zoho.com), NOT the
+// newer v2.1 (www.zohoapis.com/creator/v2.1) this file originally used — a
+// live test (2026-09-24) hit "Permission denied to add record(s)" (code
+// 2899) on v2.1 even with the correct ZohoCreator.form.CREATE scope. The
+// pre-existing Apps Script "Workforce Apollo" tool (Code.gs's
+// _createZohoRecord()) successfully writes to this EXACT SAME form
+// (WebApp_API_Requests, same app/owner) using this older endpoint — same
+// Authorization header scheme, same `{ data: {...} }` body, same
+// `code === 3000` success check — so whatever permission gate v2.1 enforces
+// that this app's authorized account doesn't clear, the older endpoint
+// evidently doesn't apply it the same way. Matched exactly, including
+// dropping the "/data/" path segment v2.1 requires but v2 doesn't.
+const CREATOR_API_BASE = 'https://creator.zoho.com/api/v2'
 
 // CONFIRMED via Zoho's Meta API (lib/zohoFieldScan.ts's scan lists every form
 // in the app and cross-checks this against it) — the app's actual form list
@@ -101,7 +113,7 @@ function generateRequestId(): string {
 async function submitWebappRequest(valuesField: WorkforceRtaLogPayload): Promise<WebappRequestResult> {
   const token = await getZohoAccessToken()
 
-  const url = `${CREATOR_API_BASE}/data/${OWNER_NAME}/${APP_LINK_NAME}/form/${FORM_LINK_NAME}`
+  const url = `${CREATOR_API_BASE}/${OWNER_NAME}/${APP_LINK_NAME}/form/${FORM_LINK_NAME}`
   const requestBody = {
     data: {
       Form: FORM_TYPE,
