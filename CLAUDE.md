@@ -226,12 +226,17 @@ ONLY by its own per-account toggle, same "no global switch" posture as
 Workforce Logs.
 
 Submits to a generic Zoho-side "webapp request" intake (the
-`WebApp_API_Requests` form, same app). An existing, unrelated `Form` type in
-this same intake ("Dispute Log") IS processed asynchronously by a Zoho-side
-script that fills in `Synced`/`ID`/`Added_Time`/`Function_Notes` itself after
-the fact — but per the user (2026-09-24), there's no equivalent script for
-OUR `Form` type, so we submit a COMPLETE row ourselves instead of leaving
-those to be filled in later:
+`WebApp_API_Requests` form, same app). **CONFIRMED live (2026-09-24)**: a
+Zoho-side Deluge script DOES watch `Form=="Workforce RTA Logs"` submissions
+here too (same as it does for the unrelated "Dispute Log" `Form` type) —
+after a permission fix (see below) got a submission through, its validation
+feedback came back written into `Function_Notes` itself: `"WORKFORCE RTA WEB
+API - FAILED ... ERROR(S): - At least one site is required for Account
+Wide."` — proving both that the script exists and processes our `Form` type,
+and that it OVERWRITES whatever `Function_Notes` we send with its own
+processing result. We still submit a complete row ourselves (the fields
+below) since nothing else about its behavior (whether it also fills
+`Synced`/`ID`/`Added_Time` before/after validating) is confirmed:
 - `Form` = `"Workforce RTA Logs"`
 - `Added_User` = `"wfm_live_dashboard"` (this app's own submitter identity —
   NOT copied from the Dispute Log example's `"powerbi_ececontactcenters24"`,
@@ -247,20 +252,34 @@ those to be filled in later:
   (`buildFunctionNotes()`), so a human scanning the report doesn't have to
   decode `Values_field`'s JSON to see what it is.
 
-- `lib/zohoWebappRequest.ts` — `createAccountBreachRtaLog(accountId, remarks)`.
-  Builds the "Account Wide" shape (one of three `selection_type` variants the
-  Zoho programmer's example JSONs showed — "Site Wide"/"Employees" are for
-  different, non-breach use cases and aren't implemented here):
-  `{ selection_type: "Account Wide", sites: [], accounts: [accountId],
-  employee: "", category, sub_category, remarks, url_link: "",
-  recommendation: "", status: "Pending", requested_by:
+- `lib/zohoWebappRequest.ts` — `createAccountBreachRtaLog(accountId, remarks,
+  site)`. Builds the "Account Wide" shape (one of three `selection_type`
+  variants the Zoho programmer's example JSONs showed — "Site Wide"/
+  "Employees" are for different, non-breach use cases and aren't implemented
+  here): `{ selection_type: "Account Wide", sites: site ? [site] : [],
+  accounts: [accountId], employee: "", category, sub_category, remarks,
+  url_link: "", recommendation: "", status: "Pending", requested_by:
   "rta@ececontactcenters.com" }`. `category`/`sub_category` are FIXED to
   `"Service Level & Volume Management"` / `"Understaffing Alert"` for every
   report regardless of the underlying breach type (SLA, queue, agent-status,
   etc.) — an explicit scope decision, not a per-breach-type mapping (see chat
-  history if that needs to change). No Zoho lookup resolution at all — unlike
-  Workforce Logs' `x_Account`/`Category`/etc., this sends the plain
-  `accountId` string directly, no ID/master-list matching needed.
+  history if that needs to change). No Zoho lookup resolution for
+  `accounts`/`category`/`sub_category` — unlike Workforce Logs'
+  `x_Account`/`Category`/etc., these are sent as plain text, no ID/master-list
+  matching needed.
+- **`sites` is REQUIRED (non-empty)** — confirmed live (2026-09-24, see
+  above): `selection_type: "Account Wide"` fails Zoho's validation with no
+  site at all. An account can genuinely span MORE than one site (e.g. both
+  Manila and Dumaguete) — the client confirmed this — so this is its OWN
+  per-account field, `wfm_settings.rta_sites` (comma-separated text), rather
+  than reusing Workforce Logs' `zoho_site_text`/`_id`, which is a single Zoho
+  lookup value and can't represent more than one. Settings UI: checkboxes
+  for the known sites (`Manila`/`Dumaguete`/`Honduras` —
+  `KNOWN_RTA_SITES` in `SettingsModal.tsx`, sourced from the separate Apollo
+  webapp's own docs) plus a free-text box for anything not listed (that list
+  can go stale the same way Apollo's own does). An account with none checked
+  gets this submission skipped entirely (logged, not silently dropped)
+  rather than sent to fail Zoho's validation every time.
 - `FORM_LINK_NAME` (`'WebApp_API_Requests'`) — **CONFIRMED** via
   `lib/zohoFieldScan.ts`'s Meta API form-list cross-check (2026-09-24) — the
   original guess `'All_Webapp_Api_Requests'` was NOT in the app's form list
@@ -287,7 +306,7 @@ those to be filled in later:
   Workforce Logs already uses — one shared formatter, two different Zoho
   destinations.
 - `sql/zoho_rta_logs.sql` — adds `rta_logs_enabled` + `rta_logs_last_sent_at`
-  to `wfm_settings`.
+  + `rta_sites` to `wfm_settings`.
 - Settings UI: Settings → **Zoho Integrations** tab → "WORKFORCE RTA LOGS —
   {account}" section, below Workforce Logs Reporting. Just a checkbox — no
   lookup comboboxes, since category/sub_category are fixed constants and the

@@ -126,6 +126,7 @@ interface AccountSettingsRow {
   wf_logs_last_sent_at: string | null
   rta_logs_enabled: boolean | null
   rta_logs_last_sent_at: string | null
+  rta_sites: string | null
 }
 
 export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<ScanResult> {
@@ -154,7 +155,7 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
     .select(`
       id, data_source, kpi_thresholds, status_thresholds, cliq_channel, cliq_last_sent_at,
       wf_logs_enabled, wf_logs_last_sent_at,
-      rta_logs_enabled, rta_logs_last_sent_at,
+      rta_logs_enabled, rta_logs_last_sent_at, rta_sites,
       zoho_account_name, zoho_account_id,
       zoho_category_text, zoho_category_id,
       zoho_subcategory_text, zoho_subcategory_id,
@@ -273,14 +274,25 @@ async function processAccount(
   if (acc.rta_logs_enabled) {
     const lastSent = acc.rta_logs_last_sent_at ? new Date(acc.rta_logs_last_sent_at).getTime() : 0
     if (forceSend || Date.now() - lastSent >= cooldownMs) {
-      try {
-        const remarks = formatWorkforceLogRemarks(accountId, breaches)
-        await createAccountBreachRtaLog(accountId, remarks)
-        l(`${accountId}: RTA Log webapp request submitted.`)
-        updates.rta_logs_last_sent_at = new Date().toISOString()
-        didAnything = true
-      } catch (e: any) {
-        l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
+      // Zoho's own processing script requires at least one site for an
+      // "Account Wide" submission (confirmed live via its Function_Notes
+      // validation feedback) — an account can span MORE THAN ONE site
+      // (e.g. both Manila and Dumaguete), which the single-value Workforce
+      // Logs Site lookup can't represent, so this is its own comma-separated
+      // field (wfm_settings.rta_sites) rather than reusing that one.
+      const sites = (acc.rta_sites || '').split(',').map(s => s.trim()).filter(Boolean)
+      if (sites.length === 0) {
+        l(`${accountId}: RTA Log webapp request skipped — no Site(s) configured (Zoho requires at least one for Account Wide submissions). Set it under Workforce RTA Logs in Settings.`)
+      } else {
+        try {
+          const remarks = formatWorkforceLogRemarks(accountId, breaches)
+          await createAccountBreachRtaLog(accountId, remarks, sites)
+          l(`${accountId}: RTA Log webapp request submitted.`)
+          updates.rta_logs_last_sent_at = new Date().toISOString()
+          didAnything = true
+        } catch (e: any) {
+          l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
+        }
       }
     } else {
       l(`${accountId}: RTA Logs within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)

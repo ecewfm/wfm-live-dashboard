@@ -10,9 +10,11 @@ import { getZohoAuthorizedAccountInfo } from '@/lib/zohoAuth'
 
 export async function POST(req: Request) {
   let accountId: string | undefined
+  let sites: string[] = []
   try {
     const body = await req.json()
     accountId = body?.accountId
+    sites = Array.isArray(body?.sites) ? body.sites.filter(Boolean) : []
   } catch {
     // no body — accountId stays undefined, caught below
   }
@@ -27,7 +29,7 @@ export async function POST(req: Request) {
   // Soft-fails to null (e.g. token minted before AaaServer.profile.READ was
   // added to the scope list) without affecting the write attempt itself.
   const [result, authorizedAs] = await Promise.all([
-    testAccountBreachRtaLog(accountId).catch((e: any) => ({ __threw: true, message: e.message })),
+    testAccountBreachRtaLog(accountId, sites).catch((e: any) => ({ __threw: true, message: e.message })),
     getZohoAuthorizedAccountInfo(),
   ])
 

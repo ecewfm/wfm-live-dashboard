@@ -144,10 +144,21 @@ async function submitWebappRequest(valuesField: WorkforceRtaLogPayload): Promise
 // formatWorkforceLogRemarks for the exact BreachRow[] -> text formatting
 // already used for the OTHER Zoho integration; reused verbatim here rather
 // than duplicated).
-export async function createAccountBreachRtaLog(accountDisplayName: string, remarks: string): Promise<void> {
+//
+// `sites` is REQUIRED (non-empty) by Zoho's own processing script for
+// "Account Wide" submissions — confirmed live (2026-09-24) via its own
+// validation feedback written back into Function_Notes: "At least one site
+// is required for Account Wide." (this also confirms a real Zoho-side
+// Deluge script DOES watch Form=="Workforce RTA Logs" submissions here and
+// validates/processes them, overwriting whatever Function_Notes we
+// originally sent). An account can span MORE than one site (e.g. both
+// Manila and Dumaguete) — per-account list lives in
+// wfm_settings.rta_sites, a comma-separated field SEPARATE from Workforce
+// Logs' single-value Site lookup, which can't represent more than one.
+export async function createAccountBreachRtaLog(accountDisplayName: string, remarks: string, sites: string[]): Promise<void> {
   const result = await submitWebappRequest({
     selection_type: 'Account Wide',
-    sites: [],
+    sites,
     accounts: [accountDisplayName],
     employee: '',
     category: BREACH_CATEGORY,
@@ -168,13 +179,14 @@ export async function createAccountBreachRtaLog(accountDisplayName: string, rema
 // as a test in its remarks, so it's obvious which record in Zoho is safe to
 // ignore/delete. Returns the full round-trip instead of throwing, so the
 // caller can show request/response detail on failure rather than just a
-// generic "it failed" message.
-export async function testAccountBreachRtaLog(accountDisplayName: string): Promise<WebappRequestResult> {
+// generic "it failed" message. `sites` — see createAccountBreachRtaLog's
+// comment; required for the same reason.
+export async function testAccountBreachRtaLog(accountDisplayName: string, sites: string[] = []): Promise<WebappRequestResult> {
   const ts = new Date().toLocaleString('en-US', { timeZoneName: 'short' })
   const remarks = `[TEST] Manual connectivity test from WFM Live Dashboard Settings for ${accountDisplayName} at ${ts}. Safe to ignore/delete in Zoho.`
   return submitWebappRequest({
     selection_type: 'Account Wide',
-    sites: [],
+    sites,
     accounts: [accountDisplayName],
     employee: '',
     category: BREACH_CATEGORY,

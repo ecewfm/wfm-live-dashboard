@@ -22,6 +22,11 @@ const KPI_ROWS: { key: keyof Thresholds; label: string; sublabel: string; unit: 
   { key: 'wait', label: 'Calls Waiting', sublabel: 'Current Queue Depth',            unit: ''  },
 ]
 
+// Known Zoho Creator "Site" records (per the Apollo integration's own docs) —
+// checkboxes for these, plus a free-text field below for anything not listed
+// (this list can go stale the same way Apollo's own does; see CLAUDE.md).
+const KNOWN_RTA_SITES = ['Manila', 'Dumaguete', 'Honduras']
+
 // ── All modal CSS self-contained — no globals.css dependency ──────────────────
 const MODAL_STYLES = `
   .sm-overlay {
@@ -305,9 +310,10 @@ interface Props {
   cliqGlobalSettings: CliqGlobalSettings   // shared across every account
   wfLogsEnabled:     boolean              // this account's Zoho Workforce Logs reporting toggle
   rtaLogsEnabled:    boolean              // this account's Zoho "Workforce RTA Logs" webapp-request toggle (a DIFFERENT Zoho intake — see lib/zohoWebappRequest.ts)
+  rtaSites:          string[]             // this account's site(s) for THAT webapp-request — can be more than one, unlike zohoLookups.site
   zohoLookups:       ZohoLookups          // this account's x_Account/Category/Sub_Categories/Site picks
   alarmSound:        string               // this account's Overview-card breach alarm sound ('' = silent)
-  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean) => void
+  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean, rtaSites: string[]) => void
   onSaveCliqGlobal: (settings: CliqGlobalSettings) => void
   onAccountsChange: () => void           // called after add/remove
   onConfigureAccount: (id: string) => void  // switch active account + go to Data Sources
@@ -1707,7 +1713,7 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, 
 }
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
@@ -1718,6 +1724,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [cliqScanLog, setCliqScanLog]   = useState<string[] | null>(null)
   const [wfLogsOn, setWfLogsOn]         = useState(wfLogsEnabled)
   const [rtaLogsOn, setRtaLogsOn]       = useState(rtaLogsEnabled)
+  const [rtaSitesOn, setRtaSitesOn]     = useState<string[]>(rtaSites)
   const [zohoLu, setZohoLu]             = useState<ZohoLookups>(JSON.parse(JSON.stringify(zohoLookups)))
   const [alarmSnd, setAlarmSnd]         = useState(alarmSound || 'none')
   const [fieldScanning, setFieldScanning] = useState(false)
@@ -1777,7 +1784,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       const res  = await fetch('/api/zoho/test-rta-log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId }),
+        body: JSON.stringify({ accountId, sites: rtaSitesOn }),
       })
       const data = await res.json()
       setRtaTestAuthorizedAs(data.authorizedAs ?? null)
@@ -2252,8 +2259,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
                   A SEPARATE Zoho intake from Workforce Logs above — submits a &quot;Workforce RTA
                   Logs&quot; webapp request (account-wide, category fixed to Service Level &amp; Volume
-                  Management / Understaffing Alert) instead of a Workforce Logs record. No lookup
-                  fields to configure — just the account&apos;s own id and a plain-text breach summary.
+                  Management / Understaffing Alert) instead of a Workforce Logs record. Just the
+                  account&apos;s own id, its Site(s), and a plain-text breach summary — no Zoho lookup
+                  IDs to resolve.
                 </p>
                 <table className="sm-table">
                   <tbody>
@@ -2266,10 +2274,32 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     </tr>
                   </tbody>
                 </table>
-                <p className="sm-desc" style={{ marginTop: 10, marginBottom: 10 }}>
+                <p className="sm-desc" style={{ marginTop: 10, marginBottom: 6 }}>
+                  <strong>Site(s)</strong> — Zoho&apos;s own processing script rejects this submission
+                  with no site at all. An account can span more than one (check all that apply); type
+                  any not listed below, comma-separated.
+                </p>
+                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 10 }}>
+                  {KNOWN_RTA_SITES.map(site => (
+                    <label key={site} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={rtaSitesOn.includes(site)}
+                        onChange={() => setRtaSitesOn(prev => prev.includes(site) ? prev.filter(s => s !== site) : [...prev, site])} />
+                      {site}
+                    </label>
+                  ))}
+                </div>
+                <input type="text" className="sm-input" placeholder="Other site(s), comma-separated"
+                  style={{ width: '100%', marginBottom: 10 }}
+                  value={rtaSitesOn.filter(s => !KNOWN_RTA_SITES.includes(s)).join(', ')}
+                  onChange={e => {
+                    const others = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
+                    setRtaSitesOn([...rtaSitesOn.filter(s => KNOWN_RTA_SITES.includes(s)), ...others])
+                  }} />
+                <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10 }}>
                   There&apos;s no Zoho sandbox for this intake, so the button below sends a real,
                   clearly-tagged <code>[TEST]</code> submission for <strong>{accountId}</strong> — check
-                  Zoho&apos;s own list to confirm it arrived (safe to delete it there afterward).
+                  Zoho&apos;s own list to confirm it arrived (safe to delete it there afterward). It uses
+                  the Site(s) checked above.
                 </p>
                 <button type="button" className="acc-btn acc-btn-cfg" disabled={rtaTesting}
                   style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleTestRtaLog}>
@@ -2346,7 +2376,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>
