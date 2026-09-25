@@ -1777,19 +1777,15 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   // ── Test the Workforce RTA Logs payload against Zoho for real (no sandbox
   // exists for this intake) — surfaces success inline, and a full request/
   // response breakdown in a popup on failure ─────────────────────────────────
-  // ALSO persists Site(s)/Zoho Account Name immediately (same onSave the
-  // "Save Changes" button uses) — CONFIRMED live (2026-09-25) this needed
-  // fixing: a real test succeeded against Zoho using values typed into the
-  // form, but they never reached Supabase (only "Save Changes" persists, and
-  // it's easy to test something and assume that alone saved it) — so a
-  // refresh, or another browser/user, saw blank fields even after a
-  // confirmed-working test. Testing something now guarantees it survives.
+  // Deliberately does NOT persist anything — Test is test-only, by design
+  // (per the user, 2026-09-25); only the "Save Changes" button writes to
+  // Supabase. A confirmed-working test using typed-but-unsaved values won't
+  // survive a refresh until Save Changes is clicked — that's intentional.
   const handleTestRtaLog = async () => {
     setRtaTesting(true)
     setRtaTestOkAt(null)
     setRtaTestAuthorizedAs(null)
     setRtaTestError(null)
-    onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, rtaAcctName)
     try {
       const res  = await fetch('/api/zoho/test-rta-log', {
         method: 'POST',
@@ -2319,9 +2315,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10 }}>
                   There&apos;s no Zoho sandbox for this intake, so the button below sends a real,
                   clearly-tagged <code>[TEST]</code> submission for <strong>{accountId}</strong> — check
-                  Zoho&apos;s own list to confirm it arrived (safe to delete it there afterward). It also
-                  saves the Zoho Account Name and Site(s) above immediately (same as clicking Save
-                  Changes) — no need to save separately for these two.
+                  Zoho&apos;s own list to confirm it arrived (safe to delete it there afterward). This is
+                  test-only — it does <strong>not</strong> save the Zoho Account Name or Site(s) above;
+                  click <strong>Save Changes</strong> below to persist them.
                 </p>
                 <button type="button" className="acc-btn acc-btn-cfg" disabled={rtaTesting}
                   style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleTestRtaLog}>
