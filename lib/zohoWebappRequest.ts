@@ -57,7 +57,14 @@ const FORM_TYPE = 'Workforce RTA Logs'
 // integration into this same intake.
 const ADDED_USER = 'wfm_live_dashboard'
 
-const REQUESTED_BY = 'rta@ececontactcenters.com'
+// Zoho's own processing script validates this against its ECE Time Tracker
+// employee list — confirmed live (2026-09-25): "rta@ececontactcenters.com"
+// isn't a real employee record there ("Requested By employee was not found
+// in ECE Time Tracker"). Using the same WFM Admin / Power BI account
+// (powerbi@ececontactcenters.net) already authorized for this whole
+// integration (see app/api/zoho/authorize/route.ts) — a real employee record
+// that's already confirmed to exist and be recognized by Zoho.
+const REQUESTED_BY = 'powerbi@ececontactcenters.net'
 
 // Fixed for every account-wide breach report, regardless of whether the
 // underlying breach is SLA, queue, or agent-status related — explicit

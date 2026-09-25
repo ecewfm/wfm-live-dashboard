@@ -252,21 +252,26 @@ below) since nothing else about its behavior (whether it also fills
   (`buildFunctionNotes()`), so a human scanning the report doesn't have to
   decode `Values_field`'s JSON to see what it is.
 
-- `lib/zohoWebappRequest.ts` — `createAccountBreachRtaLog(accountId, remarks,
-  site)`. Builds the "Account Wide" shape (one of three `selection_type`
-  variants the Zoho programmer's example JSONs showed — "Site Wide"/
-  "Employees" are for different, non-breach use cases and aren't implemented
-  here): `{ selection_type: "Account Wide", sites: site ? [site] : [],
-  accounts: [accountId], employee: "", category, sub_category, remarks,
-  url_link: "", recommendation: "", status: "Pending", requested_by:
-  "rta@ececontactcenters.com" }`. `category`/`sub_category` are FIXED to
+- `lib/zohoWebappRequest.ts` — `createAccountBreachRtaLog(accountName,
+  remarks, sites)`. Builds the "Account Wide" shape (one of three
+  `selection_type` variants the Zoho programmer's example JSONs showed —
+  "Site Wide"/"Employees" are for different, non-breach use cases and aren't
+  implemented here): `{ selection_type: "Account Wide", sites, accounts:
+  [accountName], employee: "", category, sub_category, remarks, url_link: "",
+  recommendation: "", status: "Pending", requested_by:
+  "powerbi@ececontactcenters.net" }`. `category`/`sub_category` are FIXED to
   `"Service Level & Volume Management"` / `"Understaffing Alert"` for every
   report regardless of the underlying breach type (SLA, queue, agent-status,
   etc.) — an explicit scope decision, not a per-breach-type mapping (see chat
-  history if that needs to change). No Zoho lookup resolution for
-  `accounts`/`category`/`sub_category` — unlike Workforce Logs'
-  `x_Account`/`Category`/etc., these are sent as plain text, no ID/master-list
-  matching needed.
+  history if that needs to change). No Zoho lookup ID resolution for
+  `accounts`/`category`/`sub_category`/`sites` — these are sent as plain
+  text, resolved server-side by Zoho's own processing script (see below).
+- **`requested_by` must be a real ECE Time Tracker employee** — confirmed
+  live (2026-09-25): the original guess `"rta@ececontactcenters.com"` isn't
+  one ("Requested By employee was not found in ECE Time Tracker"). Set to
+  `"powerbi@ececontactcenters.net"` — the same WFM Admin/Power BI account
+  this whole integration is already authorized as (see `app/api/zoho/
+  authorize/route.ts`), a real, already-confirmed-valid employee record.
 - **`sites` is REQUIRED (non-empty)** — confirmed live (2026-09-24, see
   above): `selection_type: "Account Wide"` fails Zoho's validation with no
   site at all. An account can genuinely span MORE than one site (e.g. both
