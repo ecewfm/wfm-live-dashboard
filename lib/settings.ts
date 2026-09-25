@@ -30,6 +30,7 @@ export interface AccountSettings {
   wfLogsEnabled: boolean
   rtaLogsEnabled: boolean
   rtaSites: string[]
+  rtaAccountName: string
   zohoLookups: ZohoLookups
   alarmSound: string
 }
@@ -43,7 +44,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
       .select(`
         kpi_thresholds, status_thresholds, data_source, dashboard_layout,
         header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
-        rta_logs_enabled, rta_sites,
+        rta_logs_enabled, rta_sites, rta_account_name,
         zoho_account_name, zoho_account_id,
         zoho_category_text, zoho_category_id,
         zoho_subcategory_text, zoho_subcategory_id,
@@ -118,6 +119,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
         wfLogsEnabled: !!(data as any).wf_logs_enabled,
         rtaLogsEnabled: !!(data as any).rta_logs_enabled,
         rtaSites: String((data as any).rta_sites || '').split(',').map(s => s.trim()).filter(Boolean),
+        rtaAccountName: (data as any).rta_account_name || '',
         zohoLookups: {
           account:     { id: (data as any).zoho_account_id     || '', text: (data as any).zoho_account_name    || '' },
           category:    { id: (data as any).zoho_category_id    || '', text: (data as any).zoho_category_text   || '' },
@@ -146,6 +148,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     wfLogsEnabled: false,
     rtaLogsEnabled: false,
     rtaSites: [],
+    rtaAccountName: '',
     zohoLookups: { ...DEFAULT_ZOHO_LOOKUPS },
     alarmSound: '',
   }
@@ -290,7 +293,8 @@ export async function saveSettings(
   zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS,
   alarmSound: string = '',
   rtaLogsEnabled: boolean = false,
-  rtaSites: string[] = []
+  rtaSites: string[] = [],
+  rtaAccountName: string = ''
 ): Promise<boolean> {
   // 1. Always write to localStorage immediately (instant, works offline)
   saveKpiThresholds(accountId, kpi)
@@ -320,6 +324,7 @@ export async function saveSettings(
         alarm_sound:           alarmSound,
         rta_logs_enabled:      rtaLogsEnabled,
         rta_sites:             rtaSites.join(','),
+        rta_account_name:      rtaAccountName,
         updated_at:            new Date().toISOString(),
       })
     // Each retry step drops the newest-added columns first (alarm_sound and

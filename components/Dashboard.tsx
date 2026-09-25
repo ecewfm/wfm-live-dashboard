@@ -111,6 +111,7 @@ export default function Dashboard() {
   const [wfLogsEnabledMap, setWfLogsEnabledMap] = useState<Record<string, boolean>>({})
   const [rtaLogsEnabledMap, setRtaLogsEnabledMap] = useState<Record<string, boolean>>({})
   const [rtaSitesMap, setRtaSitesMap]           = useState<Record<string, string[]>>({})
+  const [rtaAccountNameMap, setRtaAccountNameMap] = useState<Record<string, string>>({})
   const [zohoLookupsMap, setZohoLookupsMap]     = useState<Record<string, ZohoLookups>>({})
   const [alarmSounds, setAlarmSounds]           = useState<Record<string, string>>({})
   const [cliqGlobal, setCliqGlobal]             = useState<CliqGlobalSettings>(DEFAULT_CLIQ_GLOBAL_SETTINGS)
@@ -287,6 +288,7 @@ export default function Dashboard() {
       const wfLogsMap: Record<string, boolean>          = {}
       const rtaLogsMap: Record<string, boolean>         = {}
       const rtaSitesMap2: Record<string, string[]>      = {}
+      const rtaAcctNameMap2: Record<string, string>     = {}
       const zohoLuMap: Record<string, ZohoLookups>      = {}
       const alarmMap: Record<string, string>            = {}
       ids.forEach(id => {
@@ -299,6 +301,7 @@ export default function Dashboard() {
         wfLogsMap[id]   = allSettings[id].wfLogsEnabled
         rtaLogsMap[id]  = allSettings[id].rtaLogsEnabled
         rtaSitesMap2[id] = allSettings[id].rtaSites
+        rtaAcctNameMap2[id] = allSettings[id].rtaAccountName
         zohoLuMap[id]   = allSettings[id].zohoLookups
         alarmMap[id]    = allSettings[id].alarmSound
       })
@@ -311,6 +314,7 @@ export default function Dashboard() {
       setWfLogsEnabledMap(wfLogsMap)
       setRtaLogsEnabledMap(rtaLogsMap)
       setRtaSitesMap(rtaSitesMap2)
+      setRtaAccountNameMap(rtaAcctNameMap2)
       setZohoLookupsMap(zohoLuMap)
       setAlarmSounds(alarmMap)
       loadCliqSettings().then(setCliqGlobal)
@@ -484,7 +488,8 @@ export default function Dashboard() {
   const handleSaveSettings = async (
     kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string,
     wfLogsEnabled: boolean = false, zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS,
-    alarmSound: string = '', rtaLogsEnabled: boolean = false, rtaSites: string[] = []
+    alarmSound: string = '', rtaLogsEnabled: boolean = false, rtaSites: string[] = [],
+    rtaAccountName: string = ''
   ) => {
     // Update local state immediately (instant UI feedback)
     setKpiThresholds(prev => ({ ...prev, [currentAccount]: kpi }))
@@ -494,12 +499,13 @@ export default function Dashboard() {
     setWfLogsEnabledMap(prev => ({ ...prev, [currentAccount]: wfLogsEnabled }))
     setRtaLogsEnabledMap(prev => ({ ...prev, [currentAccount]: rtaLogsEnabled }))
     setRtaSitesMap(prev => ({ ...prev, [currentAccount]: rtaSites }))
+    setRtaAccountNameMap(prev => ({ ...prev, [currentAccount]: rtaAccountName }))
     setZohoLookupsMap(prev => ({ ...prev, [currentAccount]: zohoLookups }))
     setAlarmSounds(prev => ({ ...prev, [currentAccount]: alarmSound }))
     // Re-fetch with new data source
     fetchAccount(currentAccount, ds)
     // Persist to Supabase (shared) + localStorage (cache)
-    await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups, alarmSound, rtaLogsEnabled, rtaSites)
+    await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups, alarmSound, rtaLogsEnabled, rtaSites, rtaAccountName)
   }
 
   // ── Save one account's Overview header colors — instant, like layout drag ──
@@ -544,6 +550,7 @@ export default function Dashboard() {
           wfLogsEnabled={wfLogsEnabledMap[currentAccount] ?? false}
           rtaLogsEnabled={rtaLogsEnabledMap[currentAccount] ?? false}
           rtaSites={rtaSitesMap[currentAccount] ?? []}
+          rtaAccountName={rtaAccountNameMap[currentAccount] ?? ''}
           zohoLookups={zohoLookupsMap[currentAccount] ?? DEFAULT_ZOHO_LOOKUPS}
           alarmSound={alarmSounds[currentAccount] ?? ''}
           onSave={handleSaveSettings}
@@ -572,6 +579,7 @@ export default function Dashboard() {
               setWfLogsEnabledMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].wfLogsEnabled }); return n })
               setRtaLogsEnabledMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].rtaLogsEnabled }); return n })
               setRtaSitesMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].rtaSites }); return n })
+              setRtaAccountNameMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].rtaAccountName }); return n })
               setZohoLookupsMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].zohoLookups }); return n })
               setAlarmSounds(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].alarmSound }); return n })
             }

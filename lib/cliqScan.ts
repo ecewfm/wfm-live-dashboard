@@ -127,6 +127,7 @@ interface AccountSettingsRow {
   rta_logs_enabled: boolean | null
   rta_logs_last_sent_at: string | null
   rta_sites: string | null
+  rta_account_name: string | null
 }
 
 export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<ScanResult> {
@@ -155,7 +156,7 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
     .select(`
       id, data_source, kpi_thresholds, status_thresholds, cliq_channel, cliq_last_sent_at,
       wf_logs_enabled, wf_logs_last_sent_at,
-      rta_logs_enabled, rta_logs_last_sent_at, rta_sites,
+      rta_logs_enabled, rta_logs_last_sent_at, rta_sites, rta_account_name,
       zoho_account_name, zoho_account_id,
       zoho_category_text, zoho_category_id,
       zoho_subcategory_text, zoho_subcategory_id,
@@ -269,8 +270,9 @@ async function processAccount(
 
   // ── "Workforce RTA Logs" webapp-request submission ──────────────────────
   // A DIFFERENT Zoho intake from Workforce Logs above (lib/zohoWebappRequest.ts)
-  // — no Zoho account lookup needed, just the raw accountId string, so this
-  // only needs its own toggle to qualify (no hasAccountLink requirement).
+  // — no Zoho lookup ID needed (an optional plain-text name override
+  // instead, see rta_account_name below), so this only needs its own toggle
+  // to qualify (no hasAccountLink requirement).
   if (acc.rta_logs_enabled) {
     const lastSent = acc.rta_logs_last_sent_at ? new Date(acc.rta_logs_last_sent_at).getTime() : 0
     if (forceSend || Date.now() - lastSent >= cooldownMs) {
@@ -286,7 +288,14 @@ async function processAccount(
       } else {
         try {
           const remarks = formatWorkforceLogRemarks(accountId, breaches)
-          await createAccountBreachRtaLog(accountId, remarks, sites)
+          // Zoho's own script resolves "accounts" against its HR/Accounts
+          // master by NAME (confirmed live 2026-09-25: it rejected our raw
+          // internal id "guardianbikes" — "No valid Account was resolved
+          // from HR" — since Zoho's own record is named "Guardian Bikes")
+          // — send the configured override when this account's id doesn't
+          // match its real Zoho display name.
+          const zohoAccountName = acc.rta_account_name || accountId
+          await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
           l(`${accountId}: RTA Log webapp request submitted.`)
           updates.rta_logs_last_sent_at = new Date().toISOString()
           didAnything = true

@@ -298,15 +298,27 @@ below) since nothing else about its behavior (whether it also fills
   making reliable string-matching to one of these fragile; the single fixed
   sub-category remains the deliberate scope decision it always was (see
   chat history if per-breach-type mapping is wanted later).
+- **`accounts` (the account name sent) can be overridden** —
+  `wfm_settings.rta_account_name`. Confirmed required live (2026-09-25):
+  Zoho's script resolves the `accounts` value against its own HR/Accounts
+  master by NAME, and rejected `"guardianbikes"` (our internal account id)
+  with `"No valid Account was resolved from HR... Active Account not found
+  in HR: guardianbikes"` — its real Zoho record is named `"Guardian
+  Bikes"`. `lib/cliqScan.ts` sends `acc.rta_account_name || accountId`.
+  Blank (the default) sends the internal id as-is, unchanged from before —
+  only accounts whose id doesn't match Zoho's own naming need this filled
+  in. Settings UI: a plain text input, "Zoho Account Name", right above the
+  Site checkboxes.
 - `lib/cliqScan.ts` — per-account gate is just `rta_logs_enabled` (no account
-  link requirement, unlike Workforce Logs, since there's no lookup to
-  resolve). Cooldown (`wfm_settings.rta_logs_last_sent_at`) reuses the same
-  global "Re-alert Frequency" setting as Cliq/Workforce Logs. `remarks` is the
-  exact same `BreachRow[] -> text` formatting (`formatWorkforceLogRemarks`)
+  link requirement, unlike Workforce Logs, since there's no lookup ID to
+  resolve — just optional plain-text overrides, see above and `rta_sites`).
+  Cooldown (`wfm_settings.rta_logs_last_sent_at`) reuses the same global
+  "Re-alert Frequency" setting as Cliq/Workforce Logs. `remarks` is the exact
+  same `BreachRow[] -> text` formatting (`formatWorkforceLogRemarks`)
   Workforce Logs already uses — one shared formatter, two different Zoho
   destinations.
 - `sql/zoho_rta_logs.sql` — adds `rta_logs_enabled` + `rta_logs_last_sent_at`
-  + `rta_sites` to `wfm_settings`.
+  + `rta_sites` + `rta_account_name` to `wfm_settings`.
 - Settings UI: Settings → **Zoho Integrations** tab → "WORKFORCE RTA LOGS —
   {account}" section, below Workforce Logs Reporting. Just a checkbox — no
   lookup comboboxes, since category/sub_category are fixed constants and the

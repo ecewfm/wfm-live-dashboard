@@ -311,9 +311,10 @@ interface Props {
   wfLogsEnabled:     boolean              // this account's Zoho Workforce Logs reporting toggle
   rtaLogsEnabled:    boolean              // this account's Zoho "Workforce RTA Logs" webapp-request toggle (a DIFFERENT Zoho intake — see lib/zohoWebappRequest.ts)
   rtaSites:          string[]             // this account's site(s) for THAT webapp-request — can be more than one, unlike zohoLookups.site
+  rtaAccountName:    string               // plain-text override for THAT webapp-request's account name, when accountId doesn't match Zoho's own HR display name ('' = send accountId as-is)
   zohoLookups:       ZohoLookups          // this account's x_Account/Category/Sub_Categories/Site picks
   alarmSound:        string               // this account's Overview-card breach alarm sound ('' = silent)
-  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean, rtaSites: string[]) => void
+  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean, rtaSites: string[], rtaAccountName: string) => void
   onSaveCliqGlobal: (settings: CliqGlobalSettings) => void
   onAccountsChange: () => void           // called after add/remove
   onConfigureAccount: (id: string) => void  // switch active account + go to Data Sources
@@ -1713,7 +1714,7 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, 
 }
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
@@ -1725,6 +1726,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [wfLogsOn, setWfLogsOn]         = useState(wfLogsEnabled)
   const [rtaLogsOn, setRtaLogsOn]       = useState(rtaLogsEnabled)
   const [rtaSitesOn, setRtaSitesOn]     = useState<string[]>(rtaSites)
+  const [rtaAcctName, setRtaAcctName]   = useState(rtaAccountName)
   const [zohoLu, setZohoLu]             = useState<ZohoLookups>(JSON.parse(JSON.stringify(zohoLookups)))
   const [alarmSnd, setAlarmSnd]         = useState(alarmSound || 'none')
   const [fieldScanning, setFieldScanning] = useState(false)
@@ -1784,7 +1786,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       const res  = await fetch('/api/zoho/test-rta-log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId, sites: rtaSitesOn }),
+        body: JSON.stringify({ accountId, sites: rtaSitesOn, zohoAccountName: rtaAcctName || undefined }),
       })
       const data = await res.json()
       setRtaTestAuthorizedAs(data.authorizedAs ?? null)
@@ -2275,6 +2277,17 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   </tbody>
                 </table>
                 <p className="sm-desc" style={{ marginTop: 10, marginBottom: 6 }}>
+                  <strong>Zoho Account Name</strong> — Zoho&apos;s script resolves the account by
+                  matching this against its own HR/Accounts list by NAME, not by <strong>{accountId}</strong>
+                  &apos;s id. Leave blank to send <strong>{accountId}</strong> as-is; fill this in only
+                  if Zoho rejects it with &quot;Account not found in HR&quot; — e.g. the id
+                  &quot;guardianbikes&quot; needs &quot;Guardian Bikes&quot; here to match Zoho&apos;s
+                  own record.
+                </p>
+                <input type="text" className="sm-input" placeholder={`Zoho account name (defaults to "${accountId}")`}
+                  style={{ width: '100%', marginBottom: 10 }}
+                  value={rtaAcctName} onChange={e => setRtaAcctName(e.target.value)} />
+                <p className="sm-desc" style={{ marginTop: 4, marginBottom: 6 }}>
                   <strong>Site(s)</strong> — Zoho&apos;s own processing script rejects this submission
                   with no site at all. An account can span more than one (check all that apply); type
                   any not listed below, comma-separated.
@@ -2376,7 +2389,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, rtaAcctName); onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>

@@ -30,8 +30,22 @@
 --                          Logs' single-value zoho_site_text/_id above — an
 --                          account can span more than one site here, which
 --                          that single Zoho lookup field can't represent.
+-- rta_account_name      — optional override for the plain-text "accounts"
+--                          value sent in this webapp request, when this
+--                          account's internal id (e.g. "guardianbikes")
+--                          doesn't match its real display name in Zoho's own
+--                          HR/Accounts master ("Guardian Bikes") — CONFIRMED
+--                          this matters live (2026-09-25): Zoho's script
+--                          rejected a submission with "No valid Account was
+--                          resolved from HR... Active Account not found in
+--                          HR: guardianbikes". Blank = send the internal
+--                          account id as-is (unchanged behavior). Plain text,
+--                          no Zoho lookup ID needed — same reasoning as
+--                          rta_sites above, this Form type resolves accounts
+--                          by name server-side, not by record ID.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 ALTER TABLE wfm_settings ADD COLUMN IF NOT EXISTS rta_logs_enabled boolean DEFAULT false;
 ALTER TABLE wfm_settings ADD COLUMN IF NOT EXISTS rta_logs_last_sent_at timestamptz;
 ALTER TABLE wfm_settings ADD COLUMN IF NOT EXISTS rta_sites text;
+ALTER TABLE wfm_settings ADD COLUMN IF NOT EXISTS rta_account_name text;
