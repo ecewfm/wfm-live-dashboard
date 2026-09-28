@@ -1731,6 +1731,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [rtaSitesOn, setRtaSitesOn]     = useState<string[]>(rtaSites)
   const [rtaAcctName, setRtaAcctName]   = useState(rtaAccountName)
   const [rtaAiCatOn, setRtaAiCatOn]     = useState(rtaAiCategorizationEnabled)
+  // Confirmation gate for turning Workforce RTA Logs Reporting ON —
+  // per the user (2026-09-28), an account can accidentally start sending
+  // real breach reports before its thresholds are finalized, so checking
+  // this box (OFF → ON only; unchecking needs no confirmation) prompts an
+  // "are you sure?" first instead of taking effect immediately.
+  const [rtaEnableConfirmOpen, setRtaEnableConfirmOpen] = useState(false)
   const [geminiKeys, setGeminiKeys]     = useState<GeminiKeyMasked[] | null>(null)
   const [geminiKeyInput, setGeminiKeyInput] = useState('')
   const [geminiLabelInput, setGeminiLabelInput] = useState('')
@@ -2471,7 +2477,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                       <td><div className="sm-metric">Enable Workforce RTA Logs Reporting</div><div className="sm-metric-sub">Submits a Workforce RTA Logs webapp request for this account&apos;s breaches</div></td>
                       <td style={{ textAlign: 'center' }}>
                         <input type="checkbox" checked={rtaLogsOn}
-                          onChange={() => setRtaLogsOn(prev => !prev)} />
+                          onChange={() => { if (rtaLogsOn) setRtaLogsOn(false); else setRtaEnableConfirmOpen(true) }} />
                       </td>
                     </tr>
                     <tr>
@@ -2691,6 +2697,33 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             </div>
             <div className="sm-err-footer">
               <button className="sm-btn-cancel" onClick={() => { setRtaTestTopError(null); setRtaTestSubmissions(null) }}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {rtaEnableConfirmOpen && (
+        <div className="sm-err-overlay" onMouseDown={e => { if (e.target === e.currentTarget) setRtaEnableConfirmOpen(false) }}>
+          <div className="sm-err-modal" style={{ maxWidth: 460 }}>
+            <div className="sm-err-header" style={{ background: 'linear-gradient(135deg, #d97a35 0%, #a85a24 100%)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <i className="bx bx-error" style={{ fontSize: 22, color: '#fff' }} />
+                <span className="sm-err-title">Enable Workforce RTA Logs Reporting?</span>
+              </div>
+              <button className="sm-close" onClick={() => setRtaEnableConfirmOpen(false)}><i className="bx bx-x" /></button>
+            </div>
+            <div className="sm-err-body">
+              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                This starts sending real breach reports to Zoho for <strong>{accountId}</strong> the
+                next time the scan runs — are you sure its KPI Thresholds and Status Durations are
+                finalized? If not, turn this on later once they&apos;re confirmed.
+              </p>
+            </div>
+            <div className="sm-err-footer" style={{ gap: 8 }}>
+              <button className="sm-btn-cancel" onClick={() => setRtaEnableConfirmOpen(false)}>Cancel</button>
+              <button className="sm-btn-save" onClick={() => { setRtaLogsOn(true); setRtaEnableConfirmOpen(false) }}>
+                <i className="bx bx-check" /> Yes, Enable It
+              </button>
             </div>
           </div>
         </div>

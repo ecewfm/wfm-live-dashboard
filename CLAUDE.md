@@ -367,6 +367,14 @@ indefinitely, with no timer forcing a resend of an unchanged number.
   {account}" section, below Workforce Logs Reporting. Just a checkbox — no
   lookup comboboxes, since category/sub_category are fixed constants and the
   account is sent as a plain string.
+- **Checking "Enable Workforce RTA Logs Reporting" prompts an "are you
+  sure?" confirmation first** — per the user (2026-09-28), turning this on
+  starts sending real breach reports on the next scan, so it shouldn't be a
+  one-click accident before an account's thresholds are actually finalized.
+  Only gates OFF → ON; unchecking it back off needs no confirmation. Doesn't
+  auto-save either way — still requires clicking **Save Changes** below,
+  same as every other field in this modal. State: `rtaEnableConfirmOpen` in
+  `SettingsModal.tsx`.
 - **"Test Workforce RTA Logs" button** — same section, always visible
   (independent of the enable toggle). No Zoho sandbox exists for this intake,
   so this sends a REAL submission tagged `[TEST]` in its remarks (safe to
@@ -523,3 +531,43 @@ an older/"already migrated" column is safe to leave in every fallback tier —
 verify it's actually present, or budget a dedicated tier for it. A single
 untested assumption here quietly broke far more than whatever feature
 prompted the last migration.
+
+## `lib/cliqScan.ts` blind to text-based agent breaches (fixed 2026-09-28)
+
+Found while chasing why Wyze's "Out of adherence" breaches — clearly visible
+on the live Overview page, several agents deep — never showed up for
+"Test Workforce RTA Logs" ("No active breaches right now for this account").
+
+Root cause: `components/Dashboard.tsx` (client-side, used by the live
+Dashboard/Overview pages) and `lib/cliqScan.ts` (server-side, used by the
+Cliq scan / Workforce Logs / RTA Logs) each had their OWN copy of the logic
+that turns a raw agent-table row into the `_name`/`_status`/`_duration`/
+`_agentGroup` shape `lib/breaches.ts`'s `buildBreaches()` checks. Dashboard's
+copy also mapped `_extra_<key>`/`_extraDuration_<key>`/`_extraMetric_<key>`
+for any configured `AgentSource.extraCols` — required for a TEXT-BASED
+breach (`AgentExtraColumn.breachText`, e.g. Wyze's "Out of adherence") to be
+detectable at all. `lib/cliqScan.ts`'s copy never mapped those fields, and
+its legacy single-table `AgentSource` synthesis in `fetchAccountData()`
+hardcoded `extraCols: {}` with the comment `"breach scanning never needs
+custom display columns"` — flatly wrong for this breach type. Net effect:
+any account using a text-based custom-column breach was invisible to
+EVERY server-side output — not just the new RTA Logs AI test, but live Cliq
+alerts and Workforce Logs reporting too, silently, for as long as
+`lib/cliqScan.ts` has existed.
+
+Fixed by extracting the correct (Dashboard.tsx) version into one shared,
+canonical `normalizeAgentRow(row, src)` in `lib/breaches.ts`, and switching
+BOTH `lib/cliqScan.ts`'s `fetchAgentSource()` and `Dashboard.tsx`'s own
+`fetchAgentSource()` to call it — including fixing `lib/cliqScan.ts`'s
+legacy-table synthesis to pass `ds.agentExtraColsMap`/
+`agentExtraDurationColsMap`/`agentExtraMetricColsMap` through, matching
+Dashboard.tsx's. There is now only the one implementation, same reasoning as
+`buildBreaches()` itself — this is the SAME class of client/server drift bug
+as the `lib/settings.ts` one directly above; same day, same root cause
+shape ("a server-side copy of client logic silently fell out of sync").
+
+**Takeaway**: any per-row/per-account normalization step that feeds
+`buildBreaches()` must live in `lib/breaches.ts` itself (or be otherwise
+explicitly shared), never re-implemented separately in a page component and
+a server scan file — verified twice now that "just mirror it carefully" does
+not hold up over time.

@@ -6,8 +6,40 @@
 // — whichever thresholds/KPI logic you see on screen is exactly what the
 // Cliq alert used to decide whether to fire.
 
-import type { AccountData, Thresholds, DataSourceConfig } from './types'
+import type { AccountData, Thresholds, DataSourceConfig, AgentSource } from './types'
 import { extractPercent, parseDurationToSeconds, formatSeconds, resolveCell, type StatusThresholds } from './utils'
+
+// ── Normalize one raw agent row from a configured AgentSource ────────────────
+// CANONICAL — used by BOTH components/Dashboard.tsx (client, live polling)
+// AND lib/cliqScan.ts (server, the Cliq/Workforce Logs/RTA Logs scan) so
+// there is only ever one implementation of "how a raw table row becomes a
+// breach-checkable agent", same reasoning as buildBreaches() itself below.
+// CONFIRMED this drifted out of sync once already (2026-09-29): the
+// server-side copy in lib/cliqScan.ts never mapped _extra_*/_extraDuration_*/
+// _extraMetric_* at all, silently making every TEXT-BASED custom-column
+// breach (AgentExtraColumn.breachText, e.g. Wyze's "Out of adherence")
+// invisible to the Cliq/Workforce Logs/RTA Logs scan — Cliq alerts and
+// Workforce Logs had been silently blind to this breach TYPE this whole
+// time, not just the newer RTA Logs AI test that surfaced it.
+export function normalizeAgentRow(row: Record<string, any>, src: AgentSource): Record<string, any> {
+  const out: Record<string, any> = {
+    ...row,
+    _agentGroup:   src.groupByCol ? String(row[src.groupByCol] ?? '') : src.label,
+    _name:         String(row[src.nameCol]     ?? ''),
+    _status:       String(row[src.statusCol]   ?? ''),
+    _duration:     String(row[src.durationCol] ?? ''),
+    _durationSecs: src.durationSecsCol ? String(row[src.durationSecsCol] ?? '') : '',
+  }
+  Object.keys(src.extraCols || {}).forEach(key => {
+    const colName = src.extraCols[key]
+    if (colName) out[`_extra_${key}`] = String(row[colName] ?? '')
+    const durCol = src.extraDurationCols?.[key]
+    if (durCol) out[`_extraDuration_${key}`] = String(row[durCol] ?? '')
+    const metricCol = src.extraMetricCols?.[key]
+    if (metricCol) out[`_extraMetric_${key}`] = String(row[metricCol] ?? '')
+  })
+  return out
+}
 
 export interface BreachRow {
   entity: string; metric: string; value: string; threshold: string

@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, mostRecentUpdatedAt, type BreachRow } from './breaches'
+import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, type BreachRow } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
@@ -42,21 +42,15 @@ export interface ScanResult {
 
 // ── Agent row fetch + normalization — mirrors Dashboard.tsx's fetchAgentSource
 // exactly: legacy agentTable (if set) PLUS every agentSources[] entry are
-// UNIONED (additive, not either/or), each normalized to the same
-// _name/_status/_duration/_durationSecs/_agentGroup shape. ───────────────────
+// UNIONED (additive, not either/or), each normalized via the SAME
+// normalizeAgentRow() Dashboard.tsx now also uses — see that function's
+// comment in lib/breaches.ts for why this must never fork again. ───────────
 async function fetchAgentSource(src: AgentSource, accountId: string): Promise<any[]> {
   if (!src.table) return []
   const accountCol = src.accountCol || 'account_id'
   const { data, error } = await supabase.from(src.table as any).select('*').eq(accountCol, accountId)
   if (error || !data) return []
-  return (data as any[]).map(r => ({
-    ...r,
-    _agentGroup:   src.groupByCol ? String(r[src.groupByCol] ?? '') : src.label,
-    _name:         String(r[src.nameCol] ?? ''),
-    _status:       String(r[src.statusCol] ?? ''),
-    _duration:     String(r[src.durationCol] ?? ''),
-    _durationSecs: src.durationSecsCol ? String(r[src.durationSecsCol] ?? '') : '',
-  }))
+  return (data as any[]).map(r => normalizeAgentRow(r, src))
 }
 
 // Exported so app/api/zoho/test-rta-log/route.ts can compute an account's
@@ -75,7 +69,9 @@ export async function fetchAccountData(ds: DataSourceConfig, accountId: string):
       table: ds.agentTable, accountCol: ds.agentAccountCol,
       nameCol: ds.agentNameCol, statusCol: ds.agentStatusCol,
       durationCol: ds.agentDurationCol, durationSecsCol: ds.agentDurationSecs,
-      extraCols: {}, // breach scanning never needs custom display columns
+      extraCols: ds.agentExtraColsMap || {},
+      extraDurationCols: ds.agentExtraDurationColsMap || {},
+      extraMetricCols: ds.agentExtraMetricColsMap || {},
     })
   }
   if (ds.agentSources) agentSourcesToFetch.push(...ds.agentSources)

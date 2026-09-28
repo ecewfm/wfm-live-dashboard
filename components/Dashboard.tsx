@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, mostRecentUpdatedAt, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
@@ -38,11 +38,9 @@ function col(row: Record<string, any> | null, colName: string): string {
   return String(row[colName] ?? '')
 }
 
-// ── Fetch one agent source (a table + its column mapping) and normalize its
-// rows to _name/_status/_duration/_durationSecs/_agentGroup. Used for both the
-// legacy single-table config (one synthetic AgentSource built from it) and
-// the new multi-source array, so every downstream consumer reads the same
-// shape regardless of how many tables/groups an account is configured with.
+// ── Fetch one agent source (a table + its column mapping), normalized via the
+// SAME normalizeAgentRow() lib/cliqScan.ts uses server-side — see that
+// function's comment in lib/breaches.ts for why this must never fork again.
 async function fetchAgentSource(src: AgentSource, accId: string): Promise<any[]> {
   if (!src.table) return []
   const accountCol = src.accountCol || 'account_id'
@@ -56,38 +54,7 @@ async function fetchAgentSource(src: AgentSource, accId: string): Promise<any[]>
   }
 
   const rows = (res.data as any[]) ?? []
-  // Custom Agent Table columns (DataSourceConfig.agentExtraCols) — each one's
-  // VALUE comes from whichever raw column THIS source mapped it to
-  // (src.extraCols[key]); a key this source never mapped is simply left off
-  // the row, and the table renders it blank for those agents.
-  const extraKeys = Object.keys(src.extraCols || {})
-  return rows.map(r => {
-    const out: Record<string, any> = {
-      ...r,
-      _agentGroup:   src.groupByCol ? String(r[src.groupByCol] ?? '') : src.label,
-      _name:         String(r[src.nameCol]     ?? ''),
-      _status:       String(r[src.statusCol]   ?? ''),
-      _duration:     String(r[src.durationCol] ?? ''),
-      _durationSecs: src.durationSecsCol ? String(r[src.durationSecsCol] ?? '') : '',
-    }
-    extraKeys.forEach(key => {
-      const col = src.extraCols[key]
-      if (col) out[`_extra_${key}`] = String(r[col] ?? '')
-      // Optional companion duration column (see AgentSource.extraDurationCols) —
-      // only meaningful for extra columns with a breachText trigger; read
-      // by lib/breaches.ts to show a real duration as the breach's Value
-      // instead of the raw matched text.
-      const durCol = src.extraDurationCols?.[key]
-      if (durCol) out[`_extraDuration_${key}`] = String(r[durCol] ?? '')
-      // Optional companion metric column (see AgentSource.extraMetricCols) —
-      // read by lib/breaches.ts to show a real per-agent value (e.g. their
-      // current status) as the Breach table's Metric instead of this
-      // column's own fixed label.
-      const metricCol = src.extraMetricCols?.[key]
-      if (metricCol) out[`_extraMetric_${key}`] = String(r[metricCol] ?? '')
-    })
-    return out
-  })
+  return rows.map(r => normalizeAgentRow(r, src))
 }
 
 // ── Main Dashboard component ──────────────────────────────────────────────────
