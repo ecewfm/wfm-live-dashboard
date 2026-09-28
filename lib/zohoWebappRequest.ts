@@ -66,9 +66,13 @@ const ADDED_USER = 'wfm_live_dashboard'
 // that's already confirmed to exist and be recognized by Zoho.
 const REQUESTED_BY = 'powerbi@ececontactcenters.net'
 
-// Fixed for every account-wide breach report, regardless of whether the
-// underlying breach is SLA, queue, or agent-status related — explicit
-// decision (see chat history), not a per-breach-type mapping.
+// DEFAULT category/sub_category for accounts that haven't opted into AI
+// categorization (lib/geminiClassifier.ts) — used regardless of whether the
+// underlying breach is SLA, queue, or agent-status related. An account with
+// rta_ai_categorization_enabled set gets a real, per-breach-type
+// category/sub_category from Gemini instead (createAccountBreachRtaLog's
+// optional category/subCategory params below) — see
+// sql/gemini_ai_categorization.sql.
 const BREACH_CATEGORY = 'Service Level & Volume Management'
 const BREACH_SUB_CATEGORY = 'Understaffing Alert'
 
@@ -162,14 +166,26 @@ async function submitWebappRequest(valuesField: WorkforceRtaLogPayload): Promise
 // Manila and Dumaguete) — per-account list lives in
 // wfm_settings.rta_sites, a comma-separated field SEPARATE from Workforce
 // Logs' single-value Site lookup, which can't represent more than one.
-export async function createAccountBreachRtaLog(accountDisplayName: string, remarks: string, sites: string[]): Promise<void> {
+// `category`/`subCategory` — optional overrides for the fixed
+// BREACH_CATEGORY/BREACH_SUB_CATEGORY defaults, used by
+// lib/geminiClassifier.ts's AI-based per-breach-type grouping (an
+// account can opt into this — see sql/gemini_ai_categorization.sql).
+// Must be a REAL Zoho Category/Sub-Category pairing when provided — the
+// caller (lib/cliqScan.ts) is responsible for validating that before
+// calling this, same as every other plain-text field this integration
+// sends (Zoho's own script validates account/site/requested_by the same
+// way — see the comments below and in lib/geminiClassifier.ts).
+export async function createAccountBreachRtaLog(
+  accountDisplayName: string, remarks: string, sites: string[],
+  category: string = BREACH_CATEGORY, subCategory: string = BREACH_SUB_CATEGORY
+): Promise<void> {
   const result = await submitWebappRequest({
     selection_type: 'Account Wide',
     sites,
     accounts: [accountDisplayName],
     employee: '',
-    category: BREACH_CATEGORY,
-    sub_category: BREACH_SUB_CATEGORY,
+    category,
+    sub_category: subCategory,
     remarks,
     url_link: '',
     recommendation: '',

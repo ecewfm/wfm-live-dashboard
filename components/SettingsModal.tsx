@@ -12,6 +12,8 @@ import {
 } from '@/lib/utils'
 import { addAccount, removeAccount, renameAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
 import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
+import type { GeminiKeyMasked } from '@/lib/geminiKeys'
+import { loadGeminiModels, saveGeminiModels } from '@/lib/geminiModels'
 
 type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq'
 
@@ -312,9 +314,10 @@ interface Props {
   rtaLogsEnabled:    boolean              // this account's Zoho "Workforce RTA Logs" webapp-request toggle (a DIFFERENT Zoho intake — see lib/zohoWebappRequest.ts)
   rtaSites:          string[]             // this account's site(s) for THAT webapp-request — can be more than one, unlike zohoLookups.site
   rtaAccountName:    string               // plain-text override for THAT webapp-request's account name, when accountId doesn't match Zoho's own HR display name ('' = send accountId as-is)
+  rtaAiCategorizationEnabled: boolean     // this account's opt-in for AI (Gemini) per-breach-type category/sub-category grouping — see lib/geminiClassifier.ts
   zohoLookups:       ZohoLookups          // this account's x_Account/Category/Sub_Categories/Site picks
   alarmSound:        string               // this account's Overview-card breach alarm sound ('' = silent)
-  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean, rtaSites: string[], rtaAccountName: string) => void
+  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean, rtaSites: string[], rtaAccountName: string, rtaAiCategorizationEnabled: boolean) => void
   onSaveCliqGlobal: (settings: CliqGlobalSettings) => void
   onAccountsChange: () => void           // called after add/remove
   onConfigureAccount: (id: string) => void  // switch active account + go to Data Sources
@@ -1714,7 +1717,7 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, 
 }
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
@@ -1727,6 +1730,15 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [rtaLogsOn, setRtaLogsOn]       = useState(rtaLogsEnabled)
   const [rtaSitesOn, setRtaSitesOn]     = useState<string[]>(rtaSites)
   const [rtaAcctName, setRtaAcctName]   = useState(rtaAccountName)
+  const [rtaAiCatOn, setRtaAiCatOn]     = useState(rtaAiCategorizationEnabled)
+  const [geminiKeys, setGeminiKeys]     = useState<GeminiKeyMasked[] | null>(null)
+  const [geminiKeyInput, setGeminiKeyInput] = useState('')
+  const [geminiLabelInput, setGeminiLabelInput] = useState('')
+  const [geminiBusy, setGeminiBusy]     = useState(false)
+  const [geminiError, setGeminiError]   = useState<string | null>(null)
+  const [geminiModels, setGeminiModelsState] = useState<string[] | null>(null)
+  const [geminiModelInput, setGeminiModelInput] = useState('')
+  const [geminiModelsBusy, setGeminiModelsBusy] = useState(false)
   const [zohoLu, setZohoLu]             = useState<ZohoLookups>(JSON.parse(JSON.stringify(zohoLookups)))
   const [alarmSnd, setAlarmSnd]         = useState(alarmSound || 'none')
   const [fieldScanning, setFieldScanning] = useState(false)
@@ -1772,6 +1784,80 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       setFieldScanLog([`Request failed: ${e.message}`])
     }
     setFieldScanning(false)
+  }
+
+  // ── Gemini API key pool (global, shared by every account's AI
+  // Categorization toggle) — goes through app/api/gemini/keys since
+  // wfm_gemini_keys has RLS locked down the same way as wfm_cliq_oauth; the
+  // anon client this modal otherwise uses can't reach it directly. ──────────
+  const loadGeminiKeys = useCallback(async () => {
+    try {
+      const res = await fetch('/api/gemini/keys')
+      const data = await res.json()
+      setGeminiKeys(data.keys ?? [])
+    } catch {
+      setGeminiKeys([])
+    }
+  }, [])
+
+  useEffect(() => { loadGeminiKeys() }, [loadGeminiKeys])
+
+  const handleAddGeminiKey = async () => {
+    if (!geminiKeyInput.trim()) return
+    setGeminiBusy(true)
+    setGeminiError(null)
+    try {
+      const res = await fetch('/api/gemini/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: geminiKeyInput.trim(), label: geminiLabelInput.trim() || undefined }),
+      })
+      const data = await res.json()
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`)
+      setGeminiKeys(data.keys ?? [])
+      setGeminiKeyInput('')
+      setGeminiLabelInput('')
+    } catch (e: any) {
+      setGeminiError(e.message)
+    }
+    setGeminiBusy(false)
+  }
+
+  const handleDeleteGeminiKey = async (id: string) => {
+    setGeminiBusy(true)
+    setGeminiError(null)
+    try {
+      const res = await fetch(`/api/gemini/keys?id=${encodeURIComponent(id)}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`)
+      setGeminiKeys(data.keys ?? [])
+    } catch (e: any) {
+      setGeminiError(e.message)
+    }
+    setGeminiBusy(false)
+  }
+
+  // ── Gemini MODEL list (global) — model names aren't secrets, so this goes
+  // straight through the anon client (lib/geminiModels.ts), no service-role
+  // route needed, unlike the API keys above. Tried in the SAME order/on-error
+  // rotation pattern as the keys — see lib/geminiClassifier.ts. ─────────────
+  useEffect(() => { loadGeminiModels().then(setGeminiModelsState) }, [])
+
+  const handleAddGeminiModel = async () => {
+    const trimmed = geminiModelInput.trim()
+    if (!trimmed || !geminiModels || geminiModels.includes(trimmed)) { setGeminiModelInput(''); return }
+    setGeminiModelsBusy(true)
+    const updated = [...geminiModels, trimmed]
+    if (await saveGeminiModels(updated)) { setGeminiModelsState(updated); setGeminiModelInput('') }
+    setGeminiModelsBusy(false)
+  }
+
+  const handleRemoveGeminiModel = async (model: string) => {
+    if (!geminiModels) return
+    setGeminiModelsBusy(true)
+    const updated = geminiModels.filter(m => m !== model)
+    if (await saveGeminiModels(updated)) setGeminiModelsState(updated)
+    setGeminiModelsBusy(false)
   }
 
   // ── Test the Workforce RTA Logs payload against Zoho for real (no sandbox
@@ -2202,6 +2288,91 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   </tbody>
                 </table>
 
+                <div className="sm-section-title" style={{ marginTop: 20 }}>AI CATEGORIZATION (GEMINI)</div>
+                <p className="sm-desc" style={{ marginBottom: 10 }}>
+                  Global — shared by every account&apos;s &quot;Enable AI Categorization&quot; toggle under
+                  Workforce RTA Logs below. Add one or more Gemini API keys; if one errors (bad key,
+                  quota, etc.) the next is tried automatically. Keys are never shown again after
+                  saving — only a masked preview.
+                </p>
+                {geminiKeys === null ? (
+                  <p className="sm-desc">Loading…</p>
+                ) : geminiKeys.length === 0 ? (
+                  <p className="sm-desc" style={{ opacity: 0.75 }}>No API keys added yet.</p>
+                ) : (
+                  <table className="sm-table" style={{ marginBottom: 12 }}>
+                    <tbody>
+                      {geminiKeys.map(k => (
+                        <tr key={k.id}>
+                          <td>
+                            <div className="sm-metric">{k.label}</div>
+                            <div className="sm-metric-sub">
+                              <code>{k.maskedKey}</code>
+                              {k.lastError && <span style={{ color: '#d9534f' }}> — last error: {k.lastError}</span>}
+                            </div>
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <button type="button" className="ds-x" disabled={geminiBusy}
+                              title="Delete this key" style={{ fontSize: 18 }}
+                              onClick={() => handleDeleteGeminiKey(k.id)}>
+                              <i className="bx bx-trash" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                  <input type="text" className="sm-input" placeholder="Gemini API key"
+                    style={{ flex: '2 1 220px' }} value={geminiKeyInput}
+                    onChange={e => setGeminiKeyInput(e.target.value)} />
+                  <input type="text" className="sm-input" placeholder="Label (optional)"
+                    style={{ flex: '1 1 120px' }} value={geminiLabelInput}
+                    onChange={e => setGeminiLabelInput(e.target.value)} />
+                  <button type="button" className="acc-btn acc-btn-cfg" disabled={geminiBusy || !geminiKeyInput.trim()}
+                    style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleAddGeminiKey}>
+                    <i className={`bx ${geminiBusy ? 'bx-loader-alt bx-spin' : 'bx-plus'}`} style={{ marginRight: 6 }} />
+                    Add Key
+                  </button>
+                </div>
+                {geminiError && (
+                  <p className="sm-desc" style={{ color: '#d9534f', marginBottom: 10 }}>{geminiError}</p>
+                )}
+
+                <p className="sm-desc" style={{ marginTop: 16, marginBottom: 6 }}>
+                  <strong>Models</strong> — tried in this same order (top to bottom), exhausting every
+                  key for one model before moving to the next, same as the keys above.
+                </p>
+                {geminiModels === null ? (
+                  <p className="sm-desc">Loading…</p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+                    {geminiModels.map((m, i) => (
+                      <div key={m} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 12, opacity: 0.6, width: 18 }}>{i + 1}.</span>
+                        <code style={{ flex: 1 }}>{m}</code>
+                        <button type="button" className="ds-x" disabled={geminiModelsBusy}
+                          title="Remove this model" style={{ fontSize: 18 }}
+                          onClick={() => handleRemoveGeminiModel(m)}>
+                          <i className="bx bx-trash" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 20 }}>
+                  <input type="text" className="sm-input" placeholder="e.g. gemini-2.0-flash"
+                    style={{ flex: '2 1 220px' }} value={geminiModelInput}
+                    onChange={e => setGeminiModelInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAddGeminiModel() }} />
+                  <button type="button" className="acc-btn acc-btn-cfg" disabled={geminiModelsBusy || !geminiModelInput.trim()}
+                    style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleAddGeminiModel}>
+                    <i className={`bx ${geminiModelsBusy ? 'bx-loader-alt bx-spin' : 'bx-plus'}`} style={{ marginRight: 6 }} />
+                    Add Model
+                  </button>
+                </div>
+
                 <div className="sm-section-title" style={{ marginTop: 20 }}>CLIQ CHANNEL — {accountId}</div>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
                   Enter the <strong>Unique Name</strong> of the Zoho Cliq channel for this account
@@ -2278,8 +2449,22 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                           onChange={() => setRtaLogsOn(prev => !prev)} />
                       </td>
                     </tr>
+                    <tr>
+                      <td><div className="sm-metric">Enable AI Categorization</div><div className="sm-metric-sub">Gemini groups this account&apos;s breaches by type and picks a real Zoho Category/Sub-Category for each group, instead of always sending the fixed one below{geminiKeys && geminiKeys.length === 0 ? ' — add at least one API key below first' : ''}</div></td>
+                      <td style={{ textAlign: 'center' }}>
+                        <input type="checkbox" checked={rtaAiCatOn} disabled={!!geminiKeys && geminiKeys.length === 0}
+                          onChange={() => setRtaAiCatOn(prev => !prev)} />
+                      </td>
+                    </tr>
                   </tbody>
                 </table>
+                {rtaAiCatOn && (
+                  <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10 }}>
+                    If Gemini is unavailable or none of its picks match a real Zoho category on a given
+                    scan, this account&apos;s RTA Logs submission is skipped for that cycle and retried
+                    next time — it will <strong>not</strong> fall back to sending the fixed category below.
+                  </p>
+                )}
                 <p className="sm-desc" style={{ marginTop: 10, marginBottom: 6 }}>
                   <strong>Zoho Account Name</strong> — Zoho&apos;s script resolves the account by
                   matching this against its own HR/Accounts list by NAME, not by <strong>{accountId}</strong>
@@ -2394,7 +2579,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, rtaAcctName); onSaveCliqGlobal(cliqGlobal); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, rtaAcctName, rtaAiCatOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>

@@ -27,6 +27,8 @@ import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
 import { createAccountBreachRtaLog } from './zohoWebappRequest'
+import { classifyBreachesForRtaLog } from './geminiClassifier'
+import { loadZohoFieldOptions, type ZohoFieldOption } from './settings'
 import type { AccountData, AgentSource, DataSourceConfig, Thresholds } from './types'
 import type { StatusThresholds } from './utils'
 
@@ -128,6 +130,7 @@ interface AccountSettingsRow {
   rta_logs_last_sent_at: string | null
   rta_sites: string | null
   rta_account_name: string | null
+  rta_ai_categorization_enabled: boolean | null
 }
 
 export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<ScanResult> {
@@ -157,6 +160,7 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
       id, data_source, kpi_thresholds, status_thresholds, cliq_channel, cliq_last_sent_at,
       wf_logs_enabled, wf_logs_last_sent_at,
       rta_logs_enabled, rta_logs_last_sent_at, rta_sites, rta_account_name,
+      rta_ai_categorization_enabled,
       zoho_account_name, zoho_account_id,
       zoho_category_text, zoho_category_id,
       zoho_subcategory_text, zoho_subcategory_id,
@@ -177,9 +181,18 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
   })
   l(`${(accounts ?? []).length} account(s) total, ${qualifying.length} qualifying (Cliq and/or Workforce Logs and/or RTA Logs).`)
 
+  // Category/Sub-Category options for AI-based RTA Logs grouping
+  // (lib/geminiClassifier.ts) — fetched ONCE per scan, not per account, and
+  // only when at least one qualifying account actually opted in, since this
+  // is a Supabase read every other account has no use for.
+  const wantsAiCategorization = qualifying.some(a => !!a.rta_ai_categorization_enabled)
+  const [categoryOptions, subCategoryOptions] = wantsAiCategorization
+    ? await Promise.all([loadZohoFieldOptions('Category'), loadZohoFieldOptions('Sub_Categories')])
+    : [[], []]
+
   for (const acc of qualifying) {
     try {
-      const didSend = await processAccount(acc, globalSettings, forceSend, l)
+      const didSend = await processAccount(acc, globalSettings, forceSend, l, categoryOptions, subCategoryOptions)
       if (didSend) sent++; else skipped++
     } catch (e: any) {
       // Per-account try/catch — one account's failure must not skip everyone else.
@@ -196,7 +209,9 @@ async function processAccount(
   acc: AccountSettingsRow,
   globalSettings: { enabled: boolean; testMode: boolean; frequencyMinutes: number },
   forceSend: boolean,
-  l: (msg: string) => void
+  l: (msg: string) => void,
+  categoryOptions: ZohoFieldOption[],
+  subCategoryOptions: ZohoFieldOption[]
 ): Promise<boolean> {
   const accountId = acc.id
   const ds = acc.data_source as DataSourceConfig
@@ -286,21 +301,53 @@ async function processAccount(
       if (sites.length === 0) {
         l(`${accountId}: RTA Log webapp request skipped — no Site(s) configured (Zoho requires at least one for Account Wide submissions). Set it under Workforce RTA Logs in Settings.`)
       } else {
-        try {
-          const remarks = formatWorkforceLogRemarks(accountId, breaches)
-          // Zoho's own script resolves "accounts" against its HR/Accounts
-          // master by NAME (confirmed live 2026-09-25: it rejected our raw
-          // internal id "guardianbikes" — "No valid Account was resolved
-          // from HR" — since Zoho's own record is named "Guardian Bikes")
-          // — send the configured override when this account's id doesn't
-          // match its real Zoho display name.
-          const zohoAccountName = acc.rta_account_name || accountId
-          await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
-          l(`${accountId}: RTA Log webapp request submitted.`)
-          updates.rta_logs_last_sent_at = new Date().toISOString()
-          didAnything = true
-        } catch (e: any) {
-          l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
+        // Zoho's own script resolves "accounts" against its HR/Accounts
+        // master by NAME (confirmed live 2026-09-25: it rejected our raw
+        // internal id "guardianbikes" — "No valid Account was resolved
+        // from HR" — since Zoho's own record is named "Guardian Bikes")
+        // — send the configured override when this account's id doesn't
+        // match its real Zoho display name.
+        const zohoAccountName = acc.rta_account_name || accountId
+
+        if (acc.rta_ai_categorization_enabled) {
+          // AI-based per-breach-type grouping (lib/geminiClassifier.ts) —
+          // opt-in per account (2026-09-28). Deliberately NOT falling back
+          // to the fixed category on failure (bad/exhausted keys, or no
+          // pick matching a real Zoho category) — skip this cycle entirely
+          // and retry next time, per the user's explicit choice, rather
+          // than send a mismatched/generic category just to force something
+          // through. Cooldown only advances if at least one group actually
+          // sent — a total failure should retry sooner than a full cooldown
+          // window away, not wait for one.
+          try {
+            const groups = await classifyBreachesForRtaLog(accountId, breaches, categoryOptions, subCategoryOptions)
+            let anySent = false
+            for (const g of groups) {
+              try {
+                await createAccountBreachRtaLog(zohoAccountName, g.remarks, sites, g.category, g.subCategory)
+                l(`${accountId}: RTA Log webapp request submitted (AI-grouped: "${g.category} / ${g.subCategory}").`)
+                anySent = true
+              } catch (e: any) {
+                l(`${accountId}: RTA Log webapp request failed for AI group "${g.category} / ${g.subCategory}" — ${e.message}`)
+              }
+            }
+            if (anySent) {
+              updates.rta_logs_last_sent_at = new Date().toISOString()
+              didAnything = true
+            }
+          } catch (e: any) {
+            l(`${accountId}: AI categorization failed, skipping RTA Logs this cycle (will retry next cycle) — ${e.message}`)
+          }
+        } else {
+          try {
+            const remarks = formatWorkforceLogRemarks(accountId, breaches)
+            await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
+            l(`${accountId}: RTA Log webapp request submitted.`)
+            updates.rta_logs_last_sent_at = new Date().toISOString()
+            didAnything = true
+          } catch (e: any) {
+            l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
+          }
         }
       }
     } else {

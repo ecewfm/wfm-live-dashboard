@@ -31,6 +31,7 @@ export interface AccountSettings {
   rtaLogsEnabled: boolean
   rtaSites: string[]
   rtaAccountName: string
+  rtaAiCategorizationEnabled: boolean
   zohoLookups: ZohoLookups
   alarmSound: string
 }
@@ -44,7 +45,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
       .select(`
         kpi_thresholds, status_thresholds, data_source, dashboard_layout,
         header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
-        rta_logs_enabled, rta_sites, rta_account_name,
+        rta_logs_enabled, rta_sites, rta_account_name, rta_ai_categorization_enabled,
         zoho_account_name, zoho_account_id,
         zoho_category_text, zoho_category_id,
         zoho_subcategory_text, zoho_subcategory_id,
@@ -120,6 +121,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
         rtaLogsEnabled: !!(data as any).rta_logs_enabled,
         rtaSites: String((data as any).rta_sites || '').split(',').map(s => s.trim()).filter(Boolean),
         rtaAccountName: (data as any).rta_account_name || '',
+        rtaAiCategorizationEnabled: !!(data as any).rta_ai_categorization_enabled,
         zohoLookups: {
           account:     { id: (data as any).zoho_account_id     || '', text: (data as any).zoho_account_name    || '' },
           category:    { id: (data as any).zoho_category_id    || '', text: (data as any).zoho_category_text   || '' },
@@ -149,6 +151,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     rtaLogsEnabled: false,
     rtaSites: [],
     rtaAccountName: '',
+    rtaAiCategorizationEnabled: false,
     zohoLookups: { ...DEFAULT_ZOHO_LOOKUPS },
     alarmSound: '',
   }
@@ -294,7 +297,8 @@ export async function saveSettings(
   alarmSound: string = '',
   rtaLogsEnabled: boolean = false,
   rtaSites: string[] = [],
-  rtaAccountName: string = ''
+  rtaAccountName: string = '',
+  rtaAiCategorizationEnabled: boolean = false
 ): Promise<boolean> {
   // 1. Always write to localStorage immediately (instant, works offline)
   saveKpiThresholds(accountId, kpi)
@@ -325,6 +329,7 @@ export async function saveSettings(
         rta_logs_enabled:      rtaLogsEnabled,
         rta_sites:             rtaSites.join(','),
         rta_account_name:      rtaAccountName,
+        rta_ai_categorization_enabled: rtaAiCategorizationEnabled,
         updated_at:            new Date().toISOString(),
       })
     // Each retry step drops the newest-added columns first (alarm_sound and

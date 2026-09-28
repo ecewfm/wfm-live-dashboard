@@ -338,3 +338,102 @@ below) since nothing else about its behavior (whether it also fills
   exact request payload sent, and Zoho's raw response body — this is the
   fastest way to confirm/fix the still-unverified `FORM_LINK_NAME` guess above
   without digging through Vercel logs.
+
+## AI (Gemini) categorization for Workforce RTA Logs
+
+Client-requested (2026-09-28): instead of every account's Workforce RTA Logs
+submission always using the one fixed category/sub-category
+(`BREACH_CATEGORY`/`BREACH_SUB_CATEGORY` in `lib/zohoWebappRequest.ts`), an
+account can opt into having Gemini look at what's ACTUALLY breaching right
+now, group same-type breaches together (e.g. several agents all breaching
+the same AUX/status metric belong in one group; an SLA breach and an
+individual agent's status-duration breach are different groups), and pick a
+REAL Category/Sub-Category from Zoho's own master list for each group — then
+submit ONE Workforce RTA Logs webapp request per group instead of always
+exactly one per account, with its own AI-written natural-language remarks
+(mentioning the specific agents/values involved) instead of the mechanical
+`formatWorkforceLogRemarks()` breach-list formatter.
+
+Decisions made explicitly by the user when this was designed:
+- **Opt-in PER ACCOUNT**, not a global switch (`wfm_settings.
+  rta_ai_categorization_enabled`) — mirrors `rta_logs_enabled`'s own "no
+  global switch" posture, so a bad key or a Gemini outage only affects
+  accounts that turned this on.
+- **No fallback to the fixed category on failure.** If every configured
+  Gemini model/key COMBINATION errors for a scan cycle, or none of a
+  response's picks match a real Zoho category/sub-category, that account's
+  RTA Logs submission is SKIPPED for that cycle and retried next time
+  (cooldown does NOT advance on a total failure, so the retry isn't a full
+  cooldown window away) — a mismatched/generic category is deliberately
+  never sent just to force something through.
+
+- `lib/geminiClassifier.ts` — `classifyBreachesForRtaLog(accountId, breaches,
+  categoryOptions, subCategoryOptions)`. Calls the Gemini API
+  (`generativelanguage.googleapis.com/v1beta`) with structured JSON output
+  (`responseSchema`) — the model returns
+  `{ groups: [{ category, sub_category, remarks }] }`. Every returned
+  category/sub_category is validated against the REAL tree (case-insensitive
+  match, then normalized to Zoho's own exact spelling) — a group that
+  doesn't match anything real is DROPPED individually rather than failing
+  the whole batch, since one bad pick among several groups shouldn't waste
+  the others. Throws only if every model/key combination fails outright, or
+  if NONE of a given attempt's groups validate.
+- Category/Sub-Category reference data is NOT re-scanned by this feature —
+  it reuses `wfm_zoho_field_options` (`lib/settings.ts`'s
+  `loadZohoFieldOptions()`), the SAME table `lib/zohoFieldScan.ts`'s daily
+  scan already populates for the Workforce Logs comboboxes (with
+  parent-child links via `parentId`). `lib/cliqScan.ts` fetches this ONCE
+  per scan run (not per account), and only when at least one qualifying
+  account actually has AI categorization enabled.
+- `lib/geminiKeys.ts` — CRUD for the Gemini API key POOL (global, not
+  per-account — shared by every account's toggle). Locked down the SAME way
+  as `wfm_cliq_oauth` (`sql/cliq_oauth_token.sql`): RLS enabled, NO policies,
+  only `SUPABASE_SERVICE_ROLE_KEY` via `lib/supabaseAdmin.ts` can reach it —
+  the public anon key used everywhere else in this app can never read/write
+  a live Gemini key. The Settings UI only ever sees a MASKED version
+  (`listGeminiKeysMasked()`) via `app/api/gemini/keys` — the raw key is never
+  sent back to the browser after creation.
+- `lib/geminiModels.ts` — the ORDERED Gemini model list, `wfm_gemini_settings`
+  (single global row, `id='global'`, `models` a comma-separated string) —
+  model NAMES aren't secrets, so unlike the key pool this has no RLS
+  lockdown and is read/written directly with the anon client (no API route
+  needed). `loadGeminiModels()` falls back to `[DEFAULT_GEMINI_MODEL]`
+  (`'gemini-2.0-flash'`) when no row exists or the list is empty, so the
+  feature works before anyone's configured a model, same as the key pool
+  needing at least one key added before AI categorization can actually run.
+- **Model/key rotation** — per the user (2026-09-28), models are tried in
+  the SAME left-to-right, exhaust-on-error order as keys: for each model (in
+  the order listed in Settings), every key is tried (oldest first, via
+  `created_at`) before moving to the next model — i.e. model[0]+key[0],
+  model[0]+key[1], … all keys exhausted for model[0], THEN model[1]+key[0],
+  etc. No persisted "which combination is next" state — each call just
+  starts from the top and fails over; simple, and sufficient since failures
+  are expected to be rare. Each key's `last_error`/`last_used_at` is
+  recorded (visible in Settings) purely for diagnosing a broken key, not for
+  the rotation logic itself.
+- `sql/gemini_ai_categorization.sql` — creates `wfm_gemini_keys`
+  (`id`/`label`/`api_key`/`last_error`/`last_used_at`/`created_at`) and
+  `wfm_gemini_settings` (`id`/`models`), and adds
+  `rta_ai_categorization_enabled` to `wfm_settings`.
+- Settings UI: Settings → **Zoho Integrations** tab. A new global
+  "AI CATEGORIZATION (GEMINI)" section (right after Global Cliq Settings,
+  since both keys and models are shared across every account) lists
+  configured keys (masked, with any last error shown inline) with add/delete
+  going through `app/api/gemini/keys` (GET/POST/DELETE, since the anon
+  client can't reach `wfm_gemini_keys` directly), followed by a numbered,
+  reorderable-by-re-adding model list (add/delete only for now — no drag
+  reorder — going straight through `lib/geminiModels.ts`'s anon client
+  calls, no API route needed). The per-account "Enable AI Categorization"
+  checkbox lives in the WORKFORCE RTA LOGS section, right after "Enable
+  Workforce RTA Logs Reporting" — disabled (greyed out) until at least one
+  key exists.
+- `lib/zohoWebappRequest.ts` — `createAccountBreachRtaLog()` gained two
+  optional trailing params, `category`/`subCategory`, defaulting to the
+  fixed `BREACH_CATEGORY`/`BREACH_SUB_CATEGORY` constants when omitted (the
+  non-AI path is unchanged). `lib/cliqScan.ts` passes the AI's validated
+  picks through when `rta_ai_categorization_enabled` is set, looping over
+  every returned group and submitting one webapp request per group.
+- Not yet verified against a live Gemini call (no API key added yet as of
+  this writing) — expect to debug the prompt/schema/validation on the first
+  real test the same way `lib/zohoWebappRequest.ts`'s payload shape needed
+  adjusting on its first live test.
