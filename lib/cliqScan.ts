@@ -58,7 +58,11 @@ async function fetchAgentSource(src: AgentSource, accountId: string): Promise<an
   }))
 }
 
-async function fetchAccountData(ds: DataSourceConfig, accountId: string): Promise<AccountData> {
+// Exported so app/api/zoho/test-rta-log/route.ts can compute an account's
+// CURRENT real breaches when testing with AI Categorization on — the test
+// button needs actual breach data to classify against, unlike the plain
+// non-AI test (a single generic "[TEST] Manual connectivity test" message).
+export async function fetchAccountData(ds: DataSourceConfig, accountId: string): Promise<AccountData> {
   const kpiRows = ds.kpiTable
     ? ((await supabase.from(ds.kpiTable as any).select('*').eq(ds.kpiAccountCol || 'account_id', accountId)).data as any[] ?? [])
     : []

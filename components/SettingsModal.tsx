@@ -1747,9 +1747,16 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [rtaTesting, setRtaTesting]   = useState(false)
   const [rtaTestOkAt, setRtaTestOkAt] = useState<string | null>(null)
   const [rtaTestAuthorizedAs, setRtaTestAuthorizedAs] = useState<{ email: string; displayName: string } | null>(null)
-  const [rtaTestError, setRtaTestError] = useState<{
-    message: string; status?: number; requestUrl?: string; requestBody?: any; responseBody?: any
-  } | null>(null)
+  // A pre-submission failure (bad request, no breaches to classify, every
+  // Gemini model/key combination failed, etc.) — nothing was sent to Zoho.
+  const [rtaTestTopError, setRtaTestTopError] = useState<string | null>(null)
+  // One entry per Zoho submission actually attempted — AI Categorization ON
+  // can mean MORE THAN ONE (one per group, same as the real scan); OFF is
+  // always exactly one. `category`/`subCategory` are only set in AI mode.
+  const [rtaTestSubmissions, setRtaTestSubmissions] = useState<Array<{
+    category?: string; subCategory?: string
+    ok: boolean; status?: number; requestUrl?: string; requestBody?: any; responseBody?: any
+  }> | null>(null)
 
   // ── Force an immediate Cliq scan (bypasses cooldown, not staleness) ─────────
   const handleForceScan = async () => {
@@ -1862,37 +1869,46 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
 
   // ── Test the Workforce RTA Logs payload against Zoho for real (no sandbox
   // exists for this intake) — surfaces success inline, and a full request/
-  // response breakdown in a popup on failure ─────────────────────────────────
+  // response breakdown in a popup on any failed submission ─────────────────
   // Deliberately does NOT persist anything — Test is test-only, by design
   // (per the user, 2026-09-25); only the "Save Changes" button writes to
   // Supabase. A confirmed-working test using typed-but-unsaved values won't
   // survive a refresh until Save Changes is clicked — that's intentional.
+  //
+  // When AI Categorization is on, this sends this account's REAL current
+  // breaches through the same classifier the live scan uses, and submits
+  // ONE test per group it returns — per the user (2026-09-28), the button
+  // should exercise the exact same "many different Workforce RTA Logs when
+  // there's more than one categorization" behavior the real scan has.
   const handleTestRtaLog = async () => {
     setRtaTesting(true)
     setRtaTestOkAt(null)
     setRtaTestAuthorizedAs(null)
-    setRtaTestError(null)
+    setRtaTestTopError(null)
+    setRtaTestSubmissions(null)
     try {
       const res  = await fetch('/api/zoho/test-rta-log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId, sites: rtaSitesOn, zohoAccountName: rtaAcctName || undefined }),
+        body: JSON.stringify({
+          accountId, sites: rtaSitesOn, zohoAccountName: rtaAcctName || undefined,
+          aiEnabled: rtaAiCatOn, ds, kpiThresholds: kpi, statusThresholds: stat,
+        }),
       })
       const data = await res.json()
       setRtaTestAuthorizedAs(data.authorizedAs ?? null)
       if (!res.ok || data.error) {
-        setRtaTestError({ message: data.error || `Request failed (HTTP ${res.status})`, status: res.status })
-      } else if (!data.ok) {
-        setRtaTestError({
-          message: 'Zoho rejected the submission — see details below.',
-          status: data.status, requestUrl: data.requestUrl,
-          requestBody: data.requestBody, responseBody: data.responseBody,
-        })
+        setRtaTestTopError(data.error || `Request failed (HTTP ${res.status})`)
+      } else if (data.aiMode) {
+        const subs = data.submissions ?? []
+        setRtaTestSubmissions(subs)
+        if (subs.length > 0 && subs.every((s: any) => s.ok)) setRtaTestOkAt(new Date().toLocaleString())
       } else {
-        setRtaTestOkAt(new Date().toLocaleString())
+        setRtaTestSubmissions([{ ok: data.ok, status: data.status, requestUrl: data.requestUrl, requestBody: data.requestBody, responseBody: data.responseBody }])
+        if (data.ok) setRtaTestOkAt(new Date().toLocaleString())
       }
     } catch (e: any) {
-      setRtaTestError({ message: `Request failed: ${e.message}` })
+      setRtaTestTopError(`Request failed: ${e.message}`)
     }
     setRtaTesting(false)
   }
@@ -2502,7 +2518,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   clearly-tagged <code>[TEST]</code> submission for <strong>{accountId}</strong> — check
                   Zoho&apos;s own list to confirm it arrived (safe to delete it there afterward). This is
                   test-only — it does <strong>not</strong> save the Zoho Account Name or Site(s) above;
-                  click <strong>Save Changes</strong> below to persist them.
+                  click <strong>Save Changes</strong> below to persist them.{' '}
+                  {rtaAiCatOn && (
+                    <>Since AI Categorization is on, this classifies this account&apos;s REAL current
+                      breaches and sends one <code>[TEST]</code> submission per group — same as a real
+                      scan would (fails with a clear message if nothing is breaching right now).</>
+                  )}
                 </p>
                 <button type="button" className="acc-btn acc-btn-cfg" disabled={rtaTesting}
                   style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleTestRtaLog}>
@@ -2510,12 +2531,21 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   {rtaTesting ? 'Sending...' : 'Test Workforce RTA Logs'}
                 </button>
                 {rtaTestOkAt && (
-                  <div style={{ marginTop: 10, fontSize: 12.5, color: '#2f9e5b', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <i className="bx bx-check-circle" style={{ fontSize: 16 }} />
-                    Zoho accepted the submission at {rtaTestOkAt} — go check the Workforce RTA Logs list.
+                  <div style={{ marginTop: 10, fontSize: 12.5, color: '#2f9e5b' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <i className="bx bx-check-circle" style={{ fontSize: 16 }} />
+                      Zoho accepted {rtaTestSubmissions && rtaTestSubmissions.length > 1 ? `all ${rtaTestSubmissions.length} submissions` : 'the submission'} at {rtaTestOkAt} — go check the Workforce RTA Logs list.
+                    </div>
+                    {rtaTestSubmissions && rtaTestSubmissions.length > 1 && (
+                      <ul style={{ margin: '6px 0 0 22px', padding: 0, fontSize: 12, opacity: 0.85 }}>
+                        {rtaTestSubmissions.map((s, i) => (
+                          <li key={i}>{s.category} / {s.subCategory}</li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                 )}
-                {(rtaTestOkAt || rtaTestError) && (
+                {(rtaTestOkAt || rtaTestTopError || rtaTestSubmissions) && (
                   <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
                     Authorized Zoho account: <strong>{rtaTestAuthorizedAs ? `${rtaTestAuthorizedAs.displayName} <${rtaTestAuthorizedAs.email}>` : 'Unknown (could not read identity — token may predate the profile-read scope; re-authorize to pick it up)'}</strong>
                   </div>
@@ -2588,43 +2618,68 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
         </div>
       </div>
 
-      {rtaTestError && (
-        <div className="sm-err-overlay" onMouseDown={e => { if (e.target === e.currentTarget) setRtaTestError(null) }}>
+      {(rtaTestTopError || (rtaTestSubmissions && rtaTestSubmissions.some(s => !s.ok))) && (
+        <div className="sm-err-overlay" onMouseDown={e => { if (e.target === e.currentTarget) { setRtaTestTopError(null); setRtaTestSubmissions(null) } }}>
           <div className="sm-err-modal">
             <div className="sm-err-header">
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <i className="bx bx-error-circle" style={{ fontSize: 22, color: '#d9534f' }} />
                 <span className="sm-err-title">Workforce RTA Logs test failed</span>
               </div>
-              <button className="sm-close" onClick={() => setRtaTestError(null)}><i className="bx bx-x" /></button>
+              <button className="sm-close" onClick={() => { setRtaTestTopError(null); setRtaTestSubmissions(null) }}><i className="bx bx-x" /></button>
             </div>
             <div className="sm-err-body">
-              <p style={{ margin: '0 0 12px', fontSize: 13 }}>{rtaTestError.message}</p>
-              <div className="sm-err-row">
+              <div className="sm-err-row" style={{ marginBottom: 12 }}>
                 <strong>Authorized Zoho account:</strong>{' '}
                 {rtaTestAuthorizedAs ? `${rtaTestAuthorizedAs.displayName} <${rtaTestAuthorizedAs.email}>` : 'Unknown (could not read identity — re-authorize to pick up the profile-read scope)'}
               </div>
-              {rtaTestError.status != null && (
-                <div className="sm-err-row"><strong>HTTP Status:</strong> {rtaTestError.status}</div>
-              )}
-              {rtaTestError.requestUrl && (
-                <div className="sm-err-row"><strong>Request URL:</strong> {rtaTestError.requestUrl}</div>
-              )}
-              {rtaTestError.requestBody && (
+              {rtaTestTopError ? (
+                <p style={{ margin: '0 0 12px', fontSize: 13 }}>{rtaTestTopError}</p>
+              ) : (
                 <>
-                  <div className="sm-err-row" style={{ marginTop: 10 }}><strong>Request Payload:</strong></div>
-                  <pre className="sm-err-pre">{JSON.stringify(rtaTestError.requestBody, null, 2)}</pre>
-                </>
-              )}
-              {rtaTestError.responseBody && (
-                <>
-                  <div className="sm-err-row" style={{ marginTop: 10 }}><strong>Zoho Response:</strong></div>
-                  <pre className="sm-err-pre">{JSON.stringify(rtaTestError.responseBody, null, 2)}</pre>
+                  <p style={{ margin: '0 0 12px', fontSize: 13 }}>
+                    {rtaTestSubmissions!.length > 1
+                      ? `${rtaTestSubmissions!.filter(s => s.ok).length} of ${rtaTestSubmissions!.length} AI-grouped submissions succeeded — details for each below.`
+                      : 'Zoho rejected the submission — see details below.'}
+                  </p>
+                  {rtaTestSubmissions!.map((s, i) => (
+                    <div key={i} style={{ marginBottom: 14, paddingBottom: 14, borderBottom: i < rtaTestSubmissions!.length - 1 ? '1px solid var(--border,#e1e6e4)' : 'none' }}>
+                      {(s.category || rtaTestSubmissions!.length > 1) && (
+                        <div className="sm-err-row" style={{ marginBottom: 6 }}>
+                          <strong>{s.ok ? '✓' : '✗'} Group {i + 1}{s.category ? `: ${s.category} / ${s.subCategory}` : ''}</strong>
+                        </div>
+                      )}
+                      {s.ok ? (
+                        <div className="sm-err-row" style={{ color: '#2f9e5b' }}>Accepted.</div>
+                      ) : (
+                        <>
+                          {s.status != null && (
+                            <div className="sm-err-row"><strong>HTTP Status:</strong> {s.status}</div>
+                          )}
+                          {s.requestUrl && (
+                            <div className="sm-err-row"><strong>Request URL:</strong> {s.requestUrl}</div>
+                          )}
+                          {s.requestBody && (
+                            <>
+                              <div className="sm-err-row" style={{ marginTop: 10 }}><strong>Request Payload:</strong></div>
+                              <pre className="sm-err-pre">{JSON.stringify(s.requestBody, null, 2)}</pre>
+                            </>
+                          )}
+                          {s.responseBody && (
+                            <>
+                              <div className="sm-err-row" style={{ marginTop: 10 }}><strong>Zoho Response:</strong></div>
+                              <pre className="sm-err-pre">{JSON.stringify(s.responseBody, null, 2)}</pre>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  ))}
                 </>
               )}
             </div>
             <div className="sm-err-footer">
-              <button className="sm-btn-cancel" onClick={() => setRtaTestError(null)}>Close</button>
+              <button className="sm-btn-cancel" onClick={() => { setRtaTestTopError(null); setRtaTestSubmissions(null) }}>Close</button>
             </div>
           </div>
         </div>

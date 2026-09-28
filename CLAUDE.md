@@ -338,6 +338,20 @@ below) since nothing else about its behavior (whether it also fills
   exact request payload sent, and Zoho's raw response body — this is the
   fastest way to confirm/fix the still-unverified `FORM_LINK_NAME` guess above
   without digging through Vercel logs.
+  - **If AI Categorization is on for the account being tested** (per the
+    user, 2026-09-28): the button exercises the SAME AI path the real scan
+    uses instead of the generic message — `app/api/zoho/test-rta-log/route.ts`
+    computes the account's REAL current breaches (`lib/cliqScan.ts`'s
+    `fetchAccountData()` + `lib/breaches.ts`'s `buildBreaches()`), runs them
+    through `lib/geminiClassifier.ts`, and submits one `[TEST]`-prefixed
+    request PER validated group — same "many different Workforce RTA Logs
+    when there's more than one categorization" behavior as production, not
+    just one flat test message. Fails with a clear message if nothing is
+    breaching right now (AI mode needs at least one real breach to classify)
+    rather than silently falling back to the non-AI message. The Settings
+    popup on failure now shows one block per submission attempted (only
+    failed ones expand with full request/response detail) since AI mode can
+    mean more than one Zoho call per test.
 
 ## AI (Gemini) categorization for Workforce RTA Logs
 

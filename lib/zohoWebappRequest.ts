@@ -204,16 +204,29 @@ export async function createAccountBreachRtaLog(
 // caller can show request/response detail on failure rather than just a
 // generic "it failed" message. `sites` — see createAccountBreachRtaLog's
 // comment; required for the same reason.
-export async function testAccountBreachRtaLog(accountDisplayName: string, sites: string[] = []): Promise<WebappRequestResult> {
+//
+// `category`/`subCategory`/`remarksOverride` — used when the account being
+// tested has AI Categorization enabled: app/api/zoho/test-rta-log/route.ts
+// classifies the account's REAL current breaches (same as the live scan)
+// and calls this once per group with that group's picks, instead of the one
+// generic "[TEST] Manual connectivity test" message every non-AI test sends.
+// `remarksOverride` is still prefixed with `[TEST]` so it's just as safe to
+// spot/delete in Zoho as the default message.
+export async function testAccountBreachRtaLog(
+  accountDisplayName: string, sites: string[] = [],
+  category?: string, subCategory?: string, remarksOverride?: string
+): Promise<WebappRequestResult> {
   const ts = new Date().toLocaleString('en-US', { timeZoneName: 'short' })
-  const remarks = `[TEST] Manual connectivity test from WFM Live Dashboard Settings for ${accountDisplayName} at ${ts}. Safe to ignore/delete in Zoho.`
+  const remarks = remarksOverride
+    ? `[TEST] ${remarksOverride}`
+    : `[TEST] Manual connectivity test from WFM Live Dashboard Settings for ${accountDisplayName} at ${ts}. Safe to ignore/delete in Zoho.`
   return submitWebappRequest({
     selection_type: 'Account Wide',
     sites,
     accounts: [accountDisplayName],
     employee: '',
-    category: BREACH_CATEGORY,
-    sub_category: BREACH_SUB_CATEGORY,
+    category: category || BREACH_CATEGORY,
+    sub_category: subCategory || BREACH_SUB_CATEGORY,
     remarks,
     url_link: '',
     recommendation: '',
