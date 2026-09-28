@@ -29,6 +29,7 @@ import { createWorkforceLogRecord } from './zohoCreator'
 import { createAccountBreachRtaLog } from './zohoWebappRequest'
 import { classifyBreachesForRtaLog } from './geminiClassifier'
 import { loadZohoFieldOptions, type ZohoFieldOption } from './settings'
+import { computeRtaLogsChangeSignal, type RtaLogsState } from './rtaLogsChangeDetection'
 import type { AccountData, AgentSource, DataSourceConfig, Thresholds } from './types'
 import type { StatusThresholds } from './utils'
 
@@ -135,6 +136,7 @@ interface AccountSettingsRow {
   rta_sites: string | null
   rta_account_name: string | null
   rta_ai_categorization_enabled: boolean | null
+  rta_logs_state: RtaLogsState | null
 }
 
 export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<ScanResult> {
@@ -158,18 +160,36 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
     frequencyMinutes: (globalRow as any)?.frequency_minutes || 5,
   }
 
-  const { data: accounts, error: accountsErr } = await supabase
-    .from('wfm_settings')
-    .select(`
+  // A FULL select failing on ANY one unknown column would break Cliq +
+  // Workforce Logs + RTA Logs for EVERY account at once (PostgREST rejects
+  // the whole select) — CONFIRMED this exact failure mode already silently
+  // broke Settings' own load/save for months (see lib/settings.ts's
+  // SELECT_TIERS/UPSERT_TIERS, fixed 2026-09-28) before anyone noticed, so
+  // this one extra fallback tier is cheap insurance against the newest
+  // column (rta_logs_state) not being migrated yet breaking the ENTIRE scan
+  // instead of just RTA Logs' change-detection memory.
+  const ACCOUNTS_SELECT = `
       id, data_source, kpi_thresholds, status_thresholds, cliq_channel, cliq_last_sent_at,
       wf_logs_enabled, wf_logs_last_sent_at,
       rta_logs_enabled, rta_logs_last_sent_at, rta_sites, rta_account_name,
-      rta_ai_categorization_enabled,
+      rta_ai_categorization_enabled, rta_logs_state,
       zoho_account_name, zoho_account_id,
       zoho_category_text, zoho_category_id,
       zoho_subcategory_text, zoho_subcategory_id,
       zoho_site_text, zoho_site_id
-    `)
+  `
+  let accounts: any[] | null = null
+  let accountsErr: { message: string } | null = null
+  {
+    const res = await supabase.from('wfm_settings').select(ACCOUNTS_SELECT)
+    if (!res.error) {
+      accounts = res.data
+    } else {
+      const res2 = await supabase.from('wfm_settings').select(ACCOUNTS_SELECT.replace(/,?\s*rta_logs_state/, ''))
+      accounts = res2.data
+      accountsErr = res2.error
+    }
+  }
 
   if (accountsErr) {
     l(`Failed to load accounts: ${accountsErr.message}`)
@@ -237,7 +257,17 @@ async function processAccount(
 
   const breaches = buildBreaches(accountId, accountData, {}, kpiTh, statusTh, ds)
   l(`${accountId}: ${breaches.length} breach(es).`)
-  if (breaches.length === 0) return false
+  if (breaches.length === 0) {
+    // Reset RTA Logs' change-detection baseline once the account is fully
+    // healthy — otherwise a LATER re-breach at a previously-seen value/agent
+    // (see lib/rtaLogsChangeDetection.ts) would look identical to what was
+    // already reported and get silently deduped forever, even though it's
+    // really a fresh occurrence.
+    if (acc.rta_logs_enabled && acc.rta_logs_state) {
+      await supabase.from('wfm_settings').upsert({ id: accountId, account_id: accountId, rta_logs_state: null })
+    }
+    return false
+  }
 
   let didAnything = false
   const updates: Record<string, any> = {}
@@ -292,9 +322,16 @@ async function processAccount(
   // — no Zoho lookup ID needed (an optional plain-text name override
   // instead, see rta_account_name below), so this only needs its own toggle
   // to qualify (no hasAccountLink requirement).
+  //
+  // Deliberately NOT time-cooldown-gated like Cliq/Workforce Logs above —
+  // per the user (2026-09-28), this reports whenever something actually
+  // CHANGED (a KPI's value moved while still breaching, or a new agent
+  // joined an already-breaching status/duration type) and stays quiet
+  // otherwise, even indefinitely, rather than re-alerting on a timer for an
+  // unchanged number. See lib/rtaLogsChangeDetection.ts for the exact rules.
   if (acc.rta_logs_enabled) {
-    const lastSent = acc.rta_logs_last_sent_at ? new Date(acc.rta_logs_last_sent_at).getTime() : 0
-    if (forceSend || Date.now() - lastSent >= cooldownMs) {
+    const { shouldSend, currentSnapshot } = computeRtaLogsChangeSignal(breaches, acc.rta_logs_state)
+    if (forceSend || shouldSend) {
       // Zoho's own processing script requires at least one site for an
       // "Account Wide" submission (confirmed live via its Function_Notes
       // validation feedback) — an account can span MORE THAN ONE site
@@ -337,6 +374,11 @@ async function processAccount(
             }
             if (anySent) {
               updates.rta_logs_last_sent_at = new Date().toISOString()
+              // Refresh the change-detection baseline to the CURRENT
+              // snapshot whenever we actually send — including a forced
+              // send that had shouldSend===false, so a forced re-test
+              // doesn't get treated as "stale" on the very next real cycle.
+              updates.rta_logs_state = currentSnapshot
               didAnything = true
             }
           } catch (e: any) {
@@ -348,6 +390,7 @@ async function processAccount(
             await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
             l(`${accountId}: RTA Log webapp request submitted.`)
             updates.rta_logs_last_sent_at = new Date().toISOString()
+            updates.rta_logs_state = currentSnapshot
             didAnything = true
           } catch (e: any) {
             l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
@@ -355,7 +398,7 @@ async function processAccount(
         }
       }
     } else {
-      l(`${accountId}: RTA Logs within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
+      l(`${accountId}: RTA Logs — no new/changed breach signature since the last report — skipping.`)
     }
   }
 

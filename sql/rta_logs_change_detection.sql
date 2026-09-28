@@ -1,0 +1,24 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Workforce RTA Logs change-detection cadence — one-time column add
+-- Run once in: Supabase Dashboard → SQL Editor → New Query
+-- Safe to re-run (ADD COLUMN is IF NOT EXISTS).
+--
+-- Per the user (2026-09-28): Workforce RTA Logs reporting no longer uses a
+-- plain time cooldown (unlike Cliq/Workforce Logs, which still do) — it
+-- reports whenever something actually CHANGED since the last report, and
+-- stays quiet otherwise. See lib/rtaLogsChangeDetection.ts for the exact
+-- rules (different for a KPI breach — e.g. SLA % — vs. an agent-status
+-- breach) and lib/cliqScan.ts for where this gates the actual send.
+--
+-- rta_logs_state — jsonb snapshot of the breach signature as of the last
+--                   time a Workforce RTA Logs report was actually sent for
+--                   this account: `{ kpi: {...}, agent: {...} }` (see
+--                   lib/rtaLogsChangeDetection.ts's RtaLogsState). Cleared
+--                   to NULL whenever the account has ZERO active breaches
+--                   (lib/cliqScan.ts) — so a LATER re-breach, even at a
+--                   previously-seen value/agent, is treated as fresh rather
+--                   than silently deduped forever just because that exact
+--                   value/name was once reported a while ago.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE wfm_settings ADD COLUMN IF NOT EXISTS rta_logs_state jsonb;

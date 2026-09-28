@@ -2452,9 +2452,18 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
                   A SEPARATE Zoho intake from Workforce Logs above — submits a &quot;Workforce RTA
                   Logs&quot; webapp request (account-wide, category fixed to Service Level &amp; Volume
-                  Management / Understaffing Alert) instead of a Workforce Logs record. Just the
-                  account&apos;s own id, its Site(s), and a plain-text breach summary — no Zoho lookup
-                  IDs to resolve.
+                  Management / Understaffing Alert unless AI Categorization below picks a better one)
+                  instead of a Workforce Logs record. Just the account&apos;s own id, its Site(s), and a
+                  plain-text breach summary — no Zoho lookup IDs to resolve.
+                </p>
+                <p className="sm-desc" style={{ marginBottom: 10 }}>
+                  <strong>Cadence — NOT the Re-alert Frequency cooldown above.</strong> This reports
+                  whenever something actually changes: a KPI (e.g. SLA %) reports every time its value
+                  moves while still breaching, but stays quiet while it sits at the exact same number;
+                  an agent-status breach only reports again when a NEW agent joins that breach type,
+                  not just because an already-known agent&apos;s duration keeps climbing. Once the
+                  account is fully healthy again, the next breach — even at a number/agent seen
+                  before — is treated as fresh.
                 </p>
                 <table className="sm-table">
                   <tbody>
@@ -2578,8 +2587,10 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
                   Runs the breach scan (Cliq alert + Workforce Logs record + Workforce RTA Logs
                   request) immediately instead of waiting for the next scheduled minute — bypasses
-                  the cooldown above, but not the staleness suppression (an account whose data
-                  hasn&apos;t updated recently still won&apos;t send).
+                  the Re-alert Frequency cooldown above for Cliq/Workforce Logs, but not the
+                  staleness suppression (an account whose data hasn&apos;t updated recently still
+                  won&apos;t send). Workforce RTA Logs isn&apos;t on that cooldown at all — see its
+                  own section above for when it actually reports.
                 </p>
                 <button type="button" className="acc-btn acc-btn-cfg" disabled={cliqScanning}
                   style={{ fontSize: 13, padding: '9px 16px' }} onClick={handleForceScan}>

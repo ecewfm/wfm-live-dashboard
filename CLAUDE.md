@@ -317,13 +317,52 @@ below) since nothing else about its behavior (whether it also fills
 - `lib/cliqScan.ts` — per-account gate is just `rta_logs_enabled` (no account
   link requirement, unlike Workforce Logs, since there's no lookup ID to
   resolve — just optional plain-text overrides, see above and `rta_sites`).
-  Cooldown (`wfm_settings.rta_logs_last_sent_at`) reuses the same global
-  "Re-alert Frequency" setting as Cliq/Workforce Logs. `remarks` is the exact
-  same `BreachRow[] -> text` formatting (`formatWorkforceLogRemarks`)
-  Workforce Logs already uses — one shared formatter, two different Zoho
-  destinations.
+  `remarks` (non-AI path) is the exact same `BreachRow[] -> text` formatting
+  (`formatWorkforceLogRemarks`) Workforce Logs already uses — one shared
+  formatter, two different Zoho destinations. `rta_logs_last_sent_at` is
+  still updated on every successful send, but is PURELY informational now
+  (see cadence below) — no longer used to gate sending.
 - `sql/zoho_rta_logs.sql` — adds `rta_logs_enabled` + `rta_logs_last_sent_at`
   + `rta_sites` + `rta_account_name` to `wfm_settings`.
+
+### Cadence — change-detection, NOT a time cooldown
+
+Per the user (2026-09-28): unlike Cliq/Workforce Logs (which both still use
+the global "Re-alert Frequency" time cooldown), Workforce RTA Logs reports
+whenever something actually CHANGED and stays quiet otherwise — even
+indefinitely, with no timer forcing a resend of an unchanged number.
+
+- A **KPI/queue-level breach** (e.g. SLA %) reports every time its VALUE
+  changes while still breaching (75% → 72% → 78%, all under threshold, each
+  one reports) — but not while it sits at the exact same value.
+- An **agent-status breach** only reports again when a NEW agent name joins
+  that breach type (e.g. someone new starts breaching "Case Follow Up
+  Duration") — NOT just because an already-known agent's duration keeps
+  climbing.
+- Once an account has ZERO active breaches, the baseline is cleared — a
+  LATER re-breach, even at a value/agent seen before, is treated as fresh
+  rather than deduped forever.
+- `lib/breaches.ts` — every `BreachRow` now carries a `kind: 'kpi' | 'agent'`
+  tag (set at every `rows.push(...)` site) so the two different rules above
+  can actually be told apart — `'kpi'` for every KPI-group-derived breach,
+  `'agent'` for every one of the three agent-status breach checks (duration,
+  static-duration, text-based).
+- `lib/rtaLogsChangeDetection.ts` — `computeRtaLogsChangeSignal(breaches,
+  storedState)`. Builds the CURRENT snapshot (`{ kpi: { "entity|metric":
+  value }, agent: { metric: [agent names] } }`), compares it against the
+  stored one, and returns `{ shouldSend, currentSnapshot }`. `lib/cliqScan.ts`
+  gates the whole RTA Logs block on `forceSend || shouldSend` (replacing the
+  old `Date.now() - lastSent >= cooldownMs` check), and — only when a send
+  actually happens (AI-grouped or not, forced or not) — persists
+  `currentSnapshot` as the new baseline (`wfm_settings.rta_logs_state`,
+  `sql/rta_logs_change_detection.sql`). A no-send cycle never touches the
+  stored state.
+- The accounts query in `lib/cliqScan.ts`'s `runCliqScan()` now has a
+  one-tier fallback dropping `rta_logs_state` if that column isn't migrated
+  yet, instead of failing the WHOLE select (which would silently break
+  Cliq + Workforce Logs + RTA Logs for every account at once) — see
+  `lib/settings.ts`'s own near-identical bug (below) for why this matters:
+  PostgREST rejects an entire select over any one unknown column.
 - Settings UI: Settings → **Zoho Integrations** tab → "WORKFORCE RTA LOGS —
   {account}" section, below Workforce Logs Reporting. Just a checkbox — no
   lookup comboboxes, since category/sub_category are fixed constants and the
@@ -447,7 +486,40 @@ Decisions made explicitly by the user when this was designed:
   non-AI path is unchanged). `lib/cliqScan.ts` passes the AI's validated
   picks through when `rta_ai_categorization_enabled` is set, looping over
   every returned group and submitting one webapp request per group.
-- Not yet verified against a live Gemini call (no API key added yet as of
-  this writing) — expect to debug the prompt/schema/validation on the first
-  real test the same way `lib/zohoWebappRequest.ts`'s payload shape needed
-  adjusting on its first live test.
+- **CONFIRMED working live (2026-09-28)** — a real Gemini-classified test
+  submission posted to Zoho successfully (Test Workforce RTA Logs button,
+  AI Categorization on).
+
+## `lib/settings.ts` load/save silently dropping fields (fixed 2026-09-28)
+
+Found while chasing why `rta_sites`/`rta_account_name` kept reverting to
+blank after a reload despite clicking Save Changes. Root cause turned out to
+be much bigger than those two fields:
+
+`header_band_color`/`header_text_color` (`sql/header_colors.sql`) and
+`alarm_sound` were **never actually migrated** on this Supabase project.
+PostgREST rejects an ENTIRE select/upsert if even one named column doesn't
+exist — and the old retry-tier fallback chain in both `loadSettings()` and
+`saveSettings()` kept those two/three broken columns bundled together with
+`rta_sites`/`rta_account_name`/`rta_logs_enabled`/etc. in the SAME tier, all
+the way down to the second-to-last one. So every load AND every save was
+silently collapsing to the bare-minimum tier (just
+kpi/status/data_source/dashboard_layout) — discarding `cliq_channel`,
+`wf_logs_enabled`, every Zoho lookup, `alarm_sound`, and every `rta_*` field,
+every single time, regardless of what was actually saved. This was NOT
+specific to RTA Logs — it affected everything past the 4 bare-minimum
+fields, silently, this whole time.
+
+Fixed by rewriting both functions to use a genuinely granular, loop-based
+tier system (`SELECT_TIERS`/`UPSERT_TIERS` in `lib/settings.ts`) that
+isolates ONLY the confirmed-broken columns into their own tier, instead of
+bundling them with unrelated, definitely-present newer columns. Verified
+live directly against Supabase REST (bypassing the app) that the corrected
+tier-1 payload (everything except `alarm_sound`) persists `rta_sites`/
+`rta_account_name` correctly.
+
+**Takeaway for any future column addition to `wfm_settings`**: never assume
+an older/"already migrated" column is safe to leave in every fallback tier —
+verify it's actually present, or budget a dedicated tier for it. A single
+untested assumption here quietly broke far more than whatever feature
+prompted the last migration.

@@ -12,6 +12,13 @@ import { extractPercent, parseDurationToSeconds, formatSeconds, resolveCell, typ
 export interface BreachRow {
   entity: string; metric: string; value: string; threshold: string
   severity: 'warning' | 'critical'
+  // 'kpi' (account/queue-level, e.g. SLA %) vs 'agent' (a specific agent's
+  // status/duration breach) — used by lib/rtaLogsChangeDetection.ts to
+  // decide whether a repeat breach is "new" differently per kind: a KPI
+  // breach is new whenever its VALUE changes (even while still breaching);
+  // an agent breach is new only when a NAME not seen before joins that
+  // breach type, not on every duration tick for an already-known agent.
+  kind: 'kpi' | 'agent'
 }
 
 // ── Freshest updated_at across all of an account's KPI rows ───────────────────
@@ -53,8 +60,8 @@ export function buildBreaches(
     if (th.excludeZero && num === 0) return
     const isCrit = th.direction === 'desc' ? num <= th.crit : num >= th.crit
     const isWarn = th.direction === 'desc' ? num <= th.warn : num >= th.warn
-    if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical' })
-    else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning'  })
+    if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical', kind: 'kpi' })
+    else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning',  kind: 'kpi' })
   }
 
   // KPI breaches — one pass per manually-defined group
@@ -121,8 +128,8 @@ export function buildBreaches(
       const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
       const mins = secs / 60
       const dur  = formatSeconds(secs)
-      if (mins >= thSt.crit)      rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical' })
-      else if (mins >= thSt.warn) rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning'  })
+      if (mins >= thSt.crit)      rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical', kind: 'agent' })
+      else if (mins >= thSt.warn) rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning',  kind: 'agent' })
     }
 
     // Static-mode Duration: a plain NUMERIC threshold on the value itself
@@ -139,8 +146,8 @@ export function buildBreaches(
         const isWarn = th.direction === 'desc' ? num <= th.warn : num >= th.warn
         const label  = ds.agentDurationLabel || 'Duration'
         const cmp    = th.direction === 'desc' ? '≤' : '≥'
-        if (isCrit)      rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.crit}`, severity: 'critical' })
-        else if (isWarn) rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.warn}`, severity: 'warning'  })
+        if (isCrit)      rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.crit}`, severity: 'critical', kind: 'agent' })
+        else if (isWarn) rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.warn}`, severity: 'warning',  kind: 'agent' })
       }
     }
 
@@ -179,7 +186,7 @@ export function buildBreaches(
         // reads "Junnel | Away | 4m 26s | Out of adherence" instead of
         // "Junnel | Adherence | Out of adherence | Out of adherence".
         const metricVal = String(a[`_extraMetric_${col.key}`] ?? '').trim()
-        rows.push({ entity: name, metric: metricVal || col.label, value: durationVal || raw, threshold: trigger, severity: col.breachSeverity || 'critical' })
+        rows.push({ entity: name, metric: metricVal || col.label, value: durationVal || raw, threshold: trigger, severity: col.breachSeverity || 'critical', kind: 'agent' })
       }
     })
   })
