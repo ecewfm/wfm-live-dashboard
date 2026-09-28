@@ -38,65 +38,65 @@ export interface AccountSettings {
 
 // ── Load settings for one account ─────────────────────────────────────────────
 // Priority: Supabase → localStorage → hardcoded defaults
+// Each tier is tried in order, stopping at the first one PostgREST accepts.
+// PostgREST rejects the WHOLE select if even ONE named column doesn't exist
+// on this Supabase project — so tiers must be layered from "everything" down
+// to "only what's certainly always present" ONE genuinely-uncertain column
+// (or tightly-related group) at a time. A previous version of this bundled
+// header_band_color/header_text_color into every tier down to the last one —
+// CONFIRMED live (2026-09-28) that column was never actually migrated on
+// this project (sql/header_colors.sql was never run), so EVERY tier before
+// the bare-minimum one kept failing on it, silently discarding
+// cliq_channel/wf_logs_enabled/every zoho_* lookup/alarm_sound/every rta_*
+// field on EVERY load — not because those columns were missing (they
+// weren't), but because they were bundled in the same failing tier as two
+// genuinely-missing, unrelated columns. Same root cause independently hit
+// saveSettings() below (alarm_sound also unmigrated, bundled with rta_* in
+// its retry tier) — together this is why Zoho Account Name/Site(s) (and
+// others) appeared to "not persist": they were saving fine on some tries and
+// loading fine on none, or vice versa, depending which tier the two ops
+// each happened to fall back to.
+const SELECT_TIERS = [
+  `kpi_thresholds, status_thresholds, data_source, dashboard_layout,
+   header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
+   rta_logs_enabled, rta_sites, rta_account_name, rta_ai_categorization_enabled,
+   zoho_account_name, zoho_account_id,
+   zoho_category_text, zoho_category_id,
+   zoho_subcategory_text, zoho_subcategory_id,
+   zoho_site_text, zoho_site_id, alarm_sound`,
+  // Drop ONLY header_band_color/header_text_color/alarm_sound — confirmed
+  // the two/three actually-unmigrated columns on this project — nothing
+  // else. If your project HAS run those migrations, this tier is never
+  // reached; the top one above succeeds outright.
+  `kpi_thresholds, status_thresholds, data_source, dashboard_layout,
+   cliq_channel, wf_logs_enabled,
+   rta_logs_enabled, rta_sites, rta_account_name, rta_ai_categorization_enabled,
+   zoho_account_name, zoho_account_id,
+   zoho_category_text, zoho_category_id,
+   zoho_subcategory_text, zoho_subcategory_id,
+   zoho_site_text, zoho_site_id`,
+  // Additionally drop rta_* — in case THOSE aren't migrated yet elsewhere.
+  `kpi_thresholds, status_thresholds, data_source, dashboard_layout,
+   cliq_channel, wf_logs_enabled,
+   zoho_account_name, zoho_account_id,
+   zoho_category_text, zoho_category_id,
+   zoho_subcategory_text, zoho_subcategory_id,
+   zoho_site_text, zoho_site_id`,
+  // Additionally drop zoho_*/wf_logs_enabled.
+  `kpi_thresholds, status_thresholds, data_source, dashboard_layout, cliq_channel`,
+  // Bare minimum — always present.
+  `kpi_thresholds, status_thresholds, data_source, dashboard_layout`,
+]
+
 export async function loadSettings(accountId: string): Promise<AccountSettings> {
   try {
-    let { data, error } = await supabase
-      .from('wfm_settings')
-      .select(`
-        kpi_thresholds, status_thresholds, data_source, dashboard_layout,
-        header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
-        rta_logs_enabled, rta_sites, rta_account_name, rta_ai_categorization_enabled,
-        zoho_account_name, zoho_account_id,
-        zoho_category_text, zoho_category_id,
-        zoho_subcategory_text, zoho_subcategory_id,
-        zoho_site_text, zoho_site_id, alarm_sound
-      `)
-      .eq('id', accountId)
-      .maybeSingle()
-
-    // Each retry step drops the newest-added columns first (alarm_sound and
-    // rta_logs_enabled/rta_sites, then zoho_*/wf_logs_enabled) — PostgREST errors the WHOLE select on
-    // any one unknown column, so an account whose migrations haven't all
-    // been run yet still gets everything that DOES exist, rather than
-    // falling straight to the localStorage-only fallback below.
-    if (error) {
-      const retry0 = await supabase
-        .from('wfm_settings')
-        .select(`
-          kpi_thresholds, status_thresholds, data_source, dashboard_layout,
-          header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
-          zoho_account_name, zoho_account_id,
-          zoho_category_text, zoho_category_id,
-          zoho_subcategory_text, zoho_subcategory_id,
-          zoho_site_text, zoho_site_id
-        `)
-        .eq('id', accountId)
-        .maybeSingle()
-      if (!retry0.error) {
-        data = retry0.data as any
-        error = null
-      } else {
-        const retry1 = await supabase
-          .from('wfm_settings')
-          .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout, header_band_color, header_text_color, cliq_channel')
-          .eq('id', accountId)
-          .maybeSingle()
-        if (!retry1.error) {
-          data = retry1.data as any
-          error = null
-        } else {
-          const retry2 = await supabase
-            .from('wfm_settings')
-            .select('kpi_thresholds, status_thresholds, data_source, dashboard_layout')
-            .eq('id', accountId)
-            .maybeSingle()
-          data  = retry2.data as any
-          error = retry2.error
-        }
-      }
+    let data: any = null
+    for (const cols of SELECT_TIERS) {
+      const res = await supabase.from('wfm_settings').select(cols).eq('id', accountId).maybeSingle()
+      if (!res.error) { data = res.data; break }
     }
 
-    if (!error && data) {
+    if (data) {
       const localColors = loadHeaderColorsLocal(accountId)
       const settings: AccountSettings = {
         kpi:    data.kpi_thresholds
@@ -307,74 +307,51 @@ export async function saveSettings(
 
   // 2. Write to Supabase (shared across all browsers/devices)
   try {
-    let { error } = await supabase
-      .from('wfm_settings')
-      .upsert({
-        id:                    accountId,
-        account_id:            accountId,
-        kpi_thresholds:        kpi,
-        status_thresholds:     status,
-        data_source:           ds,
-        cliq_channel:          cliqChannel,
-        wf_logs_enabled:       wfLogsEnabled,
-        zoho_account_name:     zohoLookups.account.text,
-        zoho_account_id:       zohoLookups.account.id,
-        zoho_category_text:    zohoLookups.category.text,
-        zoho_category_id:      zohoLookups.category.id,
-        zoho_subcategory_text: zohoLookups.subCategory.text,
-        zoho_subcategory_id:   zohoLookups.subCategory.id,
-        zoho_site_text:        zohoLookups.site.text,
-        zoho_site_id:          zohoLookups.site.id,
-        alarm_sound:           alarmSound,
-        rta_logs_enabled:      rtaLogsEnabled,
-        rta_sites:             rtaSites.join(','),
-        rta_account_name:      rtaAccountName,
-        rta_ai_categorization_enabled: rtaAiCategorizationEnabled,
-        updated_at:            new Date().toISOString(),
-      })
-    // Each retry step drops the newest-added columns first (alarm_sound and
-    // rta_logs_enabled/rta_sites, then zoho_*/wf_logs_enabled) — PostgREST rejects the WHOLE upsert on
-    // any one unknown column, so an account whose migrations haven't all
-    // been run yet still saves everything that DOES exist.
-    if (error) {
-      const retry0 = await supabase
-        .from('wfm_settings')
-        .upsert({
-          id:                    accountId,
-          account_id:            accountId,
-          kpi_thresholds:        kpi,
-          status_thresholds:     status,
-          data_source:           ds,
-          cliq_channel:          cliqChannel,
-          wf_logs_enabled:       wfLogsEnabled,
-          zoho_account_name:     zohoLookups.account.text,
-          zoho_account_id:       zohoLookups.account.id,
-          zoho_category_text:    zohoLookups.category.text,
-          zoho_category_id:      zohoLookups.category.id,
-          zoho_subcategory_text: zohoLookups.subCategory.text,
-          zoho_subcategory_id:   zohoLookups.subCategory.id,
-          zoho_site_text:        zohoLookups.site.text,
-          zoho_site_id:          zohoLookups.site.id,
-          updated_at:            new Date().toISOString(),
-        })
-      if (!retry0.error) {
-        error = null
-      } else {
-        const retry1 = await supabase
-          .from('wfm_settings')
-          .upsert({
-            id:                accountId,
-            account_id:        accountId,
-            kpi_thresholds:    kpi,
-            status_thresholds: status,
-            data_source:       ds,
-            cliq_channel:      cliqChannel,
-            updated_at:        new Date().toISOString(),
-          })
-        error = retry1.error
-      }
+    const fullPayload: Record<string, any> = {
+      id:                    accountId,
+      account_id:            accountId,
+      kpi_thresholds:        kpi,
+      status_thresholds:     status,
+      data_source:           ds,
+      cliq_channel:          cliqChannel,
+      wf_logs_enabled:       wfLogsEnabled,
+      zoho_account_name:     zohoLookups.account.text,
+      zoho_account_id:       zohoLookups.account.id,
+      zoho_category_text:    zohoLookups.category.text,
+      zoho_category_id:      zohoLookups.category.id,
+      zoho_subcategory_text: zohoLookups.subCategory.text,
+      zoho_subcategory_id:   zohoLookups.subCategory.id,
+      zoho_site_text:        zohoLookups.site.text,
+      zoho_site_id:          zohoLookups.site.id,
+      alarm_sound:           alarmSound,
+      rta_logs_enabled:      rtaLogsEnabled,
+      rta_sites:             rtaSites.join(','),
+      rta_account_name:      rtaAccountName,
+      rta_ai_categorization_enabled: rtaAiCategorizationEnabled,
+      updated_at:            new Date().toISOString(),
     }
-    if (error) { console.warn('[settings] Supabase save error:', error.message); return false }
+
+    // Mirrors SELECT_TIERS' logic above (same bug, same fix) — must drop ONE
+    // genuinely-unmigrated column (alarm_sound, confirmed live 2026-09-28) at
+    // a time rather than bundling it with unrelated, definitely-present
+    // columns (rta_*), which were silently never being saved as a result.
+    const UPSERT_TIERS: string[][] = [
+      Object.keys(fullPayload),
+      Object.keys(fullPayload).filter(k => k !== 'alarm_sound'),
+      Object.keys(fullPayload).filter(k => k !== 'alarm_sound' && !k.startsWith('rta_')),
+      ['id', 'account_id', 'kpi_thresholds', 'status_thresholds', 'data_source', 'cliq_channel', 'updated_at'],
+    ]
+
+    let lastError: { message: string } | null = null
+    for (const keys of UPSERT_TIERS) {
+      const payload: Record<string, any> = {}
+      keys.forEach(k => { payload[k] = fullPayload[k] })
+      const { error } = await supabase.from('wfm_settings').upsert(payload)
+      if (!error) { lastError = null; break }
+      lastError = error
+    }
+
+    if (lastError) { console.warn('[settings] Supabase save error:', lastError.message); return false }
     return true
   } catch (e) {
     console.warn('[settings] Supabase save failed:', e)
