@@ -342,6 +342,23 @@ indefinitely, with no timer forcing a resend of an unchanged number.
 - Once an account has ZERO active breaches, the baseline is cleared — a
   LATER re-breach, even at a value/agent seen before, is treated as fresh
   rather than deduped forever.
+- **Per-account scope: WHICH breach kinds count** (`rta_report_kpi`/
+  `rta_report_agent_status`, `sql/rta_logs_breach_scope.sql`, 2026-09-29) —
+  two independent toggles gate whether the automatic send considers KPI Tile
+  breaches (SLA, Abandon Rate, etc. — `BreachRow.kind === 'kpi'`) and/or
+  Agent Status breaches (`kind === 'agent'`). **Default: KPI Tiles ON, Agent
+  Status OFF** — an account with only agent-status breaches active (e.g.
+  Wyze's "Out of adherence") sends nothing automatically unless Agent Status
+  reporting is explicitly turned on. `lib/cliqScan.ts`'s `processAccount()`
+  filters `breaches` down to `rtaBreaches` by this scope BEFORE
+  change-detection/remarks/AI classification even run — an account with
+  both toggles off always skips with a log line, regardless of what's
+  breaching. The manual Test button applies the SAME filter in AI mode (via
+  `reportKpi`/`reportAgentStatus` in the request body) so a test reflects
+  the account's real configured scope, not everything currently breaching.
+  Settings UI: two checkboxes right under "Enable Workforce RTA Logs
+  Reporting", before "Enable AI Categorization" (which classifies whatever
+  scope is left after this filter, not the account's full breach list).
 - **Staleness halts the automatic send too** — `processAccount()` in
   `lib/cliqScan.ts` checks `isDataStale()` (same 5-minute threshold as the
   dashboard's own "DATA NOT IN SYNC" overlay) immediately after fetching an

@@ -80,6 +80,8 @@ export default function Dashboard() {
   const [rtaSitesMap, setRtaSitesMap]           = useState<Record<string, string[]>>({})
   const [rtaAccountNameMap, setRtaAccountNameMap] = useState<Record<string, string>>({})
   const [rtaAiCategorizationMap, setRtaAiCategorizationMap] = useState<Record<string, boolean>>({})
+  const [rtaReportKpiMap, setRtaReportKpiMap]                     = useState<Record<string, boolean>>({})
+  const [rtaReportAgentStatusMap, setRtaReportAgentStatusMap]     = useState<Record<string, boolean>>({})
   const [zohoLookupsMap, setZohoLookupsMap]     = useState<Record<string, ZohoLookups>>({})
   const [alarmSounds, setAlarmSounds]           = useState<Record<string, string>>({})
   const [cliqGlobal, setCliqGlobal]             = useState<CliqGlobalSettings>(DEFAULT_CLIQ_GLOBAL_SETTINGS)
@@ -258,6 +260,8 @@ export default function Dashboard() {
       const rtaSitesMap2: Record<string, string[]>      = {}
       const rtaAcctNameMap2: Record<string, string>     = {}
       const rtaAiCatMap2: Record<string, boolean>       = {}
+      const rtaReportKpiMap2: Record<string, boolean>         = {}
+      const rtaReportAgentStatusMap2: Record<string, boolean> = {}
       const zohoLuMap: Record<string, ZohoLookups>      = {}
       const alarmMap: Record<string, string>            = {}
       ids.forEach(id => {
@@ -272,6 +276,8 @@ export default function Dashboard() {
         rtaSitesMap2[id] = allSettings[id].rtaSites
         rtaAcctNameMap2[id] = allSettings[id].rtaAccountName
         rtaAiCatMap2[id] = allSettings[id].rtaAiCategorizationEnabled
+        rtaReportKpiMap2[id] = allSettings[id].rtaReportKpi
+        rtaReportAgentStatusMap2[id] = allSettings[id].rtaReportAgentStatus
         zohoLuMap[id]   = allSettings[id].zohoLookups
         alarmMap[id]    = allSettings[id].alarmSound
       })
@@ -286,6 +292,8 @@ export default function Dashboard() {
       setRtaSitesMap(rtaSitesMap2)
       setRtaAccountNameMap(rtaAcctNameMap2)
       setRtaAiCategorizationMap(rtaAiCatMap2)
+      setRtaReportKpiMap(rtaReportKpiMap2)
+      setRtaReportAgentStatusMap(rtaReportAgentStatusMap2)
       setZohoLookupsMap(zohoLuMap)
       setAlarmSounds(alarmMap)
       loadCliqSettings().then(setCliqGlobal)
@@ -460,7 +468,8 @@ export default function Dashboard() {
     kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string,
     wfLogsEnabled: boolean = false, zohoLookups: ZohoLookups = DEFAULT_ZOHO_LOOKUPS,
     alarmSound: string = '', rtaLogsEnabled: boolean = false, rtaSites: string[] = [],
-    rtaAccountName: string = '', rtaAiCategorizationEnabled: boolean = false
+    rtaAccountName: string = '', rtaAiCategorizationEnabled: boolean = false,
+    rtaReportKpi: boolean = true, rtaReportAgentStatus: boolean = false
   ) => {
     // Update local state immediately (instant UI feedback)
     setKpiThresholds(prev => ({ ...prev, [currentAccount]: kpi }))
@@ -472,12 +481,14 @@ export default function Dashboard() {
     setRtaSitesMap(prev => ({ ...prev, [currentAccount]: rtaSites }))
     setRtaAccountNameMap(prev => ({ ...prev, [currentAccount]: rtaAccountName }))
     setRtaAiCategorizationMap(prev => ({ ...prev, [currentAccount]: rtaAiCategorizationEnabled }))
+    setRtaReportKpiMap(prev => ({ ...prev, [currentAccount]: rtaReportKpi }))
+    setRtaReportAgentStatusMap(prev => ({ ...prev, [currentAccount]: rtaReportAgentStatus }))
     setZohoLookupsMap(prev => ({ ...prev, [currentAccount]: zohoLookups }))
     setAlarmSounds(prev => ({ ...prev, [currentAccount]: alarmSound }))
     // Re-fetch with new data source
     fetchAccount(currentAccount, ds)
     // Persist to Supabase (shared) + localStorage (cache)
-    await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups, alarmSound, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled)
+    await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups, alarmSound, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, rtaReportKpi, rtaReportAgentStatus)
   }
 
   // ── Save one account's Overview header colors — instant, like layout drag ──
@@ -524,6 +535,8 @@ export default function Dashboard() {
           rtaSites={rtaSitesMap[currentAccount] ?? []}
           rtaAccountName={rtaAccountNameMap[currentAccount] ?? ''}
           rtaAiCategorizationEnabled={rtaAiCategorizationMap[currentAccount] ?? false}
+          rtaReportKpi={rtaReportKpiMap[currentAccount] ?? true}
+          rtaReportAgentStatus={rtaReportAgentStatusMap[currentAccount] ?? false}
           zohoLookups={zohoLookupsMap[currentAccount] ?? DEFAULT_ZOHO_LOOKUPS}
           alarmSound={alarmSounds[currentAccount] ?? ''}
           onSave={handleSaveSettings}
@@ -554,6 +567,8 @@ export default function Dashboard() {
               setRtaSitesMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].rtaSites }); return n })
               setRtaAccountNameMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].rtaAccountName }); return n })
               setRtaAiCategorizationMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].rtaAiCategorizationEnabled }); return n })
+              setRtaReportKpiMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].rtaReportKpi }); return n })
+              setRtaReportAgentStatusMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].rtaReportAgentStatus }); return n })
               setZohoLookupsMap(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].zohoLookups }); return n })
               setAlarmSounds(prev => { const n = {...prev}; newIds.forEach((id,i)=>{ n[id]=map[i].alarmSound }); return n })
             }

@@ -315,9 +315,11 @@ interface Props {
   rtaSites:          string[]             // this account's site(s) for THAT webapp-request — can be more than one, unlike zohoLookups.site
   rtaAccountName:    string               // plain-text override for THAT webapp-request's account name, when accountId doesn't match Zoho's own HR display name ('' = send accountId as-is)
   rtaAiCategorizationEnabled: boolean     // this account's opt-in for AI (Gemini) per-breach-type category/sub-category grouping — see lib/geminiClassifier.ts
+  rtaReportKpi:      boolean              // this account's automatic RTA Logs reporting considers KPI Tile breaches (SLA, Abandon Rate, etc.) — default true
+  rtaReportAgentStatus: boolean           // this account's automatic RTA Logs reporting considers Agent Status breaches — default false
   zohoLookups:       ZohoLookups          // this account's x_Account/Category/Sub_Categories/Site picks
   alarmSound:        string               // this account's Overview-card breach alarm sound ('' = silent)
-  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean, rtaSites: string[], rtaAccountName: string, rtaAiCategorizationEnabled: boolean) => void
+  onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean, rtaSites: string[], rtaAccountName: string, rtaAiCategorizationEnabled: boolean, rtaReportKpi: boolean, rtaReportAgentStatus: boolean) => void
   onSaveCliqGlobal: (settings: CliqGlobalSettings) => void
   onAccountsChange: () => void           // called after add/remove
   onConfigureAccount: (id: string) => void  // switch active account + go to Data Sources
@@ -1717,7 +1719,7 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, 
 }
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, rtaReportKpi, rtaReportAgentStatus, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
@@ -1731,6 +1733,8 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [rtaSitesOn, setRtaSitesOn]     = useState<string[]>(rtaSites)
   const [rtaAcctName, setRtaAcctName]   = useState(rtaAccountName)
   const [rtaAiCatOn, setRtaAiCatOn]     = useState(rtaAiCategorizationEnabled)
+  const [rtaReportKpiOn, setRtaReportKpiOn]             = useState(rtaReportKpi)
+  const [rtaReportAgentStatusOn, setRtaReportAgentStatusOn] = useState(rtaReportAgentStatus)
   // Confirmation gate for turning Workforce RTA Logs Reporting ON —
   // per the user (2026-09-28), an account can accidentally start sending
   // real breach reports before its thresholds are finalized, so checking
@@ -1899,6 +1903,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
         body: JSON.stringify({
           accountId, sites: rtaSitesOn, zohoAccountName: rtaAcctName || undefined,
           aiEnabled: rtaAiCatOn, ds, kpiThresholds: kpi, statusThresholds: stat,
+          reportKpi: rtaReportKpiOn, reportAgentStatus: rtaReportAgentStatusOn,
         }),
       })
       const data = await res.json()
@@ -2481,6 +2486,20 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                       </td>
                     </tr>
                     <tr>
+                      <td><div className="sm-metric">Report KPI Tile Breaches</div><div className="sm-metric-sub">SLA, Abandon Rate, and every other KPI Tile threshold breach — default on</div></td>
+                      <td style={{ textAlign: 'center' }}>
+                        <input type="checkbox" checked={rtaReportKpiOn}
+                          onChange={() => setRtaReportKpiOn(prev => !prev)} />
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><div className="sm-metric">Report Agent Status Breaches</div><div className="sm-metric-sub">Individual agent status/duration breaches (e.g. Out of Adherence) — default off</div></td>
+                      <td style={{ textAlign: 'center' }}>
+                        <input type="checkbox" checked={rtaReportAgentStatusOn}
+                          onChange={() => setRtaReportAgentStatusOn(prev => !prev)} />
+                      </td>
+                    </tr>
+                    <tr>
                       <td><div className="sm-metric">Enable AI Categorization</div><div className="sm-metric-sub">Gemini groups this account&apos;s breaches by type and picks a real Zoho Category/Sub-Category for each group, instead of always sending the fixed one below{geminiKeys && geminiKeys.length === 0 ? ' — add at least one API key below first' : ''}</div></td>
                       <td style={{ textAlign: 'center' }}>
                         <input type="checkbox" checked={rtaAiCatOn} disabled={!!geminiKeys && geminiKeys.length === 0}
@@ -2489,6 +2508,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     </tr>
                   </tbody>
                 </table>
+                {!rtaReportKpiOn && !rtaReportAgentStatusOn && (
+                  <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10, color: '#c0392b' }}>
+                    Both scopes are off — this account&apos;s automatic Workforce RTA Logs reporting has
+                    nothing to send and will always be skipped until at least one is turned on.
+                  </p>
+                )}
                 {rtaAiCatOn && (
                   <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10 }}>
                     If Gemini is unavailable or none of its picks match a real Zoho category on a given
@@ -2626,7 +2651,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, rtaAcctName, rtaAiCatOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, rtaAcctName, rtaAiCatOn, rtaReportKpiOn, rtaReportAgentStatusOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>

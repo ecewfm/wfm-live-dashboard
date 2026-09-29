@@ -35,6 +35,8 @@ export async function POST(req: Request) {
   let ds: DataSourceConfig | undefined
   let kpiThresholds: Thresholds | undefined
   let statusThresholds: StatusThresholds | undefined
+  let reportKpi = true
+  let reportAgentStatus = false
   try {
     const body = await req.json()
     accountId = body?.accountId
@@ -44,6 +46,11 @@ export async function POST(req: Request) {
     ds = body?.ds
     kpiThresholds = body?.kpiThresholds
     statusThresholds = body?.statusThresholds
+    // Mirrors lib/cliqScan.ts's own scope filter — the Test button should
+    // reflect the exact same KPI Tiles/Agent Status scope the real scan
+    // would use for this account, not classify against everything.
+    reportKpi = body?.reportKpi !== false
+    reportAgentStatus = !!body?.reportAgentStatus
   } catch {
     // no body — accountId stays undefined, caught below
   }
@@ -73,9 +80,12 @@ export async function POST(req: Request) {
     if (!ds) throw new Error('Missing data source config — cannot compute live breaches for an AI-mode test')
 
     const accountData = await fetchAccountData(ds, accountId)
-    const breaches = buildBreaches(accountId, accountData, {}, kpiThresholds || ({} as Thresholds), statusThresholds || ({} as StatusThresholds), ds)
+    const allBreaches = buildBreaches(accountId, accountData, {}, kpiThresholds || ({} as Thresholds), statusThresholds || ({} as StatusThresholds), ds)
+    const breaches = allBreaches.filter(b =>
+      (b.kind === 'kpi' && reportKpi) || (b.kind === 'agent' && reportAgentStatus)
+    )
     if (breaches.length === 0) {
-      throw new Error('No active breaches right now for this account — AI Categorization needs at least one to classify. Try again once something is breaching, or test with AI Categorization off.')
+      throw new Error(`No active breaches right now within this account's reporting scope (KPI Tiles ${reportKpi ? 'on' : 'off'}, Agent Status ${reportAgentStatus ? 'on' : 'off'}) — AI Categorization needs at least one to classify. Try again once something in scope is breaching, or test with AI Categorization off.`)
     }
 
     const [categories, subCategories] = await Promise.all([

@@ -32,6 +32,8 @@ export interface AccountSettings {
   rtaSites: string[]
   rtaAccountName: string
   rtaAiCategorizationEnabled: boolean
+  rtaReportKpi: boolean
+  rtaReportAgentStatus: boolean
   zohoLookups: ZohoLookups
   alarmSound: string
 }
@@ -57,6 +59,18 @@ export interface AccountSettings {
 // loading fine on none, or vice versa, depending which tier the two ops
 // each happened to fall back to.
 const SELECT_TIERS = [
+  `kpi_thresholds, status_thresholds, data_source, dashboard_layout,
+   header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
+   rta_logs_enabled, rta_sites, rta_account_name, rta_ai_categorization_enabled,
+   rta_report_kpi, rta_report_agent_status,
+   zoho_account_name, zoho_account_id,
+   zoho_category_text, zoho_category_id,
+   zoho_subcategory_text, zoho_subcategory_id,
+   zoho_site_text, zoho_site_id, alarm_sound`,
+  // Drop ONLY rta_report_kpi/rta_report_agent_status — in case
+  // sql/rta_logs_breach_scope.sql hasn't been run yet on this project. Same
+  // granular-isolation reasoning as every tier below: never bundle a
+  // brand-new, unconfirmed column with older, definitely-present ones.
   `kpi_thresholds, status_thresholds, data_source, dashboard_layout,
    header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
    rta_logs_enabled, rta_sites, rta_account_name, rta_ai_categorization_enabled,
@@ -122,6 +136,13 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
         rtaSites: String((data as any).rta_sites || '').split(',').map(s => s.trim()).filter(Boolean),
         rtaAccountName: (data as any).rta_account_name || '',
         rtaAiCategorizationEnabled: !!(data as any).rta_ai_categorization_enabled,
+        // Default ON for KPI Tiles, OFF for Agent Status (per the user,
+        // 2026-09-29) — `!== false` treats both "column not selected by a
+        // fallback tier" (undefined) and "genuinely true" the same way, so
+        // an unmigrated sql/rta_logs_breach_scope.sql doesn't silently turn
+        // KPI reporting off; `!!` naturally defaults the agent one to off.
+        rtaReportKpi: (data as any).rta_report_kpi !== false,
+        rtaReportAgentStatus: !!(data as any).rta_report_agent_status,
         zohoLookups: {
           account:     { id: (data as any).zoho_account_id     || '', text: (data as any).zoho_account_name    || '' },
           category:    { id: (data as any).zoho_category_id    || '', text: (data as any).zoho_category_text   || '' },
@@ -152,6 +173,8 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     rtaSites: [],
     rtaAccountName: '',
     rtaAiCategorizationEnabled: false,
+    rtaReportKpi: true,
+    rtaReportAgentStatus: false,
     zohoLookups: { ...DEFAULT_ZOHO_LOOKUPS },
     alarmSound: '',
   }
@@ -298,7 +321,9 @@ export async function saveSettings(
   rtaLogsEnabled: boolean = false,
   rtaSites: string[] = [],
   rtaAccountName: string = '',
-  rtaAiCategorizationEnabled: boolean = false
+  rtaAiCategorizationEnabled: boolean = false,
+  rtaReportKpi: boolean = true,
+  rtaReportAgentStatus: boolean = false
 ): Promise<boolean> {
   // 1. Always write to localStorage immediately (instant, works offline)
   saveKpiThresholds(accountId, kpi)
@@ -328,6 +353,8 @@ export async function saveSettings(
       rta_sites:             rtaSites.join(','),
       rta_account_name:      rtaAccountName,
       rta_ai_categorization_enabled: rtaAiCategorizationEnabled,
+      rta_report_kpi:        rtaReportKpi,
+      rta_report_agent_status: rtaReportAgentStatus,
       updated_at:            new Date().toISOString(),
     }
 
@@ -335,9 +362,14 @@ export async function saveSettings(
     // genuinely-unmigrated column (alarm_sound, confirmed live 2026-09-28) at
     // a time rather than bundling it with unrelated, definitely-present
     // columns (rta_*), which were silently never being saved as a result.
+    // rta_report_kpi/rta_report_agent_status are the NEWEST columns (added
+    // 2026-09-29, sql/rta_logs_breach_scope.sql) — same isolation, dropped
+    // first before anything else, on the chance that migration hasn't run
+    // yet on this project.
     const UPSERT_TIERS: string[][] = [
       Object.keys(fullPayload),
-      Object.keys(fullPayload).filter(k => k !== 'alarm_sound'),
+      Object.keys(fullPayload).filter(k => k !== 'rta_report_kpi' && k !== 'rta_report_agent_status'),
+      Object.keys(fullPayload).filter(k => k !== 'rta_report_kpi' && k !== 'rta_report_agent_status' && k !== 'alarm_sound'),
       Object.keys(fullPayload).filter(k => k !== 'alarm_sound' && !k.startsWith('rta_')),
       ['id', 'account_id', 'kpi_thresholds', 'status_thresholds', 'data_source', 'cliq_channel', 'updated_at'],
     ]

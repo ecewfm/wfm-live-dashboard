@@ -133,6 +133,8 @@ interface AccountSettingsRow {
   rta_account_name: string | null
   rta_ai_categorization_enabled: boolean | null
   rta_logs_state: RtaLogsState | null
+  rta_report_kpi: boolean | null
+  rta_report_agent_status: boolean | null
 }
 
 export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<ScanResult> {
@@ -161,30 +163,36 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
   // the whole select) — CONFIRMED this exact failure mode already silently
   // broke Settings' own load/save for months (see lib/settings.ts's
   // SELECT_TIERS/UPSERT_TIERS, fixed 2026-09-28) before anyone noticed, so
-  // this one extra fallback tier is cheap insurance against the newest
-  // column (rta_logs_state) not being migrated yet breaking the ENTIRE scan
-  // instead of just RTA Logs' change-detection memory.
+  // these fallback tiers are cheap insurance against the newest columns not
+  // being migrated yet breaking the ENTIRE scan instead of just their own
+  // feature. Tried in order, isolating the newest/least-certain columns
+  // first (rta_report_kpi/rta_report_agent_status, sql/rta_logs_breach_scope.sql,
+  // then rta_logs_state, sql/rta_logs_change_detection.sql).
   const ACCOUNTS_SELECT = `
       id, data_source, kpi_thresholds, status_thresholds, cliq_channel, cliq_last_sent_at,
       wf_logs_enabled, wf_logs_last_sent_at,
       rta_logs_enabled, rta_logs_last_sent_at, rta_sites, rta_account_name,
       rta_ai_categorization_enabled, rta_logs_state,
+      rta_report_kpi, rta_report_agent_status,
       zoho_account_name, zoho_account_id,
       zoho_category_text, zoho_category_id,
       zoho_subcategory_text, zoho_subcategory_id,
       zoho_site_text, zoho_site_id
   `
+  const ACCOUNTS_SELECT_TIERS = [
+    ACCOUNTS_SELECT,
+    ACCOUNTS_SELECT.replace(/,?\s*rta_report_kpi,\s*rta_report_agent_status/, ''),
+    ACCOUNTS_SELECT
+      .replace(/,?\s*rta_report_kpi,\s*rta_report_agent_status/, '')
+      .replace(/,?\s*rta_logs_state/, ''),
+  ]
   let accounts: any[] | null = null
   let accountsErr: { message: string } | null = null
-  {
-    const res = await supabase.from('wfm_settings').select(ACCOUNTS_SELECT)
-    if (!res.error) {
-      accounts = res.data
-    } else {
-      const res2 = await supabase.from('wfm_settings').select(ACCOUNTS_SELECT.replace(/,?\s*rta_logs_state/, ''))
-      accounts = res2.data
-      accountsErr = res2.error
-    }
+  for (const cols of ACCOUNTS_SELECT_TIERS) {
+    const res = await supabase.from('wfm_settings').select(cols)
+    if (!res.error) { accounts = res.data; accountsErr = null; break }
+    accounts = res.data
+    accountsErr = res.error
   }
 
   if (accountsErr) {
@@ -326,75 +334,90 @@ async function processAccount(
   // otherwise, even indefinitely, rather than re-alerting on a timer for an
   // unchanged number. See lib/rtaLogsChangeDetection.ts for the exact rules.
   if (acc.rta_logs_enabled) {
-    const { shouldSend, currentSnapshot } = computeRtaLogsChangeSignal(breaches, acc.rta_logs_state)
-    if (forceSend || shouldSend) {
-      // Zoho's own processing script requires at least one site for an
-      // "Account Wide" submission (confirmed live via its Function_Notes
-      // validation feedback) — an account can span MORE THAN ONE site
-      // (e.g. both Manila and Dumaguete), which the single-value Workforce
-      // Logs Site lookup can't represent, so this is its own comma-separated
-      // field (wfm_settings.rta_sites) rather than reusing that one.
-      const sites = (acc.rta_sites || '').split(',').map(s => s.trim()).filter(Boolean)
-      if (sites.length === 0) {
-        l(`${accountId}: RTA Log webapp request skipped — no Site(s) configured (Zoho requires at least one for Account Wide submissions). Set it under Workforce RTA Logs in Settings.`)
-      } else {
-        // Zoho's own script resolves "accounts" against its HR/Accounts
-        // master by NAME (confirmed live 2026-09-25: it rejected our raw
-        // internal id "guardianbikes" — "No valid Account was resolved
-        // from HR" — since Zoho's own record is named "Guardian Bikes")
-        // — send the configured override when this account's id doesn't
-        // match its real Zoho display name.
-        const zohoAccountName = acc.rta_account_name || accountId
+    // Per-account scope — WHICH breach kinds this account's automatic RTA
+    // Logs reporting considers (2026-09-29, sql/rta_logs_breach_scope.sql).
+    // `!== false` (not `!!`) for KPI so a fallback tier that dropped the
+    // column entirely (undefined, project not migrated yet) still defaults
+    // to the intended ON, matching rta_report_kpi's own DB column default;
+    // Agent Status defaults OFF, so plain `!!` is correct there.
+    const reportKpi = acc.rta_report_kpi !== false
+    const reportAgentStatus = !!acc.rta_report_agent_status
+    const rtaBreaches = breaches.filter(b =>
+      (b.kind === 'kpi' && reportKpi) || (b.kind === 'agent' && reportAgentStatus)
+    )
+    if (rtaBreaches.length === 0) {
+      l(`${accountId}: RTA Logs — no breach kind enabled for reporting is currently active (KPI Tiles ${reportKpi ? 'on' : 'off'}, Agent Status ${reportAgentStatus ? 'on' : 'off'}) — skipping.`)
+    } else {
+      const { shouldSend, currentSnapshot } = computeRtaLogsChangeSignal(rtaBreaches, acc.rta_logs_state)
+      if (forceSend || shouldSend) {
+        // Zoho's own processing script requires at least one site for an
+        // "Account Wide" submission (confirmed live via its Function_Notes
+        // validation feedback) — an account can span MORE THAN ONE site
+        // (e.g. both Manila and Dumaguete), which the single-value Workforce
+        // Logs Site lookup can't represent, so this is its own comma-separated
+        // field (wfm_settings.rta_sites) rather than reusing that one.
+        const sites = (acc.rta_sites || '').split(',').map(s => s.trim()).filter(Boolean)
+        if (sites.length === 0) {
+          l(`${accountId}: RTA Log webapp request skipped — no Site(s) configured (Zoho requires at least one for Account Wide submissions). Set it under Workforce RTA Logs in Settings.`)
+        } else {
+          // Zoho's own script resolves "accounts" against its HR/Accounts
+          // master by NAME (confirmed live 2026-09-25: it rejected our raw
+          // internal id "guardianbikes" — "No valid Account was resolved
+          // from HR" — since Zoho's own record is named "Guardian Bikes")
+          // — send the configured override when this account's id doesn't
+          // match its real Zoho display name.
+          const zohoAccountName = acc.rta_account_name || accountId
 
-        if (acc.rta_ai_categorization_enabled) {
-          // AI-based per-breach-type grouping (lib/geminiClassifier.ts) —
-          // opt-in per account (2026-09-28). Deliberately NOT falling back
-          // to the fixed category on failure (bad/exhausted keys, or no
-          // pick matching a real Zoho category) — skip this cycle entirely
-          // and retry next time, per the user's explicit choice, rather
-          // than send a mismatched/generic category just to force something
-          // through. Cooldown only advances if at least one group actually
-          // sent — a total failure should retry sooner than a full cooldown
-          // window away, not wait for one.
-          try {
-            const groups = await classifyBreachesForRtaLog(accountId, breaches, categoryOptions, subCategoryOptions)
-            let anySent = false
-            for (const g of groups) {
-              try {
-                await createAccountBreachRtaLog(zohoAccountName, g.remarks, sites, g.category, g.subCategory)
-                l(`${accountId}: RTA Log webapp request submitted (AI-grouped: "${g.category} / ${g.subCategory}").`)
-                anySent = true
-              } catch (e: any) {
-                l(`${accountId}: RTA Log webapp request failed for AI group "${g.category} / ${g.subCategory}" — ${e.message}`)
+          if (acc.rta_ai_categorization_enabled) {
+            // AI-based per-breach-type grouping (lib/geminiClassifier.ts) —
+            // opt-in per account (2026-09-28). Deliberately NOT falling back
+            // to the fixed category on failure (bad/exhausted keys, or no
+            // pick matching a real Zoho category) — skip this cycle entirely
+            // and retry next time, per the user's explicit choice, rather
+            // than send a mismatched/generic category just to force something
+            // through. Cooldown only advances if at least one group actually
+            // sent — a total failure should retry sooner than a full cooldown
+            // window away, not wait for one.
+            try {
+              const groups = await classifyBreachesForRtaLog(accountId, rtaBreaches, categoryOptions, subCategoryOptions)
+              let anySent = false
+              for (const g of groups) {
+                try {
+                  await createAccountBreachRtaLog(zohoAccountName, g.remarks, sites, g.category, g.subCategory)
+                  l(`${accountId}: RTA Log webapp request submitted (AI-grouped: "${g.category} / ${g.subCategory}").`)
+                  anySent = true
+                } catch (e: any) {
+                  l(`${accountId}: RTA Log webapp request failed for AI group "${g.category} / ${g.subCategory}" — ${e.message}`)
+                }
               }
+              if (anySent) {
+                updates.rta_logs_last_sent_at = new Date().toISOString()
+                // Refresh the change-detection baseline to the CURRENT
+                // snapshot whenever we actually send — including a forced
+                // send that had shouldSend===false, so a forced re-test
+                // doesn't get treated as "stale" on the very next real cycle.
+                updates.rta_logs_state = currentSnapshot
+                didAnything = true
+              }
+            } catch (e: any) {
+              l(`${accountId}: AI categorization failed, skipping RTA Logs this cycle (will retry next cycle) — ${e.message}`)
             }
-            if (anySent) {
+          } else {
+            try {
+              const remarks = formatWorkforceLogRemarks(accountId, rtaBreaches)
+              await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
+              l(`${accountId}: RTA Log webapp request submitted.`)
               updates.rta_logs_last_sent_at = new Date().toISOString()
-              // Refresh the change-detection baseline to the CURRENT
-              // snapshot whenever we actually send — including a forced
-              // send that had shouldSend===false, so a forced re-test
-              // doesn't get treated as "stale" on the very next real cycle.
               updates.rta_logs_state = currentSnapshot
               didAnything = true
+            } catch (e: any) {
+              l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
             }
-          } catch (e: any) {
-            l(`${accountId}: AI categorization failed, skipping RTA Logs this cycle (will retry next cycle) — ${e.message}`)
-          }
-        } else {
-          try {
-            const remarks = formatWorkforceLogRemarks(accountId, breaches)
-            await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
-            l(`${accountId}: RTA Log webapp request submitted.`)
-            updates.rta_logs_last_sent_at = new Date().toISOString()
-            updates.rta_logs_state = currentSnapshot
-            didAnything = true
-          } catch (e: any) {
-            l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
           }
         }
+      } else {
+        l(`${accountId}: RTA Logs — no new/changed breach signature since the last report — skipping.`)
       }
-    } else {
-      l(`${accountId}: RTA Logs — no new/changed breach signature since the last report — skipping.`)
     }
   }
 
