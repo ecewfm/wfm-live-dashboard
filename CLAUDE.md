@@ -342,6 +342,17 @@ indefinitely, with no timer forcing a resend of an unchanged number.
 - Once an account has ZERO active breaches, the baseline is cleared — a
   LATER re-breach, even at a value/agent seen before, is treated as fresh
   rather than deduped forever.
+- **Staleness halts the automatic send too** — `processAccount()` in
+  `lib/cliqScan.ts` checks `isDataStale()` (same 5-minute threshold as the
+  dashboard's own "DATA NOT IN SYNC" overlay) immediately after fetching an
+  account's data, BEFORE breaches are even built — so on stale data, NOTHING
+  fires for that account that cycle: not Cliq, not Workforce Logs, not RTA
+  Logs, and `rta_logs_state`/cooldown timestamps are left untouched. Applies
+  even on a forced scan (Force Scan Now). This is NOT gated per-output —
+  it's a single early return shared by all three, confirmed already in place
+  (2026-09-28). The manual "Test Workforce RTA Logs" button deliberately does
+  NOT check staleness, since it's a one-off payload/connectivity test, not
+  the automatic cadence.
 - `lib/breaches.ts` — every `BreachRow` now carries a `kind: 'kpi' | 'agent'`
   tag (set at every `rows.push(...)` site) so the two different rules above
   can actually be told apart — `'kpi'` for every KPI-group-derived breach,
