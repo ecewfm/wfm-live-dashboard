@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, type BreachRow } from './breaches'
+import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, collectKpiGroupSourceQueries, type BreachRow } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
@@ -77,7 +77,21 @@ export async function fetchAccountData(ds: DataSourceConfig, accountId: string):
   if (ds.agentSources) agentSourcesToFetch.push(...ds.agentSources)
   const agentLists = await Promise.all(agentSourcesToFetch.map(src => fetchAgentSource(src, accountId)))
 
-  return { kpi: null, kpiRows, agents: agentLists.flat(), status: null, calls: [] }
+  // Per-group KPI sources — mirrors components/Dashboard.tsx's own fetch
+  // exactly (same shared collectKpiGroupSourceQueries() so this can't drift
+  // out of sync the way agent-row normalization once did, see
+  // normalizeAgentRow's comment above) — any KpiGroup with its own `source`
+  // reads from ITS OWN table instead of ds.kpiTable, so Cliq/Workforce Logs/
+  // RTA Logs breach-check this scan runs sees exactly the same data the
+  // live Dashboard/Overview pages show.
+  const kpiGroupQueries = collectKpiGroupSourceQueries(ds)
+  const kpiGroupResults = await Promise.all(
+    kpiGroupQueries.map(q => supabase.from(q.table as any).select('*').eq(q.accountCol, accountId).then(r => (r.data as any[]) ?? []))
+  )
+  const kpiRowsByGroup: Record<string, any[]> = {}
+  kpiGroupQueries.forEach((q, i) => { q.groupIds.forEach(gid => { kpiRowsByGroup[gid] = kpiGroupResults[i] }) })
+
+  return { kpi: null, kpiRows, kpiRowsByGroup, agents: agentLists.flat(), status: null, calls: [] }
 }
 
 // ── Message formatting — mirrors the old GAS tool's format ──────────────────

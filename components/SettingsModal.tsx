@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
@@ -1012,6 +1012,60 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExt
   )
 }
 
+// A single KPI group's OWN data preview — mirrors AgentSourceCard's preview
+// fetch exactly (own useEffect, own loading state, since each group with a
+// `source` can point at a completely different table from every other
+// group). Row+column clickable (needed for row-pinning via matchCol/
+// matchVal, which is why this is a bespoke table rather than reusing the
+// simpler column-only DsPreviewTable the Agent source cards use — agent
+// tables are one-row-per-entity with no row-pinning concept, KPI tables
+// commonly are not).
+function KpiGroupSourcePreview({ table, supaUrl, supaKey, hasActiveSlot, onPick }: {
+  table: string; supaUrl: string; supaKey: string
+  hasActiveSlot: boolean
+  onPick: (row: Record<string, any>, col: string) => void
+}) {
+  const [preview, setPreview] = useState<Record<string, any>[]>([])
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!table) { setPreview([]); return }
+    setLoading(true)
+    fetch(`${supaUrl}/rest/v1/${table}?limit=20`, { headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` } })
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setPreview(Array.isArray(d) ? d : []))
+      .catch(() => setPreview([]))
+      .finally(() => setLoading(false))
+  }, [table, supaUrl, supaKey])
+
+  if (!table) return null
+  if (loading) return <div style={{ padding: 12, textAlign: 'center', fontSize: 11, color: 'var(--text-muted)' }}>Loading preview...</div>
+  if (preview.length === 0) return <div style={{ padding: 12, textAlign: 'center', fontSize: 11, color: 'var(--text-muted)' }}>No rows in this table</div>
+
+  const cols = Object.keys(preview[0])
+  return (
+    <div style={{ overflow: 'auto', maxHeight: 200, fontSize: 11, border: '1px solid var(--border,#e1e6e4)', borderRadius: 6, marginTop: 6 }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 'max-content' }}>
+        <thead><tr>{cols.map(c => <th key={c} className="ds-th">{c}</th>)}</tr></thead>
+        <tbody>
+          {preview.map((row, ri) => (
+            <tr key={ri} style={{ background: ri % 2 === 0 ? 'transparent' : 'rgba(0,0,0,0.02)' }}>
+              {cols.map(c => (
+                <td key={c} className="ds-td"
+                  title={String(row[c] ?? '')}
+                  style={{ cursor: hasActiveSlot ? 'pointer' : 'default' }}
+                  onClick={() => hasActiveSlot && onPick(row, c)}>
+                  {String(row[c] ?? '')}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   accountId: string
   ds: DataSourceConfig
@@ -1087,6 +1141,19 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const setGroupVal = useCallback((id: string, val: string) => {
     setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => g.id === id ? { ...g, groupVal: val } : g) }))
   }, [])
+  // Toggle/edit a group's own data source (see KpiGroupSource in
+  // lib/types.ts) — OFF (patch=null) reverts to the shared ds.kpiTable path
+  // with zero other changes; ON seeds sensible defaults (accountCol
+  // defaults to 'account_id', the overwhelmingly common column name) the
+  // user can still override via the picker, same "legacy fallback until
+  // overridden" convention as agentSources elsewhere in this file.
+  const setGroupSource = useCallback((id: string, patch: Partial<KpiGroupSource> | null) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => {
+      if (g.id !== id) return g
+      if (patch === null) return { ...g, source: null }
+      return { ...g, source: { table: '', accountCol: 'account_id', rowKeyCol: '', updatedAtCol: '', ...(g.source || {}), ...patch } }
+    }) }))
+  }, [])
   const clearCell = useCallback((groupId: string, kpiKey: string) => {
     setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => {
       if (g.id !== groupId) return g
@@ -1113,10 +1180,22 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
       if (!cur) return cur
       setLocalDs(prev => {
         const binding: CellBinding = { valueCol: colName }
-        // Pin the exact row. Prefer the configured Row key; otherwise auto-detect
-        // a unique identifier column so a single click always binds ONE cell.
+        // Pin the exact row. Prefer the ACTIVE group's own Row key when that
+        // group has its own `source` (an alt-table group's row-key column has
+        // nothing to do with the account-wide kpiRowKeyCol — e.g. Flex's
+        // flex_overwatch_first_reply uses "metric", not whatever
+        // flex_explore_tiles uses); otherwise fall back to the account-wide
+        // kpiRowKeyCol, then auto-detect a unique identifier column so a
+        // single click always binds ONE cell.
         const cols = Object.keys(row)
-        const rk = prev.kpiRowKeyCol || (cols.includes('kpi_key') ? 'kpi_key' : cols.includes('id') ? 'id' : '')
+        const activeGroup = prev.groups.find(g => g.id === cur.groupId)
+        const autoDetect = cols.includes('kpi_key') ? 'kpi_key' : cols.includes('id') ? 'id' : ''
+        // An alt-source group's row key is scoped to ITS OWN table's columns —
+        // it must never fall back to the account-wide kpiRowKeyCol (a column
+        // from a completely different table that may not even exist here).
+        const rk = activeGroup?.source
+          ? (activeGroup.source.rowKeyCol || autoDetect)
+          : (prev.kpiRowKeyCol || autoDetect)
         if (rk) { binding.matchCol = rk; binding.matchVal = String(row[rk] ?? '') }
         return { ...prev, groups: prev.groups.map(g => {
           if (g.id !== cur.groupId) return g
@@ -1268,6 +1347,11 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const allKpiKeys = ['sla', 'wait', 'aht', 'abn', ...localDs.extraTiles.map(t => t.key)]
   const kpiCols = kpiPreview.length ? Object.keys(kpiPreview[0]) : []
   const agtCols = agtPreview.length ? Object.keys(agtPreview[0]) : []
+  // The shared KPI preview table reflects the account-wide kpiTable — if the
+  // active slot belongs to a group with its OWN source, clicks there must be
+  // disabled (its own KpiGroupSourcePreview handles that group's binding instead).
+  const activeGroupObj = activeCell ? localDs.groups.find(g => g.id === activeCell.groupId) : null
+  const sharedPreviewClickable = !!activeCell && !activeGroupObj?.source
   // Carries each row's ORIGINAL index alongside it — cellColor() below pins
   // "no filter configured" bindings to the first row by POSITION (ri === 0),
   // so sorting must not change which row that logic considers "first";
@@ -1443,8 +1527,49 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                 onClick={() => setGroupCustomMode(group.id, !isCustom)}>
                 <i className={`bx ${isCustom ? 'bx-git-branch' : 'bx-link'}`} /> {isCustom ? 'Independent tiles' : 'Shared tiles'}
               </button>
+              <button className={`ds-mode-btn${group.source ? ' on' : ''}`}
+                title={group.source
+                  ? 'This group reads from its OWN table, independent of the account-wide KPI Data Source above. Click to revert to the shared table.'
+                  : 'Give this group its own data source — read its tiles from a DIFFERENT Supabase table than every other group on this account (e.g. a second scraped dashboard).'}
+                onClick={() => setGroupSource(group.id, group.source ? null : {})}>
+                <i className={`bx ${group.source ? 'bx-data' : 'bx-share-alt'}`} /> {group.source ? 'Own source' : 'Shared source'}
+              </button>
               <button className="ds-x" title="Remove group" onClick={() => removeGroup(group.id)}><i className="bx bx-trash" /></button>
             </div>
+
+            {group.source && (
+              <div className="ds-group-source-panel" style={{ background: 'var(--bg-card,#fff)', border: '1px solid var(--border,#e1e6e4)', borderRadius: 8, padding: 8, marginBottom: 8 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span className="ds-mini-label">Table</span>
+                    <DsTableSelector field="table" value={group.source.table} tables={tables}
+                      onChange={(_, v) => setGroupSource(group.id, { table: v })} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span className="ds-mini-label">Account col</span>
+                    <input className="ds-select" style={{ minWidth: 120 }} value={group.source.accountCol}
+                      onChange={e => setGroupSource(group.id, { accountCol: e.target.value })} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span className="ds-mini-label">Row key</span>
+                    <input className="ds-select" style={{ minWidth: 120 }} placeholder="(one row)" value={group.source.rowKeyCol}
+                      onChange={e => setGroupSource(group.id, { rowKeyCol: e.target.value })} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span className="ds-mini-label">Updated at</span>
+                    <input className="ds-select" style={{ minWidth: 120 }} placeholder="(none)" value={group.source.updatedAtCol}
+                      onChange={e => setGroupSource(group.id, { updatedAtCol: e.target.value })} />
+                  </div>
+                </div>
+                <p className="ds-hint" style={{ marginBottom: 0 }}>
+                  This group&apos;s tiles bind against THIS table only — click a slot below, then click a cell in the preview that appears here (not the shared preview at the bottom of this section).
+                </p>
+                <KpiGroupSourcePreview table={group.source.table} supaUrl={supaUrl} supaKey={supaKey}
+                  hasActiveSlot={!!activeCell && activeCell.groupId === group.id}
+                  onPick={(row, col) => pickCell(row, col)} />
+              </div>
+            )}
+
             <div className="ds-slot-grid">
               {slots.map(slot => {
                 const { key: k, label, binding: b, color } = slot
@@ -1530,8 +1655,8 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                           return (
                             <td key={c} className="ds-td"
                               title={String(row[c] ?? '')}
-                              style={{ cursor: activeCell ? 'pointer' : 'default', background: hi ? `${hi}22` : undefined, outline: hi ? `2px solid ${hi}` : 'none' }}
-                              onClick={() => activeCell && pickCell(row, c)}>
+                              style={{ cursor: sharedPreviewClickable ? 'pointer' : 'default', background: hi ? `${hi}22` : undefined, outline: hi ? `2px solid ${hi}` : 'none' }}
+                              onClick={() => sharedPreviewClickable && pickCell(row, c)}>
                               {String(row[c] ?? '')}
                             </td>
                           )

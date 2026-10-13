@@ -41,6 +41,37 @@ export function normalizeAgentRow(row: Record<string, any>, src: AgentSource): R
   return out
 }
 
+// ── Which extra KPI tables does this account's config actually need? ───────
+// CANONICAL — used by BOTH components/Dashboard.tsx (client fetch) AND
+// lib/cliqScan.ts (server fetch) so there is only ever one implementation of
+// "given a DataSourceConfig, which distinct per-group source tables need
+// fetching, and which group id(s) does each one feed" — same reasoning as
+// normalizeAgentRow() above (and the SAME class of client/server drift bug
+// that one was fixed for, avoided here by sharing this from the start
+// instead of writing it twice). Pure — no Supabase client, no I/O — each
+// caller does its own `.from(table).select('*').eq(accountCol, accountId)`
+// with its own client (anon client in the browser, service/anon in
+// cliqScan.ts), then threads the results back keyed by group id the same
+// way via kpiRowsByGroup.
+export interface KpiGroupSourceQuery {
+  key:        string    // dedup key, "table::accountCol" — identical source config shared by multiple groups fetches once
+  table:      string
+  accountCol: string
+  groupIds:   string[]
+}
+
+export function collectKpiGroupSourceQueries(ds: DataSourceConfig): KpiGroupSourceQuery[] {
+  const map = new Map<string, KpiGroupSourceQuery>()
+  ;(ds.groups ?? []).forEach(g => {
+    if (!g.source || !g.source.table) return
+    const accountCol = g.source.accountCol || 'account_id'
+    const key = `${g.source.table}::${accountCol}`
+    if (!map.has(key)) map.set(key, { key, table: g.source.table, accountCol, groupIds: [] })
+    map.get(key)!.groupIds.push(g.id)
+  })
+  return [...map.values()]
+}
+
 export interface BreachRow {
   entity: string; metric: string; value: string; threshold: string
   severity: 'warning' | 'critical'
@@ -99,7 +130,13 @@ export function buildBreaches(
   // KPI breaches — one pass per manually-defined group
   ;(ds.groups ?? []).forEach(group => {
     const g       = group.name || 'KPI'
-    const rc      = (b: any) => resolveCell(kpiRows, b, ds.kpiGroupCol, group.groupVal)
+    // A group with its own `source` (see KpiGroup.source, lib/types.ts) reads
+    // from ITS OWN fetched rows (accountData.kpiRowsByGroup[group.id]) instead
+    // of the account-wide kpiRows — e.g. Flex's "First Reply Time" group
+    // reading flex_overwatch_first_reply while every other group keeps
+    // reading flex_explore_tiles via the shared kpiRows below.
+    const groupRows = group.source ? (accountData.kpiRowsByGroup?.[group.id] ?? []) : kpiRows
+    const rc      = (b: any) => resolveCell(groupRows, b, ds.kpiGroupCol, group.groupVal)
 
     // Independent-tiles group (see GroupTile in lib/types.ts) — every tile
     // carries its OWN label/binding/thresholds, entirely separate from every

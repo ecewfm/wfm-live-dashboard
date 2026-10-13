@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, collectKpiGroupSourceQueries, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
@@ -148,6 +148,19 @@ export default function Dashboard() {
       if (src.agentSources) agentSourcesToFetch.push(...src.agentSources)
       const agents: any[] = (await Promise.all(agentSourcesToFetch.map(as_ => fetchAgentSource(as_, accId)))).flat()
 
+      // Per-group KPI sources — any KpiGroup with its own `source` (see
+      // lib/types.ts's KpiGroup.source) reads from ITS OWN table instead of
+      // src.kpiTable above, e.g. Flex's "First Reply Time" group reading
+      // flex_overwatch_first_reply. One query per DISTINCT table (groups
+      // sharing the same source table+accountCol fetch together), then
+      // fanned back out to every group id that table feeds.
+      const kpiGroupQueries = collectKpiGroupSourceQueries(src)
+      const kpiGroupResults = await Promise.all(
+        kpiGroupQueries.map(q => supabase.from(q.table as any).select('*').eq(q.accountCol, accId).then(r => (r.data as any[]) ?? []))
+      )
+      const kpiRowsByGroup: Record<string, any[]> = {}
+      kpiGroupQueries.forEach((q, i) => { q.groupIds.forEach(gid => { kpiRowsByGroup[gid] = kpiGroupResults[i] }) })
+
       const kpiRows = (kpiRes.data as any[]) ?? []
 
       setData(prev => ({
@@ -155,6 +168,7 @@ export default function Dashboard() {
         [accId]: {
           kpi:     kpiRows[0] ?? null,
           kpiRows: kpiRows,
+          kpiRowsByGroup,
           agents:  agents,
           status:  null,
           calls:   [],
@@ -1017,7 +1031,7 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
           <LayoutPanel key={group.id} id={`kpi:${group.id}`} rect={liveLayout[`kpi:${group.id}`] ?? effectiveLayout[`kpi:${group.id}`]}
             title={group.name || 'Metrics'} onChange={handlePanelChange} onCommit={handlePanelCommit}>
             <div style={{ padding: 12 }}>
-              <KpiGrid group={group} rows={kpiRows} kpiTh={kpiTh} ds={ds} />
+              <KpiGrid group={group} rows={group.source ? (accountData?.kpiRowsByGroup?.[group.id] ?? []) : kpiRows} kpiTh={kpiTh} ds={ds} />
             </div>
           </LayoutPanel>
         ))}
@@ -1536,7 +1550,10 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
 
         {/* KPI tiles — one set per manually-defined group */}
         {groups.map(group => {
-          const rc      = (b: any) => resolveCell(kpiRows, b, ds.kpiGroupCol, group.groupVal)
+          // A group with its own `source` reads from ITS OWN fetched rows
+          // instead of the account-wide kpiRows — see KpiGroup.source.
+          const groupRows = group.source ? (accountData?.kpiRowsByGroup?.[group.id] ?? []) : kpiRows
+          const rc      = (b: any) => resolveCell(groupRows, b, ds.kpiGroupCol, group.groupVal)
 
           // Independent-tiles group (see GroupTile) — own labels/bindings/
           // thresholds, separate from every other group on this account.

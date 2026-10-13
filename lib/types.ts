@@ -62,6 +62,12 @@ export interface AccountData {
   status:  Record<string, any> | null
   calls:   Record<string, any>[]
   syncing?: boolean
+  // Per-group KPI rows for any KpiGroup with its own `source` override (see
+  // KpiGroup.source below) — keyed by KpiGroup.id. A group WITHOUT `source`
+  // is absent here and keeps reading the shared `kpiRows` above exactly as
+  // before; this is additive, never a replacement for the legacy single-
+  // table path.
+  kpiRowsByGroup?: Record<string, Record<string, any>[]>
 }
 
 // ── KPI threshold type ────────────────────────────────────────────────────────
@@ -99,11 +105,32 @@ export interface ExtraTile {
   higherIsBetter: boolean  // true → low values are bad; false → high values are bad
 }
 
+// A KpiGroup's own table, completely independent of the account's main
+// ds.kpiTable/kpiAccountCol/kpiRowKeyCol/kpiUpdatedAt — see KpiGroup.source
+// below. Mirrors AgentSource's "one source = its own table + its own column
+// mapping" shape (same reasoning: different physical tables rarely share
+// column names, so every column this group's cells need to resolve against
+// must be spelled out per-source, not inherited from the account-wide ones).
+export interface KpiGroupSource {
+  table:        string
+  accountCol:   string
+  rowKeyCol:    string   // '' = one row expected (no match filtering needed); else the metric-identifier column within this table (e.g. "metric")
+  updatedAtCol: string   // '' = no per-group staleness column available
+}
+
 export interface KpiGroup {
   id:       string
   name:     string
   groupVal?: string                    // this group's value in kpiGroupCol (e.g. skill = "Team 1")
   cells:    Record<string, CellBinding> // key: 'sla'|'aht'|'abn'|'wait'|<extra.key> — LEGACY groups only, see `tiles`
+  // NEW, optional: when set, this group's cells/tiles bind against ITS OWN
+  // table (see KpiGroupSource above) instead of the account-wide
+  // ds.kpiTable — e.g. Flex's "First Reply Time" group reading from
+  // flex_overwatch_first_reply while every other group on the same account
+  // keeps reading flex_explore_tiles. Absent = LEGACY behavior: this group
+  // reads from the shared ds.kpiTable exactly as before this field existed,
+  // so no already-configured group needs to be touched or migrated.
+  source?:  KpiGroupSource | null
   // NEW, optional: when set (non-empty), this group is fully self-contained —
   // its own tile labels, cell bindings, AND breach thresholds, completely
   // independent of every other group. Lets two groups on the same account
