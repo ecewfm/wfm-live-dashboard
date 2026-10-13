@@ -1189,6 +1189,146 @@ function KpiTile({ label, value, numValue, target, th, showBar, plain, colorOver
   )
 }
 
+// ── Overview Page's account filter — persisted so the chosen subset
+// survives a reload. `null` (stored or in state) means "show all accounts",
+// deliberately never an explicit full Set, same convention ColumnFilterPopup
+// already uses elsewhere in this file. ──────────────────────────────────────
+const OVERVIEW_ACCOUNT_FILTER_KEY = 'wfm_overview_account_filter'
+
+function loadOverviewAccountFilter(): Set<string> | null {
+  try {
+    const raw = localStorage.getItem(OVERVIEW_ACCOUNT_FILTER_KEY)
+    if (!raw) return null
+    const arr = JSON.parse(raw)
+    return Array.isArray(arr) ? new Set(arr) : null
+  } catch { return null }
+}
+
+function saveOverviewAccountFilter(selected: Set<string> | null) {
+  try {
+    if (selected === null) localStorage.removeItem(OVERVIEW_ACCOUNT_FILTER_KEY)
+    else localStorage.setItem(OVERVIEW_ACCOUNT_FILTER_KEY, JSON.stringify([...selected]))
+  } catch {}
+}
+
+// ── Account filter dropdown — search + checkbox list + Select All/Clear All
+// (both scoped to whatever the search currently shows, so you can search,
+// bulk-pick a subset, clear the search, and keep adding more) + Apply/
+// Cancel. Local `checked` state only commits to the parent on Apply, same
+// pattern as ColumnFilterPopup above — Cancel/backdrop-click discards
+// whatever was toggled since opening. ────────────────────────────────────
+function AccountFilterDropdown({ accounts, displayNames, selected, onApply }: {
+  accounts: string[]; displayNames: Record<string, string>
+  selected: Set<string> | null
+  onApply: (vals: Set<string> | null) => void
+}) {
+  const [open, setOpen]     = useState(false)
+  const [search, setSearch] = useState('')
+  const [checked, setChecked] = useState<Set<string>>(() => new Set(selected ?? accounts))
+
+  // Re-seed local state fresh every time the dropdown opens, so a prior
+  // Cancel doesn't leave stale edits lingering for next time.
+  const openDropdown = () => { setChecked(new Set(selected ?? accounts)); setSearch(''); setOpen(true) }
+
+  const q = search.trim().toLowerCase()
+  const filteredOptions = q
+    ? accounts.filter(id => id.toLowerCase().includes(q) || (displayNames[id] || '').toLowerCase().includes(q))
+    : accounts
+
+  const allFilteredChecked = filteredOptions.length > 0 && filteredOptions.every(id => checked.has(id))
+  const selectAllFiltered = () => setChecked(prev => new Set([...prev, ...filteredOptions]))
+  const clearAllFiltered  = () => setChecked(prev => { const next = new Set(prev); filteredOptions.forEach(id => next.delete(id)); return next })
+  const toggleOne = (id: string) => setChecked(prev => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+
+  const activeCount = selected === null ? accounts.length : selected.size
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => (open ? setOpen(false) : openDropdown())}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px',
+          borderRadius: 8, border: '1px solid var(--border)', cursor: 'pointer',
+          background: selected !== null ? 'rgba(59,130,246,0.1)' : 'transparent',
+          color: selected !== null ? '#3b82f6' : 'var(--text-main)', fontSize: 12.5, fontWeight: 600,
+        }}
+      >
+        <i className="bx bx-filter-alt" style={{ fontSize: 15 }} />
+        Filter Accounts
+        <span style={{
+          fontSize: 11, fontWeight: 700, padding: '1px 6px', borderRadius: 10,
+          background: selected !== null ? '#3b82f6' : 'var(--bg-body)',
+          color: selected !== null ? '#fff' : 'var(--text-muted)',
+        }}>{activeCount}/{accounts.length}</span>
+      </button>
+
+      {open && (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 200 }} onClick={() => setOpen(false)} />
+          <div onClick={e => e.stopPropagation()} style={{
+            position: 'absolute', top: '100%', right: 0, marginTop: 6, zIndex: 201,
+            background: 'var(--bg-card,#fff)', border: '1px solid var(--border,#e1e6e4)',
+            borderRadius: 10, boxShadow: '0 8px 24px rgba(0,0,0,.3)', width: 260,
+            maxHeight: 400, display: 'flex', flexDirection: 'column',
+            fontSize: 12.5, color: 'var(--text-main)',
+          }}>
+            <div style={{ padding: 8, borderBottom: '1px solid var(--border,#e1e6e4)' }}>
+              <input
+                type="text" placeholder="Search accounts..." value={search}
+                onChange={e => setSearch(e.target.value)} autoFocus
+                style={{
+                  width: '100%', padding: '7px 10px', borderRadius: 6,
+                  border: '1px solid var(--border,#e1e6e4)', background: 'var(--bg-body,#f7f8f7)',
+                  color: 'var(--text-main)', fontSize: 12.5, boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border,#e1e6e4)' }}>
+              <button onClick={selectAllFiltered} disabled={allFilteredChecked} style={{
+                flex: 1, padding: '5px 6px', borderRadius: 6, border: '1px solid var(--border,#e1e6e4)',
+                background: 'transparent', color: 'var(--text-main)', cursor: allFilteredChecked ? 'default' : 'pointer',
+                fontSize: 11.5, opacity: allFilteredChecked ? 0.5 : 1,
+              }}>Select All{q ? ' (shown)' : ''}</button>
+              <button onClick={clearAllFiltered} style={{
+                flex: 1, padding: '5px 6px', borderRadius: 6, border: '1px solid var(--border,#e1e6e4)',
+                background: 'transparent', color: 'var(--text-main)', cursor: 'pointer', fontSize: 11.5,
+              }}>Clear All{q ? ' (shown)' : ''}</button>
+            </div>
+            <div style={{ overflowY: 'auto', flex: 1, padding: '4px 0' }}>
+              {filteredOptions.length === 0 && (
+                <div style={{ padding: '10px', color: 'var(--text-muted)', textAlign: 'center' }}>No matching accounts</div>
+              )}
+              {filteredOptions.map(id => (
+                <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={checked.has(id)} onChange={() => toggleOne(id)} />
+                  {displayNames[id] || id}
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 6, padding: 8, borderTop: '1px solid var(--border,#e1e6e4)' }}>
+              <button onClick={() => setOpen(false)} style={{
+                flex: 1, padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border,#e1e6e4)',
+                background: 'transparent', color: 'var(--text-main)', cursor: 'pointer', fontSize: 12,
+              }}>Cancel</button>
+              <button onClick={() => {
+                onApply(checked.size === accounts.length ? null : checked)
+                setOpen(false)
+              }} style={{
+                flex: 1, padding: '6px 8px', borderRadius: 6, border: 'none', background: '#3b82f6',
+                color: '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+              }}>Apply</button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 // ── Overview Page ──────────────────────────────────────────────────────────────
 function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange }: {
   accounts: string[]; data: Record<string, AccountData>
@@ -1198,6 +1338,16 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
   headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
   onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
 }) {
+  const [accountFilter, setAccountFilter] = useState<Set<string> | null>(null)
+  useEffect(() => { setAccountFilter(loadOverviewAccountFilter()) }, [])
+
+  const handleApplyFilter = (vals: Set<string> | null) => {
+    setAccountFilter(vals)
+    saveOverviewAccountFilter(vals)
+  }
+
+  const visibleAccounts = accountFilter === null ? accounts : accounts.filter(a => accountFilter.has(a))
+
   return (
     <>
       <div className="ov-header">
@@ -1205,9 +1355,13 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
           <div className="ov-title">All Accounts Overview</div>
           <div className="ov-sub">Real-time summary across all configured accounts</div>
         </div>
+        <AccountFilterDropdown
+          accounts={accounts} displayNames={displayNames}
+          selected={accountFilter} onApply={handleApplyFilter}
+        />
       </div>
       <OverviewMasonry
-        accounts={accounts} data={data} agentTimers={agentTimers}
+        accounts={visibleAccounts} data={data} agentTimers={agentTimers}
         allBreaches={allBreaches} kpiThresholds={kpiThresholds} dataSources={dataSources}
         displayNames={displayNames} headerColors={headerColors} alarmSounds={alarmSounds}
         onHeaderColorsChange={onHeaderColorsChange}
