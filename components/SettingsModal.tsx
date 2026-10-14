@@ -2449,6 +2449,40 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     })}
                   </tbody>
                 </table>
+
+                <div className="sm-section-title" style={{ marginTop: 22 }}>
+                  RTA LOGS REPORTING — ALL STATUSES
+                </div>
+                <p className="sm-desc">
+                  Reports every currently-breaching agent across every status above in ONE bulk
+                  Workforce RTA Logs submission — this is a GROUP-level setting, not per status.
+                  Only applies to actual breaches/anomalies (an agent currently over a
+                  Warning/Critical duration), same as everything else on this page.
+                </p>
+                <div style={{ display: 'flex', gap: 24 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                    title={!rtaLogsOn ? 'Enable Workforce RTA Logs Reporting (Zoho Integrations tab) to use this' : undefined}>
+                    <span className="sm-toggle">
+                      <input type="checkbox" checked={!!ds.rtaReportAgentStatusHeartbeat} disabled={!rtaLogsOn}
+                        onChange={() => setDs(prev => ({ ...prev, rtaReportAgentStatusHeartbeat: !prev.rtaReportAgentStatusHeartbeat }))} />
+                      <span className="sm-toggle-track" />
+                    </span>
+                    <span style={{ opacity: !rtaLogsOn ? 0.5 : 1, fontSize: 13 }}>
+                      Every 60 min <span className="sm-metric-sub" style={{ display: 'block' }}>Bulk-reports every currently-breaching agent on a fixed timer, regardless of whether it changed</span>
+                    </span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                    title={!rtaLogsOn ? 'Enable Workforce RTA Logs Reporting (Zoho Integrations tab) to use this' : undefined}>
+                    <span className="sm-toggle">
+                      <input type="checkbox" checked={rtaReportAgentStatusOn} disabled={!rtaLogsOn}
+                        onChange={() => setRtaReportAgentStatusOn(prev => !prev)} />
+                      <span className="sm-toggle-track" />
+                    </span>
+                    <span style={{ opacity: !rtaLogsOn ? 0.5 : 1, fontSize: 13 }}>
+                      On new breach <span className="sm-metric-sub" style={{ display: 'block' }}>Reports as soon as a NEW agent/status joins — e.g. a new overbreak — not every tick of one already known</span>
+                    </span>
+                  </label>
+                </div>
               </>
             )}
 
@@ -2682,13 +2716,6 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                       </td>
                     </tr>
                     <tr>
-                      <td><div className="sm-metric">Report Agent Status Breaches</div><div className="sm-metric-sub">Individual agent status/duration breaches (e.g. Out of Adherence) — default off</div></td>
-                      <td style={{ textAlign: 'center' }}>
-                        <input type="checkbox" checked={rtaReportAgentStatusOn}
-                          onChange={() => setRtaReportAgentStatusOn(prev => !prev)} />
-                      </td>
-                    </tr>
-                    <tr>
                       <td><div className="sm-metric">Enable AI Categorization</div><div className="sm-metric-sub">Gemini groups this account&apos;s breaches by type and picks a real Zoho Category/Sub-Category for each group, instead of always sending the fixed one below{geminiKeys && geminiKeys.length === 0 ? ' — add at least one API key below first' : ''}</div></td>
                       <td style={{ textAlign: 'center' }}>
                         <input type="checkbox" checked={rtaAiCatOn} disabled={!!geminiKeys && geminiKeys.length === 0}
@@ -2699,17 +2726,19 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 </table>
                 <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10 }}>
                   There is no account-wide "report KPI breaches" switch anymore — every KPI threshold
-                  has its OWN two independent RTA Logs Reporting checkboxes ("Every 60 min" and "On breach,
+                  has its OWN two independent RTA Logs Reporting toggles ("Every 60 min" and "On breach,
                   value changes" — both can be on at once), set on the <strong>KPI Thresholds</strong> tab.
+                  Agent status breaches have their own matching pair of toggles (for the group as a
+                  whole, not per status), set on the <strong>Status Durations</strong> tab.
                 </p>
-                {!rtaReportAgentStatusOn
+                {!rtaReportAgentStatusOn && !ds.rtaReportAgentStatusHeartbeat
                   && !(['sla', 'wait', 'aht', 'abn'] as const).some(k => kpi[k].rtaReportHeartbeat || kpi[k].rtaReportBreachChange)
                   && !ds.groups.some(g => (g.tiles || []).some(t => t.rtaReportHeartbeat || t.rtaReportBreachChange))
                   && (
                   <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10, color: '#c0392b' }}>
-                    Agent Status reporting is off and no KPI has an RTA Logs Reporting checkbox set — this
-                    account&apos;s automatic Workforce RTA Logs reporting has nothing to send and will
-                    always be skipped until at least one is turned on.
+                    No Agent Status toggle and no KPI RTA Logs Reporting toggle is on — this account&apos;s
+                    automatic Workforce RTA Logs reporting has nothing to send and will always be skipped
+                    until at least one is turned on.
                   </p>
                 )}
                 {rtaAiCatOn && (

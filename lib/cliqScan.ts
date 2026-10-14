@@ -29,7 +29,7 @@ import { createWorkforceLogRecord } from './zohoCreator'
 import { createAccountBreachRtaLog } from './zohoWebappRequest'
 import { classifyBreachesForRtaLog } from './geminiClassifier'
 import { loadZohoFieldOptions, type ZohoFieldOption } from './settings'
-import { computeRtaLogsChangeSignal, computeRtaKpiSignalDue, EMPTY_RTA_LOGS_STATE, type RtaLogsState } from './rtaLogsChangeDetection'
+import { computeRtaLogsChangeSignal, computeRtaKpiSignalDue, isAgentStatusHeartbeatDue, EMPTY_RTA_LOGS_STATE, type RtaLogsState } from './rtaLogsChangeDetection'
 import type { AccountData, AgentSource, DataSourceConfig, Thresholds } from './types'
 import type { StatusThresholds } from './utils'
 
@@ -151,6 +151,7 @@ function formatRtaLogsRemarks(accountId: string, breachRows: BreachRow[], heartb
 // every other cooldown/baseline in this file).
 function mergeRtaState(base: RtaLogsState, patch: {
   agent?: Record<string, string[]>
+  agentHeartbeatAdvance?: string
   kpiHeartbeatAdvance?: Record<string, string>
   kpiBreachChangeAdvance?: Record<string, string>
   kpiBreachChangeCleared: string[]
@@ -159,7 +160,10 @@ function mergeRtaState(base: RtaLogsState, patch: {
   patch.kpiBreachChangeCleared.forEach(k => delete kpiBreachChange[k])
   Object.assign(kpiBreachChange, patch.kpiBreachChangeAdvance || {})
   const kpiHeartbeat = { ...(base.kpiHeartbeat || {}), ...(patch.kpiHeartbeatAdvance || {}) }
-  return { kpi: base.kpi || {}, agent: patch.agent || base.agent || {}, kpiHeartbeat, kpiBreachChange }
+  return {
+    kpi: base.kpi || {}, agent: patch.agent || base.agent || {}, kpiHeartbeat, kpiBreachChange,
+    agentHeartbeat: patch.agentHeartbeatAdvance || base.agentHeartbeat,
+  }
 }
 
 interface AccountSettingsRow {
@@ -338,26 +342,37 @@ async function processAccount(
   // a fixed timer, independent of breach status. See
   // lib/rtaLogsChangeDetection.ts for the exact rules.
   if (acc.rta_logs_enabled) {
-    // Agent Status scope unchanged (2026-09-29, sql/rta_logs_breach_scope.sql).
-    // KPI Tile scope used to be this SAME account-wide on/off
+    // Agent Status is a GROUP-level pair of independent flags (not per-
+    // status, unlike KPIs) — rta_report_agent_status (existing DB column)
+    // gates the "report when a NEW agent joins a breach type" behavior
+    // unchanged; ds.rtaReportAgentStatusHeartbeat (new 2026-10-14) adds a
+    // second, timer-based mode: every 60 minutes, if at least one agent is
+    // currently breaching ANYWHERE, bulk-report the full current list
+    // regardless of whether it changed. Both can be on at once.
+    //
+    // KPI Tile scope used to be a SAME-SHAPE account-wide on/off
     // (`rta_report_kpi`) — replaced 2026-10-14 by two PER-TILE, INDEPENDENT
     // checkboxes (RtaReportFlags.rtaReportHeartbeat/rtaReportBreachChange —
     // both can be on at once: a tile then reports at least every 60 minutes
     // AND additionally whenever it changes while breaching). `rta_report_kpi`
     // itself is left alone in the DB (harmless unused column) rather than
     // migrated away.
-    const reportAgentStatus = !!acc.rta_report_agent_status
-    const rtaBreaches = breaches.filter(b => b.kind === 'agent' && reportAgentStatus)
+    const reportAgentStatusChange = !!acc.rta_report_agent_status
+    const reportAgentStatusHeartbeat = !!ds.rtaReportAgentStatusHeartbeat
+    const rtaBreaches = breaches.filter(b => b.kind === 'agent' && (reportAgentStatusChange || reportAgentStatusHeartbeat))
     const rtaKpiSignals = collectRtaKpiSignals(ds, accountData, kpiTh)
 
     const baseRtaState: RtaLogsState = acc.rta_logs_state || EMPTY_RTA_LOGS_STATE
     const kpiDue = computeRtaKpiSignalDue(rtaKpiSignals, baseRtaState, Date.now(), forceSend)
     const agentChange = computeRtaLogsChangeSignal(rtaBreaches, baseRtaState)
-    const agentDue = forceSend || agentChange.shouldSend
+    const agentChangeDue = reportAgentStatusChange && (forceSend || agentChange.shouldSend)
+    const agentHeartbeatDue = reportAgentStatusHeartbeat && rtaBreaches.length > 0
+      && isAgentStatusHeartbeatDue(baseRtaState, Date.now(), forceSend)
+    const agentDue = agentChangeDue || agentHeartbeatDue
 
     if (kpiDue.dueHealthy.length === 0 && kpiDue.dueBreaching.length === 0 && !agentDue) {
       l(`${accountId}: RTA Logs — nothing due this cycle (no per-KPI heartbeat/breach-change due` +
-        `${reportAgentStatus ? ', no new agent breach' : ', Agent Status reporting off'}) — skipping.`)
+        `${(reportAgentStatusChange || reportAgentStatusHeartbeat) ? ', no new/heartbeat-due agent breach' : ', Agent Status reporting off'}) — skipping.`)
     } else {
       // Zoho's own processing script requires at least one site for an
       // "Account Wide" submission (confirmed live via its Function_Notes
@@ -392,8 +407,16 @@ async function processAccount(
         ]
 
         let agentAdvanced = false
+        let agentHeartbeatAdvanced = false
         let kpiBreachChangeAdvance: Record<string, string> = {}
         let kpiHeartbeatAdvance: Record<string, string> = {}
+        // Whenever we send anything this cycle (for ANY reason), each
+        // enabled agent-status mode independently refreshes ITS OWN
+        // baseline, same "advance on any confirmed send" discipline as the
+        // KPI side — avoids e.g. a change-triggered send leaving the
+        // heartbeat timer stale so it immediately re-fires a moment later.
+        const wantsAgentChangeAdvance    = agentDue && reportAgentStatusChange
+        const wantsAgentHeartbeatAdvance = agentDue && reportAgentStatusHeartbeat && rtaBreaches.length > 0
 
         if (acc.rta_ai_categorization_enabled) {
           // AI-based per-breach-type grouping (lib/geminiClassifier.ts) —
@@ -418,7 +441,8 @@ async function processAccount(
               }
               if (anySent) {
                 updates.rta_logs_last_sent_at = new Date().toISOString()
-                agentAdvanced = agentDue
+                agentAdvanced = wantsAgentChangeAdvance
+                agentHeartbeatAdvanced = wantsAgentHeartbeatAdvance
                 kpiBreachChangeAdvance = kpiDue.breachChangeAdvance
                 didAnything = true
               }
@@ -449,7 +473,8 @@ async function processAccount(
             await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
             l(`${accountId}: RTA Log webapp request submitted.`)
             updates.rta_logs_last_sent_at = new Date().toISOString()
-            agentAdvanced = agentDue
+            agentAdvanced = wantsAgentChangeAdvance
+            agentHeartbeatAdvanced = wantsAgentHeartbeatAdvance
             kpiBreachChangeAdvance = kpiDue.breachChangeAdvance
             kpiHeartbeatAdvance = kpiDue.heartbeatAdvance
             didAnything = true
@@ -460,6 +485,7 @@ async function processAccount(
 
         updates.rta_logs_state = mergeRtaState(baseRtaState, {
           agent: agentAdvanced ? agentChange.currentSnapshot.agent : undefined,
+          agentHeartbeatAdvance: agentHeartbeatAdvanced ? new Date().toISOString() : undefined,
           kpiHeartbeatAdvance,
           kpiBreachChangeAdvance,
           kpiBreachChangeCleared: kpiDue.clearedBreachChangeKeys,

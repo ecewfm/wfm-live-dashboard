@@ -38,6 +38,13 @@ export interface RtaLogsState {
   // tile stops breaching (so a later re-breach at the same old value is
   // treated as new), independent of whether a send succeeds that cycle.
   kpiBreachChange?: Record<string, string>
+  // ISO timestamp of the last successful "bulk" heartbeat send for the
+  // agent-status GROUP as a whole (DataSourceConfig.
+  // rtaReportAgentStatusHeartbeat, see lib/types.ts) — one timestamp, not
+  // per-status/per-agent, since this reports every currently-breaching agent
+  // together on a single 60-minute timer, independent of the existing
+  // per-metric `agent` new-arrival tracking above.
+  agentHeartbeat?: string
 }
 
 export const EMPTY_RTA_LOGS_STATE: RtaLogsState = { kpi: {}, agent: {}, kpiHeartbeat: {}, kpiBreachChange: {} }
@@ -82,6 +89,15 @@ export function computeRtaLogsChangeSignal(breaches: BreachRow[], stored: RtaLog
 }
 
 const HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000
+
+// Group-level heartbeat due-check for agent-status breaches (DataSourceConfig.
+// rtaReportAgentStatusHeartbeat) — one timer for the whole bulk list, NOT
+// per-status/per-agent like the KPI side. `force` mirrors "Force Scan Now",
+// same as every other due-check in this file.
+export function isAgentStatusHeartbeatDue(stored: RtaLogsState | null | undefined, now: number, force: boolean): boolean {
+  const last = stored?.agentHeartbeat
+  return force || !last || now - new Date(last).getTime() >= HEARTBEAT_INTERVAL_MS
+}
 
 export interface RtaKpiSignalDueResult {
   // A signal can be due via EITHER flag (or both at once) — split by

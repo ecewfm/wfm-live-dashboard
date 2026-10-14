@@ -681,6 +681,7 @@ export default function Dashboard() {
               headerColors={headerColors}
               alarmSounds={alarmSounds}
               onHeaderColorsChange={updateHeaderColors}
+              rtaLogsEnabledMap={rtaLogsEnabledMap}
             />
           )}
         </div>
@@ -1344,13 +1345,14 @@ function AccountFilterDropdown({ accounts, displayNames, selected, onApply }: {
 }
 
 // ── Overview Page ──────────────────────────────────────────────────────────────
-function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange }: {
+function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
   headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
   onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
+  rtaLogsEnabledMap: Record<string, boolean>
 }) {
   const [accountFilter, setAccountFilter] = useState<Set<string> | null>(null)
   useEffect(() => { setAccountFilter(loadOverviewAccountFilter()) }, [])
@@ -1379,18 +1381,20 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
         allBreaches={allBreaches} kpiThresholds={kpiThresholds} dataSources={dataSources}
         displayNames={displayNames} headerColors={headerColors} alarmSounds={alarmSounds}
         onHeaderColorsChange={onHeaderColorsChange}
+        rtaLogsEnabledMap={rtaLogsEnabledMap}
       />
     </>
   )
 }
 
-function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange }: {
+function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
   headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
   onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
+  rtaLogsEnabledMap: Record<string, boolean>
 }) {
   const [layout, setLayout] = useState<{ top: number; left: number; width: number }[]>([])
   const [gridH, setGridH]   = useState(0)
@@ -1442,6 +1446,7 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
             colors={headerColors[accId] ?? DEFAULT_HEADER_COLORS}
             alarmSound={alarmSounds[accId] ?? ''}
             onColorsChange={onHeaderColorsChange}
+            rtaLogsEnabled={rtaLogsEnabledMap[accId] ?? false}
           />
         </div>
       ))}
@@ -1450,12 +1455,13 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
 }
 
 // ── Overview Card ─────────────────────────────────────────────────────────────
-function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds, colors, alarmSound, onColorsChange }: {
+function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds, colors, alarmSound, onColorsChange, rtaLogsEnabled }: {
   accId: string; displayName: string; accountData: AccountData | undefined
   agentTimers: Record<string, number>; breaches: BreachRow[]
   kpiTh: Thresholds; ds: DataSourceConfig
   colors: HeaderColors; alarmSound: string
   onColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
+  rtaLogsEnabled: boolean
 }) {
   const kpiRows = accountData?.kpiRows ?? []
   const groups  = ds.groups ?? []
@@ -1530,6 +1536,10 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
             <span className="ov-live-dot" />
             <span className="ov-live-text">Live</span>
           </div>
+          {rtaLogsEnabled && (
+            <i className="bx bxs-cloud-upload" title="Workforce RTA Logs auto-reporting is enabled for this account"
+              style={{ color: '#d97a35', fontSize: 15 }} />
+          )}
           <HeaderColorPicker icon="bxs-palette" title="Set header band color"
             color={bandColor} defaultColor="#3b5a4f" onChange={setBandColor} onReset={resetBandColor} />
           <HeaderColorPicker icon="bx-font" title="Set header text color"

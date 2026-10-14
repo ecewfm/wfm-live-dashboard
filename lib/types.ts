@@ -252,6 +252,19 @@ export interface DataSourceConfig {
   // every row). Mirrors AgentSource.extraMetricCols for additional sources.
   agentExtraMetricColsMap?: Record<string, string>
 
+  // Workforce RTA Logs (Zoho) reporting for agent-status breaches — a GROUP-
+  // level flag (not per-status, unlike the KPI side's per-tile
+  // RtaReportFlags): every currently-breaching agent across every status
+  // reports together, in one bulk submission. Independent of (can be on
+  // alongside) wfm_settings.rta_report_agent_status, which still gates the
+  // existing "report when a NEW agent joins a breach type" behavior (see
+  // lib/rtaLogsChangeDetection.ts). This flag adds a second, timer-based mode
+  // on top: every 60 minutes, if at least one agent is currently breaching,
+  // report the full current list regardless of whether it changed. Lives
+  // here (in the always-safe data_source JSONB) rather than as its own
+  // wfm_settings column, same reasoning as GroupTile.rtaReportHeartbeat.
+  rtaReportAgentStatusHeartbeat?: boolean
+
   // Custom Agent Status table columns, defined once for the whole account —
   // see AgentExtraColumn. Where each one's value comes from (which raw
   // column, per table) is mapped separately: agentExtraColsMap above for the
