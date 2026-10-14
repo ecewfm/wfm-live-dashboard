@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice, RtaReportMode } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
@@ -2028,7 +2028,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
         body: JSON.stringify({
           accountId, sites: rtaSitesOn, zohoAccountName: rtaAcctName || undefined,
           aiEnabled: rtaAiCatOn, ds, kpiThresholds: kpi, statusThresholds: stat,
-          reportKpi: rtaReportKpiOn, reportAgentStatus: rtaReportAgentStatusOn,
+          reportAgentStatus: rtaReportAgentStatusOn,
         }),
       })
       const data = await res.json()
@@ -2116,6 +2116,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       ...prev,
       [key]: { ...prev[key], excludeZero: !prev[key].excludeZero }
     }))
+  }
+  const setKpiRtaMode = (key: keyof Thresholds, mode: RtaReportMode) => {
+    setKpi(prev => ({ ...prev, [key]: { ...prev[key], rtaReportMode: mode } }))
   }
 
   // ── Per-group independent tile thresholds (see GroupTile in lib/types.ts) —
@@ -2235,11 +2238,13 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     <div className="sm-section-title">
                       KPI BREACH THRESHOLDS{ds.groups.some(g => g.tiles && g.tiles.length) ? ' — SHARED' : ''}
                     </div>
+                    <div style={{ overflowX: 'auto' }}>
                     <table className="sm-table">
                       <thead>
                         <tr>
-                          <th style={{ width: '24%' }}>Metric</th>
+                          <th style={{ width: '22%' }}>Metric</th>
                           <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
+                          <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Reporting</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2251,6 +2256,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                           // (e.g. "AWAITING" → "Total Calls") shows the same name
                           // here instead of reverting to the hardcoded default.
                           const label = ds.kpiLabels?.[row.key] || row.label
+                          const rtaMode = th.rtaReportMode || 'off'
                           return (
                             <tr key={row.key}>
                               <td>
@@ -2276,11 +2282,23 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                               <td style={{ textAlign: 'center' }}>
                                 <input type="checkbox" checked={!!th.excludeZero} onChange={() => toggleExcludeZero(row.key)} />
                               </td>
+                              <td>
+                                <select className="sm-input" style={{ minWidth: 150 }}
+                                  disabled={!rtaLogsOn}
+                                  title={!rtaLogsOn ? 'Enable Workforce RTA Logs Reporting (Zoho Integrations tab) to use this' : undefined}
+                                  value={rtaMode}
+                                  onChange={e => setKpiRtaMode(row.key, e.target.value as RtaReportMode)}>
+                                  <option value="off">Off</option>
+                                  <option value="heartbeat">Every 60 min (always)</option>
+                                  <option value="breach_change">On breach, when value changes</option>
+                                </select>
+                              </td>
                             </tr>
                           )
                         })}
                       </tbody>
                     </table>
+                    </div>
                     <div className="sm-note">
                       <i className="bx bx-info-circle" />
                       <span>For SLA: <strong>Low = Bad</strong>. For Queue, ASA, ABN%: <strong>High = Bad</strong>.</span>
@@ -2294,16 +2312,19 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 {ds.groups.filter(g => g.tiles && g.tiles.length).map(group => (
                   <div key={group.id} style={{ marginTop: 22 }}>
                     <div className="sm-section-title">KPI BREACH THRESHOLDS — {group.name || 'Untitled group'}</div>
+                    <div style={{ overflowX: 'auto' }}>
                     <table className="sm-table">
                       <thead>
                         <tr>
-                          <th style={{ width: '24%' }}>Metric</th>
+                          <th style={{ width: '22%' }}>Metric</th>
                           <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
+                          <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Reporting</th>
                         </tr>
                       </thead>
                       <tbody>
                         {group.tiles!.map(tile => {
                           const isAsc = tile.direction === 'asc'
+                          const rtaMode = tile.rtaReportMode || 'off'
                           return (
                             <tr key={tile.key}>
                               <td><div className="sm-metric">{tile.label}</div></td>
@@ -2326,11 +2347,23 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                 <input type="checkbox" checked={!!tile.excludeZero}
                                   onChange={() => updateGroupTile(group.id, tile.key, { excludeZero: !tile.excludeZero })} />
                               </td>
+                              <td>
+                                <select className="sm-input" style={{ minWidth: 150 }}
+                                  disabled={!rtaLogsOn}
+                                  title={!rtaLogsOn ? 'Enable Workforce RTA Logs Reporting (Zoho Integrations tab) to use this' : undefined}
+                                  value={rtaMode}
+                                  onChange={e => updateGroupTile(group.id, tile.key, { rtaReportMode: e.target.value as 'off' | 'heartbeat' | 'breach_change' })}>
+                                  <option value="off">Off</option>
+                                  <option value="heartbeat">Every 60 min (always)</option>
+                                  <option value="breach_change">On breach, when value changes</option>
+                                </select>
+                              </td>
                             </tr>
                           )
                         })}
                       </tbody>
                     </table>
+                    </div>
                   </div>
                 ))}
               </>
@@ -2611,13 +2644,6 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                       </td>
                     </tr>
                     <tr>
-                      <td><div className="sm-metric">Report KPI Tile Breaches</div><div className="sm-metric-sub">SLA, Abandon Rate, and every other KPI Tile threshold breach — default on</div></td>
-                      <td style={{ textAlign: 'center' }}>
-                        <input type="checkbox" checked={rtaReportKpiOn}
-                          onChange={() => setRtaReportKpiOn(prev => !prev)} />
-                      </td>
-                    </tr>
-                    <tr>
                       <td><div className="sm-metric">Report Agent Status Breaches</div><div className="sm-metric-sub">Individual agent status/duration breaches (e.g. Out of Adherence) — default off</div></td>
                       <td style={{ textAlign: 'center' }}>
                         <input type="checkbox" checked={rtaReportAgentStatusOn}
@@ -2633,10 +2659,16 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     </tr>
                   </tbody>
                 </table>
-                {!rtaReportKpiOn && !rtaReportAgentStatusOn && (
+                <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10 }}>
+                  There is no account-wide "report KPI breaches" switch anymore — each independent
+                  KPI tile has its OWN RTA Reporting mode (Off / Every 60 min / On breach, when value
+                  changes), set per tile on the <strong>KPI Thresholds</strong> tab.
+                </p>
+                {!rtaReportAgentStatusOn && !ds.groups.some(g => (g.tiles || []).some(t => t.rtaReportMode && t.rtaReportMode !== 'off')) && (
                   <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10, color: '#c0392b' }}>
-                    Both scopes are off — this account&apos;s automatic Workforce RTA Logs reporting has
-                    nothing to send and will always be skipped until at least one is turned on.
+                    Agent Status reporting is off and no KPI tile has an RTA Reporting mode set — this
+                    account&apos;s automatic Workforce RTA Logs reporting has nothing to send and will
+                    always be skipped until at least one is turned on.
                   </p>
                 )}
                 {rtaAiCatOn && (

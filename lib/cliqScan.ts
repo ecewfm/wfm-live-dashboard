@@ -22,14 +22,14 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, collectKpiGroupSourceQueries, type BreachRow } from './breaches'
+import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, collectKpiGroupSourceQueries, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
 import { createAccountBreachRtaLog } from './zohoWebappRequest'
 import { classifyBreachesForRtaLog } from './geminiClassifier'
 import { loadZohoFieldOptions, type ZohoFieldOption } from './settings'
-import { computeRtaLogsChangeSignal, type RtaLogsState } from './rtaLogsChangeDetection'
+import { computeRtaLogsChangeSignal, computeRtaKpiSignalDue, EMPTY_RTA_LOGS_STATE, type RtaLogsState } from './rtaLogsChangeDetection'
 import type { AccountData, AgentSource, DataSourceConfig, Thresholds } from './types'
 import type { StatusThresholds } from './utils'
 
@@ -122,6 +122,44 @@ function formatWorkforceLogRemarks(accountId: string, breaches: BreachRow[]): st
   const ts = new Date().toLocaleString('en-US', { timeZoneName: 'short' })
   const parts = breaches.map(b => `${b.entity} - ${b.metric}: ${b.value} (threshold ${b.threshold})`)
   return `Automated WFM Live breach detection for ${accountId} at ${ts}. ${parts.join('; ')}`
+}
+
+// ── RTA Logs remarks — a SEPARATE formatter from the one above, used only by
+// the "Workforce RTA Logs" webapp-request path below. Per the user
+// (2026-10-14), a cycle with more than one KPI due to report (whether via
+// 'breach_change' or 'heartbeat' mode, see GroupTile.rtaReportMode) must
+// still produce exactly ONE submission describing all of them, never one
+// submission per KPI — breachRows (actual breaches: breach_change-due KPI
+// tiles + any due agent breaches) and heartbeatSignals (current-value
+// readings, breaching or not) are merged into one timestamped message.
+function formatRtaLogsRemarks(accountId: string, breachRows: BreachRow[], heartbeatSignals: RtaKpiSignal[]): string {
+  const ts = new Date().toLocaleString('en-US', { timeZoneName: 'short' })
+  const parts: string[] = []
+  breachRows.forEach(b => parts.push(`${b.entity} - ${b.metric}: ${b.value} (threshold ${b.threshold})`))
+  heartbeatSignals.forEach(s => parts.push(
+    `${s.entity} - ${s.metric}: ${s.value}${s.severity ? ` [breaching, threshold ${s.threshold}]` : ' [current value]'}`
+  ))
+  return `Automated WFM Live RTA report for ${accountId} at ${ts}. ${parts.join('; ')}`
+}
+
+// ── Merge this cycle's RTA Logs bookkeeping into one next-state object ──────
+// `kpiBreachChangeCleared` (healed tiles) is ALWAYS applied, independent of
+// whether anything actually sent this cycle — it's pure bookkeeping, not a
+// Zoho confirmation. `agent`/`kpiHeartbeatAdvance`/`kpiBreachChangeAdvance`
+// are each passed in ONLY when their own corresponding send actually
+// succeeded this cycle (same "advance only on confirmed send" discipline as
+// every other cooldown/baseline in this file).
+function mergeRtaState(base: RtaLogsState, patch: {
+  agent?: Record<string, string[]>
+  kpiHeartbeatAdvance?: Record<string, string>
+  kpiBreachChangeAdvance?: Record<string, string>
+  kpiBreachChangeCleared: string[]
+}): RtaLogsState {
+  const kpiBreachChange = { ...(base.kpiBreachChange || {}) }
+  patch.kpiBreachChangeCleared.forEach(k => delete kpiBreachChange[k])
+  Object.assign(kpiBreachChange, patch.kpiBreachChangeAdvance || {})
+  const kpiHeartbeat = { ...(base.kpiHeartbeat || {}), ...(patch.kpiHeartbeatAdvance || {}) }
+  return { kpi: base.kpi || {}, agent: patch.agent || base.agent || {}, kpiHeartbeat, kpiBreachChange }
 }
 
 interface AccountSettingsRow {
@@ -275,20 +313,174 @@ async function processAccount(
 
   const breaches = buildBreaches(accountId, accountData, {}, kpiTh, statusTh, ds)
   l(`${accountId}: ${breaches.length} breach(es).`)
-  if (breaches.length === 0) {
-    // Reset RTA Logs' change-detection baseline once the account is fully
-    // healthy — otherwise a LATER re-breach at a previously-seen value/agent
-    // (see lib/rtaLogsChangeDetection.ts) would look identical to what was
-    // already reported and get silently deduped forever, even though it's
-    // really a fresh occurrence.
-    if (acc.rta_logs_enabled && acc.rta_logs_state) {
-      await supabase.from('wfm_settings').upsert({ id: accountId, account_id: accountId, rta_logs_state: null })
-    }
-    return false
-  }
 
   let didAnything = false
   const updates: Record<string, any> = {}
+
+  // ── "Workforce RTA Logs" webapp-request submission ──────────────────────
+  // Runs BEFORE the "nothing else breaching → bail" check below, since a
+  // 'heartbeat'-mode KPI tile (see GroupTile.rtaReportMode) reports on its
+  // own 60-minute timer regardless of whether anything else in the account
+  // is currently breaching — Cliq/Workforce Logs below have nothing to say
+  // when nothing is breaching, but RTA Logs might still have a heartbeat due.
+  //
+  // A DIFFERENT Zoho intake from Workforce Logs below (lib/zohoWebappRequest.ts)
+  // — no Zoho lookup ID needed (an optional plain-text name override
+  // instead, see rta_account_name below), so this only needs its own toggle
+  // to qualify (no hasAccountLink requirement).
+  //
+  // Deliberately NOT time-cooldown-gated like Cliq/Workforce Logs below —
+  // per the user (2026-09-28), this reports whenever something actually
+  // CHANGED (a KPI's value moved while still breaching, or a new agent
+  // joined an already-breaching status/duration type) and stays quiet
+  // otherwise, even indefinitely, rather than re-alerting on a timer for an
+  // unchanged number — PLUS (2026-10-14) a per-tile 'heartbeat' mode that IS
+  // a fixed timer, independent of breach status. See
+  // lib/rtaLogsChangeDetection.ts for the exact rules.
+  if (acc.rta_logs_enabled) {
+    // Agent Status scope unchanged (2026-09-29, sql/rta_logs_breach_scope.sql).
+    // KPI Tile scope used to be this SAME account-wide on/off
+    // (`rta_report_kpi`) — replaced 2026-10-14 by a PER-TILE reporting mode
+    // (GroupTile.rtaReportMode, independent-tiles groups only) that also
+    // decides HOW each tile reports (heartbeat vs. breach-change), not just
+    // whether it does. `rta_report_kpi` itself is left alone in the DB
+    // (harmless unused column) rather than migrated away.
+    const reportAgentStatus = !!acc.rta_report_agent_status
+    const rtaBreaches = breaches.filter(b => b.kind === 'agent' && reportAgentStatus)
+    const rtaKpiSignals = collectRtaKpiSignals(ds, accountData, kpiTh)
+
+    const baseRtaState: RtaLogsState = acc.rta_logs_state || EMPTY_RTA_LOGS_STATE
+    const kpiDue = computeRtaKpiSignalDue(rtaKpiSignals, baseRtaState, Date.now(), forceSend)
+    const agentChange = computeRtaLogsChangeSignal(rtaBreaches, baseRtaState)
+    const agentDue = forceSend || agentChange.shouldSend
+
+    if (kpiDue.dueHeartbeat.length === 0 && kpiDue.dueBreachChange.length === 0 && !agentDue) {
+      l(`${accountId}: RTA Logs — nothing due this cycle (no per-KPI heartbeat/breach-change due` +
+        `${reportAgentStatus ? ', no new agent breach' : ', Agent Status reporting off'}) — skipping.`)
+    } else {
+      // Zoho's own processing script requires at least one site for an
+      // "Account Wide" submission (confirmed live via its Function_Notes
+      // validation feedback) — an account can span MORE THAN ONE site
+      // (e.g. both Manila and Dumaguete), which the single-value Workforce
+      // Logs Site lookup can't represent, so this is its own comma-separated
+      // field (wfm_settings.rta_sites) rather than reusing that one.
+      const sites = (acc.rta_sites || '').split(',').map(s => s.trim()).filter(Boolean)
+      if (sites.length === 0) {
+        l(`${accountId}: RTA Log webapp request skipped — no Site(s) configured (Zoho requires at least one for Account Wide submissions). Set it under Workforce RTA Logs in Settings.`)
+      } else {
+        // Zoho's own script resolves "accounts" against its HR/Accounts
+        // master by NAME (confirmed live 2026-09-25: it rejected our raw
+        // internal id "guardianbikes" — "No valid Account was resolved
+        // from HR" — since Zoho's own record is named "Guardian Bikes")
+        // — send the configured override when this account's id doesn't
+        // match its real Zoho display name.
+        const zohoAccountName = acc.rta_account_name || accountId
+
+        // breach_change-due KPI tiles + any due agent breaches are genuine
+        // breaches; heartbeat-due tiles report a current value regardless of
+        // breach status, so they're kept separate and never run through AI
+        // categorization (there's no "breach type" to classify for a
+        // healthy reading).
+        const breachRowsForAi: BreachRow[] = [
+          ...kpiDue.dueBreachChange.map(s => ({
+            entity: s.entity, metric: s.metric, value: s.value, threshold: s.threshold,
+            severity: (s.severity || 'warning') as 'warning' | 'critical', kind: 'kpi' as const,
+          })),
+          ...(agentDue ? rtaBreaches : []),
+        ]
+
+        let agentAdvanced = false
+        let kpiBreachChangeAdvance: Record<string, string> = {}
+        let kpiHeartbeatAdvance: Record<string, string> = {}
+
+        if (acc.rta_ai_categorization_enabled) {
+          // AI-based per-breach-type grouping (lib/geminiClassifier.ts) —
+          // opt-in per account (2026-09-28). Deliberately NOT falling back
+          // to the fixed category on failure (bad/exhausted keys, or no
+          // pick matching a real Zoho category) — skip this cycle entirely
+          // and retry next time, per the user's explicit choice, rather
+          // than send a mismatched/generic category just to force something
+          // through.
+          if (breachRowsForAi.length > 0) {
+            try {
+              const groups = await classifyBreachesForRtaLog(accountId, breachRowsForAi, categoryOptions, subCategoryOptions)
+              let anySent = false
+              for (const g of groups) {
+                try {
+                  await createAccountBreachRtaLog(zohoAccountName, g.remarks, sites, g.category, g.subCategory)
+                  l(`${accountId}: RTA Log webapp request submitted (AI-grouped: "${g.category} / ${g.subCategory}").`)
+                  anySent = true
+                } catch (e: any) {
+                  l(`${accountId}: RTA Log webapp request failed for AI group "${g.category} / ${g.subCategory}" — ${e.message}`)
+                }
+              }
+              if (anySent) {
+                updates.rta_logs_last_sent_at = new Date().toISOString()
+                agentAdvanced = agentDue
+                kpiBreachChangeAdvance = kpiDue.breachChangeAdvance
+                didAnything = true
+              }
+            } catch (e: any) {
+              l(`${accountId}: AI categorization failed, skipping RTA Logs this cycle (will retry next cycle) — ${e.message}`)
+            }
+          }
+          // Heartbeat readings aren't breaches — always a separate plain
+          // (fixed-category) submission, independent of AI mode/success.
+          if (kpiDue.dueHeartbeat.length > 0) {
+            try {
+              const remarks = formatRtaLogsRemarks(accountId, [], kpiDue.dueHeartbeat)
+              await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
+              l(`${accountId}: RTA Log webapp request submitted (heartbeat readings).`)
+              updates.rta_logs_last_sent_at = new Date().toISOString()
+              kpiHeartbeatAdvance = kpiDue.heartbeatAdvance
+              didAnything = true
+            } catch (e: any) {
+              l(`${accountId}: RTA Log webapp request failed (heartbeat readings) — ${e.message}`)
+            }
+          }
+        } else {
+          // Plain path — ONE combined submission per cycle covering every
+          // KPI tile due this cycle (whichever mode) plus any due agent
+          // breaches, never one submission per KPI.
+          try {
+            const remarks = formatRtaLogsRemarks(accountId, breachRowsForAi, kpiDue.dueHeartbeat)
+            await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
+            l(`${accountId}: RTA Log webapp request submitted.`)
+            updates.rta_logs_last_sent_at = new Date().toISOString()
+            agentAdvanced = agentDue
+            kpiBreachChangeAdvance = kpiDue.breachChangeAdvance
+            kpiHeartbeatAdvance = kpiDue.heartbeatAdvance
+            didAnything = true
+          } catch (e: any) {
+            l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
+          }
+        }
+
+        updates.rta_logs_state = mergeRtaState(baseRtaState, {
+          agent: agentAdvanced ? agentChange.currentSnapshot.agent : undefined,
+          kpiHeartbeatAdvance,
+          kpiBreachChangeAdvance,
+          kpiBreachChangeCleared: kpiDue.clearedBreachChangeKeys,
+        })
+      }
+    }
+
+    // Healed tiles' baselines still need clearing even when nothing sent
+    // this cycle (e.g. only a now-healthy breach_change tile changed, with
+    // no heartbeat/agent activity) — pure bookkeeping, not a Zoho call.
+    if (!updates.rta_logs_state && kpiDue.clearedBreachChangeKeys.length > 0) {
+      updates.rta_logs_state = mergeRtaState(baseRtaState, { kpiBreachChangeCleared: kpiDue.clearedBreachChangeKeys })
+    }
+  }
+
+  if (breaches.length === 0) {
+    // Nothing for Cliq/Workforce Logs to report — RTA Logs (if enabled) was
+    // already handled above, independent of this check.
+    if (Object.keys(updates).length > 0) {
+      await supabase.from('wfm_settings').upsert({ id: accountId, account_id: accountId, ...updates })
+    }
+    return didAnything
+  }
 
   // ── Zoho Cliq channel alert ──────────────────────────────────────────────
   if (globalSettings.enabled && acc.cliq_channel) {
@@ -332,106 +524,6 @@ async function processAccount(
       }
     } else {
       l(`${accountId}: Workforce Logs within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
-    }
-  }
-
-  // ── "Workforce RTA Logs" webapp-request submission ──────────────────────
-  // A DIFFERENT Zoho intake from Workforce Logs above (lib/zohoWebappRequest.ts)
-  // — no Zoho lookup ID needed (an optional plain-text name override
-  // instead, see rta_account_name below), so this only needs its own toggle
-  // to qualify (no hasAccountLink requirement).
-  //
-  // Deliberately NOT time-cooldown-gated like Cliq/Workforce Logs above —
-  // per the user (2026-09-28), this reports whenever something actually
-  // CHANGED (a KPI's value moved while still breaching, or a new agent
-  // joined an already-breaching status/duration type) and stays quiet
-  // otherwise, even indefinitely, rather than re-alerting on a timer for an
-  // unchanged number. See lib/rtaLogsChangeDetection.ts for the exact rules.
-  if (acc.rta_logs_enabled) {
-    // Per-account scope — WHICH breach kinds this account's automatic RTA
-    // Logs reporting considers (2026-09-29, sql/rta_logs_breach_scope.sql).
-    // `!== false` (not `!!`) for KPI so a fallback tier that dropped the
-    // column entirely (undefined, project not migrated yet) still defaults
-    // to the intended ON, matching rta_report_kpi's own DB column default;
-    // Agent Status defaults OFF, so plain `!!` is correct there.
-    const reportKpi = acc.rta_report_kpi !== false
-    const reportAgentStatus = !!acc.rta_report_agent_status
-    const rtaBreaches = breaches.filter(b =>
-      (b.kind === 'kpi' && reportKpi) || (b.kind === 'agent' && reportAgentStatus)
-    )
-    if (rtaBreaches.length === 0) {
-      l(`${accountId}: RTA Logs — no breach kind enabled for reporting is currently active (KPI Tiles ${reportKpi ? 'on' : 'off'}, Agent Status ${reportAgentStatus ? 'on' : 'off'}) — skipping.`)
-    } else {
-      const { shouldSend, currentSnapshot } = computeRtaLogsChangeSignal(rtaBreaches, acc.rta_logs_state)
-      if (forceSend || shouldSend) {
-        // Zoho's own processing script requires at least one site for an
-        // "Account Wide" submission (confirmed live via its Function_Notes
-        // validation feedback) — an account can span MORE THAN ONE site
-        // (e.g. both Manila and Dumaguete), which the single-value Workforce
-        // Logs Site lookup can't represent, so this is its own comma-separated
-        // field (wfm_settings.rta_sites) rather than reusing that one.
-        const sites = (acc.rta_sites || '').split(',').map(s => s.trim()).filter(Boolean)
-        if (sites.length === 0) {
-          l(`${accountId}: RTA Log webapp request skipped — no Site(s) configured (Zoho requires at least one for Account Wide submissions). Set it under Workforce RTA Logs in Settings.`)
-        } else {
-          // Zoho's own script resolves "accounts" against its HR/Accounts
-          // master by NAME (confirmed live 2026-09-25: it rejected our raw
-          // internal id "guardianbikes" — "No valid Account was resolved
-          // from HR" — since Zoho's own record is named "Guardian Bikes")
-          // — send the configured override when this account's id doesn't
-          // match its real Zoho display name.
-          const zohoAccountName = acc.rta_account_name || accountId
-
-          if (acc.rta_ai_categorization_enabled) {
-            // AI-based per-breach-type grouping (lib/geminiClassifier.ts) —
-            // opt-in per account (2026-09-28). Deliberately NOT falling back
-            // to the fixed category on failure (bad/exhausted keys, or no
-            // pick matching a real Zoho category) — skip this cycle entirely
-            // and retry next time, per the user's explicit choice, rather
-            // than send a mismatched/generic category just to force something
-            // through. Cooldown only advances if at least one group actually
-            // sent — a total failure should retry sooner than a full cooldown
-            // window away, not wait for one.
-            try {
-              const groups = await classifyBreachesForRtaLog(accountId, rtaBreaches, categoryOptions, subCategoryOptions)
-              let anySent = false
-              for (const g of groups) {
-                try {
-                  await createAccountBreachRtaLog(zohoAccountName, g.remarks, sites, g.category, g.subCategory)
-                  l(`${accountId}: RTA Log webapp request submitted (AI-grouped: "${g.category} / ${g.subCategory}").`)
-                  anySent = true
-                } catch (e: any) {
-                  l(`${accountId}: RTA Log webapp request failed for AI group "${g.category} / ${g.subCategory}" — ${e.message}`)
-                }
-              }
-              if (anySent) {
-                updates.rta_logs_last_sent_at = new Date().toISOString()
-                // Refresh the change-detection baseline to the CURRENT
-                // snapshot whenever we actually send — including a forced
-                // send that had shouldSend===false, so a forced re-test
-                // doesn't get treated as "stale" on the very next real cycle.
-                updates.rta_logs_state = currentSnapshot
-                didAnything = true
-              }
-            } catch (e: any) {
-              l(`${accountId}: AI categorization failed, skipping RTA Logs this cycle (will retry next cycle) — ${e.message}`)
-            }
-          } else {
-            try {
-              const remarks = formatWorkforceLogRemarks(accountId, rtaBreaches)
-              await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
-              l(`${accountId}: RTA Log webapp request submitted.`)
-              updates.rta_logs_last_sent_at = new Date().toISOString()
-              updates.rta_logs_state = currentSnapshot
-              didAnything = true
-            } catch (e: any) {
-              l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
-            }
-          }
-        }
-      } else {
-        l(`${accountId}: RTA Logs — no new/changed breach signature since the last report — skipping.`)
-      }
     }
   }
 

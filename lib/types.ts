@@ -70,15 +70,28 @@ export interface AccountData {
   kpiRowsByGroup?: Record<string, Record<string, any>[]>
 }
 
+// Per-KPI Workforce RTA Logs (Zoho) reporting mode — 'off' (default/absent)
+// means this KPI never reaches the RTA Logs pipeline. Shared by EVERY place a
+// KPI threshold can be defined (the 4 generic Thresholds keys below, each
+// GroupTile, and each ExtraTile) — every KPI threshold gets this control,
+// whether it's one of the 4 built-in metrics or a fully custom tile. See
+// lib/breaches.ts's collectRtaKpiSignals() and lib/rtaLogsChangeDetection.ts's
+// computeRtaKpiSignalDue().
+//   'heartbeat'     — report this KPI's CURRENT value on a fixed 60-minute
+//                     cadence, breaching or not.
+//   'breach_change' — report only while breaching, and only when the value
+//                     changes from the last one reported.
+export type RtaReportMode = 'off' | 'heartbeat' | 'breach_change'
+
 // ── KPI threshold type ────────────────────────────────────────────────────────
 // excludeZero: when the account's CRM reports a metric as exactly 0 because
 // there's literally no volume to work (e.g. SLA% with zero calls offered),
 // skip breach-tagging it instead of treating 0 as a critical breach.
 export interface Thresholds {
-  sla:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
-  wait: { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
-  aht:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
-  abn:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
+  sla:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; rtaReportMode?: RtaReportMode }
+  wait: { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; rtaReportMode?: RtaReportMode }
+  aht:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; rtaReportMode?: RtaReportMode }
+  abn:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; rtaReportMode?: RtaReportMode }
 }
 
 // ── Data source configuration (per account, stored in wfm_settings + localStorage)
@@ -103,6 +116,7 @@ export interface ExtraTile {
   crit:           number
   targ:           number
   higherIsBetter: boolean  // true → low values are bad; false → high values are bad
+  rtaReportMode?: RtaReportMode
 }
 
 // A KpiGroup's own table, completely independent of the account's main
@@ -157,6 +171,11 @@ export interface GroupTile {
   targ:         number
   direction:    'asc' | 'desc'   // 'asc' = high values are bad, 'desc' = low values are bad (same convention as Thresholds)
   excludeZero?: boolean
+  // Per-tile Workforce RTA Logs (Zoho) reporting mode — replaces the old
+  // account-wide "Report KPI Tile breaches" toggle (wfm_settings.
+  // rta_report_kpi), which was all-or-nothing across every KPI tile. See
+  // RtaReportMode above for the mode semantics.
+  rtaReportMode?: RtaReportMode
 }
 
 export interface DataSourceConfig {

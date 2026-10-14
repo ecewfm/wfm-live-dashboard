@@ -6,7 +6,7 @@
 // — whichever thresholds/KPI logic you see on screen is exactly what the
 // Cliq alert used to decide whether to fire.
 
-import type { AccountData, Thresholds, DataSourceConfig, AgentSource } from './types'
+import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportMode } from './types'
 import { extractPercent, parseDurationToSeconds, formatSeconds, resolveCell, type StatusThresholds } from './utils'
 
 // ── Normalize one raw agent row from a configured AgentSource ────────────────
@@ -72,6 +72,101 @@ export function collectKpiGroupSourceQueries(ds: DataSourceConfig): KpiGroupSour
   return [...map.values()]
 }
 
+// ── Shared warn/crit evaluation — used by both the breach-row builder below
+// AND collectRtaKpiSignals() so the two never silently drift apart on what
+// counts as breaching.
+function evalThreshold(
+  num: number, th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
+): { isCrit: boolean; isWarn: boolean } {
+  if (th.excludeZero && num === 0) return { isCrit: false, isWarn: false }
+  return {
+    isCrit: th.direction === 'desc' ? num <= th.crit : num >= th.crit,
+    isWarn: th.direction === 'desc' ? num <= th.warn : num >= th.warn,
+  }
+}
+
+export interface RtaKpiSignal {
+  key:         string   // stable id `${groupId}:${tileKey}` — survives label renames, unlike BreachRow's entity+metric
+  entity:      string   // group name
+  metric:      string   // tile label
+  value:       string
+  threshold:   string
+  severity:    'warning' | 'critical' | null   // null = not currently breaching (only possible for 'heartbeat' mode)
+  mode:        'heartbeat' | 'breach_change'
+}
+
+// ── RTA Logs per-KPI reporting mode — EVERY KPI threshold gets this control:
+// the 4 generic Thresholds keys (sla/wait/aht/abn, GroupTile.rtaReportMode
+// when seeded from a legacy binding), each GroupTile on an independent-tiles
+// group, and each account-wide ExtraTile. See RtaReportMode in lib/types.ts.
+// Deliberately a SEPARATE pass from buildBreaches(), not a side-channel on
+// it: 'heartbeat' mode needs a KPI's CURRENT value even when it is NOT
+// breaching, and buildBreaches() only ever pushes a row when something IS
+// breaching — every other consumer (Cliq, Workforce Logs, the live
+// Dashboard/Overview breach table) only ever wants actual breaches, so that
+// contract stays unchanged for them.
+export function collectRtaKpiSignals(
+  ds: DataSourceConfig, accountData: AccountData | undefined, kpiTh: Thresholds
+): RtaKpiSignal[] {
+  if (!accountData) return []
+  const kpiRows = accountData.kpiRows ?? []
+  const out: RtaKpiSignal[] = []
+
+  const push = (key: string, entity: string, metric: string, num: number, value: string, thLabel: string, th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean }, mode: RtaReportMode | undefined) => {
+    if (!mode || mode === 'off' || isNaN(num)) return
+    const { isCrit, isWarn } = evalThreshold(num, th)
+    out.push({ key, entity, metric, value, threshold: thLabel, severity: isCrit ? 'critical' : isWarn ? 'warning' : null, mode })
+  }
+
+  ;(ds.groups ?? []).forEach(group => {
+    const g = group.name || 'KPI'
+    const groupRows = group.source ? (accountData.kpiRowsByGroup?.[group.id] ?? []) : kpiRows
+    const rc = (b: any) => resolveCell(groupRows, b, ds.kpiGroupCol, group.groupVal)
+
+    if (group.tiles && group.tiles.length) {
+      group.tiles.forEach(tile => {
+        if (!tile.cell) return
+        const raw = rc(tile.cell)
+        push(`${group.id}:${tile.key}`, g, tile.label, extractPercent(raw), raw.replace(/\s+/g, ''), String(tile.targ), tile, tile.rtaReportMode)
+      })
+      return
+    }
+
+    // Legacy shared-label/shared-threshold path — formulas MUST mirror
+    // buildBreaches()'s own legacy path (same function, below) exactly, or
+    // a heartbeat/breach-change reading here would disagree with what the
+    // Dashboard/Cliq/Workforce Logs show for the exact same cell.
+    if (group.cells.sla) {
+      const raw = rc(group.cells.sla)
+      push(`${group.id}:sla`, g, ds.kpiLabels.sla, extractPercent(raw), raw.replace(/\s+/g, ''), `≥${kpiTh.sla.targ}%`, kpiTh.sla, kpiTh.sla.rtaReportMode)
+    }
+    if (group.cells.wait) {
+      const raw = rc(group.cells.wait)
+      const n = parseInt(raw || '0')
+      push(`${group.id}:wait`, g, ds.kpiLabels.wait, n, String(n), String(kpiTh.wait.targ), kpiTh.wait, kpiTh.wait.rtaReportMode)
+    }
+    if (group.cells.aht) {
+      const raw = rc(group.cells.aht)
+      const m = Math.round(parseDurationToSeconds(raw) / 60)
+      if (m > 0) push(`${group.id}:aht`, g, ds.kpiLabels.aht, m, raw, `<${kpiTh.aht.targ}m`, kpiTh.aht, kpiTh.aht.rtaReportMode)
+    }
+    if (group.cells.abn) {
+      const raw = rc(group.cells.abn)
+      push(`${group.id}:abn`, g, ds.kpiLabels.abn, extractPercent(raw), raw.replace(/\s+/g, ''), `<${kpiTh.abn.targ}%`, kpiTh.abn, kpiTh.abn.rtaReportMode)
+    }
+
+    ;(ds.extraTiles ?? []).forEach(t => {
+      if (!group.cells[t.key]) return
+      const raw = rc(group.cells[t.key])
+      const num = extractPercent(raw)
+      const dir: 'asc' | 'desc' = t.higherIsBetter ? 'desc' : 'asc'
+      push(`${group.id}:${t.key}`, g, t.label, num, raw, String(t.targ), { warn: t.warn, crit: t.crit, direction: dir }, t.rtaReportMode)
+    })
+  })
+
+  return out
+}
+
 export interface BreachRow {
   entity: string; metric: string; value: string; threshold: string
   severity: 'warning' | 'critical'
@@ -120,9 +215,7 @@ export function buildBreaches(
     entity: string, metric: string, value: string, thLabel: string
   ) => {
     if (isNaN(num)) return
-    if (th.excludeZero && num === 0) return
-    const isCrit = th.direction === 'desc' ? num <= th.crit : num >= th.crit
-    const isWarn = th.direction === 'desc' ? num <= th.warn : num >= th.warn
+    const { isCrit, isWarn } = evalThreshold(num, th)
     if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical', kind: 'kpi' })
     else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning',  kind: 'kpi' })
   }

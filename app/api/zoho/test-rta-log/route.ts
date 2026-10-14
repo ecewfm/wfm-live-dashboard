@@ -23,7 +23,8 @@ import { getZohoAuthorizedAccountInfo } from '@/lib/zohoAuth'
 import { classifyBreachesForRtaLog } from '@/lib/geminiClassifier'
 import { loadZohoFieldOptions } from '@/lib/settings'
 import { fetchAccountData } from '@/lib/cliqScan'
-import { buildBreaches } from '@/lib/breaches'
+import { buildBreaches, collectRtaKpiSignals, type BreachRow } from '@/lib/breaches'
+import { computeRtaKpiSignalDue } from '@/lib/rtaLogsChangeDetection'
 import type { DataSourceConfig, Thresholds } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 
@@ -35,7 +36,6 @@ export async function POST(req: Request) {
   let ds: DataSourceConfig | undefined
   let kpiThresholds: Thresholds | undefined
   let statusThresholds: StatusThresholds | undefined
-  let reportKpi = true
   let reportAgentStatus = false
   try {
     const body = await req.json()
@@ -46,10 +46,10 @@ export async function POST(req: Request) {
     ds = body?.ds
     kpiThresholds = body?.kpiThresholds
     statusThresholds = body?.statusThresholds
-    // Mirrors lib/cliqScan.ts's own scope filter — the Test button should
-    // reflect the exact same KPI Tiles/Agent Status scope the real scan
-    // would use for this account, not classify against everything.
-    reportKpi = body?.reportKpi !== false
+    // Mirrors lib/cliqScan.ts's own scope — Agent Status is still a single
+    // account-wide toggle; KPI Tile scope is now per-tile (GroupTile.
+    // rtaReportMode, see collectRtaKpiSignals below) instead of one blanket
+    // switch, so there's no equivalent single "reportKpi" flag anymore.
     reportAgentStatus = !!body?.reportAgentStatus
   } catch {
     // no body — accountId stays undefined, caught below
@@ -81,11 +81,21 @@ export async function POST(req: Request) {
 
     const accountData = await fetchAccountData(ds, accountId)
     const allBreaches = buildBreaches(accountId, accountData, {}, kpiThresholds || ({} as Thresholds), statusThresholds || ({} as StatusThresholds), ds)
-    const breaches = allBreaches.filter(b =>
-      (b.kind === 'kpi' && reportKpi) || (b.kind === 'agent' && reportAgentStatus)
-    )
+    const agentBreaches = reportAgentStatus ? allBreaches.filter(b => b.kind === 'agent') : []
+    // force=true (no stored state) mirrors exactly what a "Force Scan Now"
+    // would currently classify — every breach_change-mode tile that's
+    // CURRENTLY breaching, regardless of whether its value changed since
+    // last time. Heartbeat-mode tiles aren't breaches, so they're excluded
+    // here too, same as the real scan.
+    const kpiSignals = collectRtaKpiSignals(ds, accountData, kpiThresholds || ({} as Thresholds))
+    const kpiDue = computeRtaKpiSignalDue(kpiSignals, null, Date.now(), true)
+    const kpiBreachRows: BreachRow[] = kpiDue.dueBreachChange.map(s => ({
+      entity: s.entity, metric: s.metric, value: s.value, threshold: s.threshold,
+      severity: (s.severity || 'warning') as 'warning' | 'critical', kind: 'kpi' as const,
+    }))
+    const breaches = [...kpiBreachRows, ...agentBreaches]
     if (breaches.length === 0) {
-      throw new Error(`No active breaches right now within this account's reporting scope (KPI Tiles ${reportKpi ? 'on' : 'off'}, Agent Status ${reportAgentStatus ? 'on' : 'off'}) — AI Categorization needs at least one to classify. Try again once something in scope is breaching, or test with AI Categorization off.`)
+      throw new Error(`No active breaches right now within this account's reporting scope (no KPI tile currently breaching with an RTA Reporting mode set, Agent Status ${reportAgentStatus ? 'on' : 'off'}) — AI Categorization needs at least one to classify. Try again once something in scope is breaching, or test with AI Categorization off.`)
     }
 
     const [categories, subCategories] = await Promise.all([
