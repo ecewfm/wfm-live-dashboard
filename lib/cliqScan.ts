@@ -340,11 +340,12 @@ async function processAccount(
   if (acc.rta_logs_enabled) {
     // Agent Status scope unchanged (2026-09-29, sql/rta_logs_breach_scope.sql).
     // KPI Tile scope used to be this SAME account-wide on/off
-    // (`rta_report_kpi`) — replaced 2026-10-14 by a PER-TILE reporting mode
-    // (GroupTile.rtaReportMode, independent-tiles groups only) that also
-    // decides HOW each tile reports (heartbeat vs. breach-change), not just
-    // whether it does. `rta_report_kpi` itself is left alone in the DB
-    // (harmless unused column) rather than migrated away.
+    // (`rta_report_kpi`) — replaced 2026-10-14 by two PER-TILE, INDEPENDENT
+    // checkboxes (RtaReportFlags.rtaReportHeartbeat/rtaReportBreachChange —
+    // both can be on at once: a tile then reports at least every 60 minutes
+    // AND additionally whenever it changes while breaching). `rta_report_kpi`
+    // itself is left alone in the DB (harmless unused column) rather than
+    // migrated away.
     const reportAgentStatus = !!acc.rta_report_agent_status
     const rtaBreaches = breaches.filter(b => b.kind === 'agent' && reportAgentStatus)
     const rtaKpiSignals = collectRtaKpiSignals(ds, accountData, kpiTh)
@@ -354,7 +355,7 @@ async function processAccount(
     const agentChange = computeRtaLogsChangeSignal(rtaBreaches, baseRtaState)
     const agentDue = forceSend || agentChange.shouldSend
 
-    if (kpiDue.dueHeartbeat.length === 0 && kpiDue.dueBreachChange.length === 0 && !agentDue) {
+    if (kpiDue.dueHealthy.length === 0 && kpiDue.dueBreaching.length === 0 && !agentDue) {
       l(`${accountId}: RTA Logs — nothing due this cycle (no per-KPI heartbeat/breach-change due` +
         `${reportAgentStatus ? ', no new agent breach' : ', Agent Status reporting off'}) — skipping.`)
     } else {
@@ -376,13 +377,14 @@ async function processAccount(
         // match its real Zoho display name.
         const zohoAccountName = acc.rta_account_name || accountId
 
-        // breach_change-due KPI tiles + any due agent breaches are genuine
-        // breaches; heartbeat-due tiles report a current value regardless of
-        // breach status, so they're kept separate and never run through AI
+        // Due AND currently-breaching KPI tiles + any due agent breaches are
+        // genuine breaches; due-but-healthy tiles (only possible via the
+        // heartbeat flag) report a current value regardless of breach
+        // status, so they're kept separate and never run through AI
         // categorization (there's no "breach type" to classify for a
         // healthy reading).
         const breachRowsForAi: BreachRow[] = [
-          ...kpiDue.dueBreachChange.map(s => ({
+          ...kpiDue.dueBreaching.map(s => ({
             entity: s.entity, metric: s.metric, value: s.value, threshold: s.threshold,
             severity: (s.severity || 'warning') as 'warning' | 'critical', kind: 'kpi' as const,
           })),
@@ -424,11 +426,11 @@ async function processAccount(
               l(`${accountId}: AI categorization failed, skipping RTA Logs this cycle (will retry next cycle) — ${e.message}`)
             }
           }
-          // Heartbeat readings aren't breaches — always a separate plain
-          // (fixed-category) submission, independent of AI mode/success.
-          if (kpiDue.dueHeartbeat.length > 0) {
+          // Due-but-healthy readings aren't breaches — always a separate
+          // plain (fixed-category) submission, independent of AI mode/success.
+          if (kpiDue.dueHealthy.length > 0) {
             try {
-              const remarks = formatRtaLogsRemarks(accountId, [], kpiDue.dueHeartbeat)
+              const remarks = formatRtaLogsRemarks(accountId, [], kpiDue.dueHealthy)
               await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
               l(`${accountId}: RTA Log webapp request submitted (heartbeat readings).`)
               updates.rta_logs_last_sent_at = new Date().toISOString()
@@ -443,7 +445,7 @@ async function processAccount(
           // KPI tile due this cycle (whichever mode) plus any due agent
           // breaches, never one submission per KPI.
           try {
-            const remarks = formatRtaLogsRemarks(accountId, breachRowsForAi, kpiDue.dueHeartbeat)
+            const remarks = formatRtaLogsRemarks(accountId, breachRowsForAi, kpiDue.dueHealthy)
             await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
             l(`${accountId}: RTA Log webapp request submitted.`)
             updates.rta_logs_last_sent_at = new Date().toISOString()

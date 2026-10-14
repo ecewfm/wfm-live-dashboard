@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice, RtaReportMode } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
@@ -199,6 +199,24 @@ const MODAL_STYLES = `
   .sm-dir-btn.asc:hover  { background: rgba(217,158,53,0.2); }
   .sm-dir-btn.desc { background: rgba(75,139,156,0.1); color: #4b8b9c; border-color: rgba(75,139,156,0.3); }
   .sm-dir-btn.desc:hover { background: rgba(75,139,156,0.2); }
+
+  /* ── Pill toggle switch — used for the RTA Logs Reporting per-KPI checks */
+  .sm-toggle { position: relative; display: inline-block; width: 30px; height: 17px; flex-shrink: 0; }
+  .sm-toggle input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1; }
+  .sm-toggle-track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--border, #c9d0ce); transition: background 0.15s;
+  }
+  .dark .sm-toggle-track { background: #3a3a3a; }
+  .sm-toggle-track::before {
+    content: ''; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px;
+    border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    transition: transform 0.15s;
+  }
+  .sm-toggle input:checked + .sm-toggle-track { background: #d97a35; }
+  .sm-toggle input:checked + .sm-toggle-track::before { transform: translateX(13px); }
+  .sm-toggle input:disabled + .sm-toggle-track { opacity: 0.45; cursor: not-allowed; }
+  .sm-toggle input:disabled { cursor: not-allowed; }
   /* Data source tab styles */
   .ds-row {
     display: grid; grid-template-columns: 140px 1fr; gap: 10px;
@@ -1843,6 +1861,36 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, 
   )
 }
 
+// ── Two independent RTA Logs Reporting toggles for one KPI threshold — NOT
+// mutually exclusive, per the user (2026-10-14): both can be on at once, so
+// a KPI reports at least every 60 minutes AND additionally whenever it
+// changes while breaching. Shared by both the KPI Thresholds tables below
+// (the generic shared table and each independent-tiles group's own table).
+function RtaReportFlagsCell({ heartbeat, breachChange, disabled, onToggleHeartbeat, onToggleBreachChange }: {
+  heartbeat: boolean; breachChange: boolean; disabled: boolean
+  onToggleHeartbeat: () => void; onToggleBreachChange: () => void
+}) {
+  const disabledTitle = disabled ? 'Enable Workforce RTA Logs Reporting (Zoho Integrations tab) to use this' : undefined
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 11, whiteSpace: 'nowrap' }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 7 }} title={disabledTitle}>
+        <span className="sm-toggle">
+          <input type="checkbox" checked={heartbeat} disabled={disabled} onChange={onToggleHeartbeat} />
+          <span className="sm-toggle-track" />
+        </span>
+        <span style={{ opacity: disabled ? 0.5 : 1 }}>Every 60 min</span>
+      </label>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 7 }} title={disabledTitle}>
+        <span className="sm-toggle">
+          <input type="checkbox" checked={breachChange} disabled={disabled} onChange={onToggleBreachChange} />
+          <span className="sm-toggle-track" />
+        </span>
+        <span style={{ opacity: disabled ? 0.5 : 1 }}>On breach, value changes</span>
+      </label>
+    </div>
+  )
+}
+
 // ── Main Settings Content ─────────────────────────────────────────────────────
 function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, rtaReportKpi, rtaReportAgentStatus, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
@@ -2117,8 +2165,8 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       [key]: { ...prev[key], excludeZero: !prev[key].excludeZero }
     }))
   }
-  const setKpiRtaMode = (key: keyof Thresholds, mode: RtaReportMode) => {
-    setKpi(prev => ({ ...prev, [key]: { ...prev[key], rtaReportMode: mode } }))
+  const toggleKpiRtaFlag = (key: keyof Thresholds, flag: 'rtaReportHeartbeat' | 'rtaReportBreachChange') => {
+    setKpi(prev => ({ ...prev, [key]: { ...prev[key], [flag]: !prev[key][flag] } }))
   }
 
   // ── Per-group independent tile thresholds (see GroupTile in lib/types.ts) —
@@ -2244,7 +2292,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                         <tr>
                           <th style={{ width: '22%' }}>Metric</th>
                           <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
-                          <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Reporting</th>
+                          <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Logs Reporting</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2256,7 +2304,6 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                           // (e.g. "AWAITING" → "Total Calls") shows the same name
                           // here instead of reverting to the hardcoded default.
                           const label = ds.kpiLabels?.[row.key] || row.label
-                          const rtaMode = th.rtaReportMode || 'off'
                           return (
                             <tr key={row.key}>
                               <td>
@@ -2283,15 +2330,11 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                 <input type="checkbox" checked={!!th.excludeZero} onChange={() => toggleExcludeZero(row.key)} />
                               </td>
                               <td>
-                                <select className="sm-input" style={{ minWidth: 150 }}
+                                <RtaReportFlagsCell
+                                  heartbeat={!!th.rtaReportHeartbeat} breachChange={!!th.rtaReportBreachChange}
                                   disabled={!rtaLogsOn}
-                                  title={!rtaLogsOn ? 'Enable Workforce RTA Logs Reporting (Zoho Integrations tab) to use this' : undefined}
-                                  value={rtaMode}
-                                  onChange={e => setKpiRtaMode(row.key, e.target.value as RtaReportMode)}>
-                                  <option value="off">Off</option>
-                                  <option value="heartbeat">Every 60 min (always)</option>
-                                  <option value="breach_change">On breach, when value changes</option>
-                                </select>
+                                  onToggleHeartbeat={() => toggleKpiRtaFlag(row.key, 'rtaReportHeartbeat')}
+                                  onToggleBreachChange={() => toggleKpiRtaFlag(row.key, 'rtaReportBreachChange')} />
                               </td>
                             </tr>
                           )
@@ -2318,13 +2361,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                         <tr>
                           <th style={{ width: '22%' }}>Metric</th>
                           <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
-                          <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Reporting</th>
+                          <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Logs Reporting</th>
                         </tr>
                       </thead>
                       <tbody>
                         {group.tiles!.map(tile => {
                           const isAsc = tile.direction === 'asc'
-                          const rtaMode = tile.rtaReportMode || 'off'
                           return (
                             <tr key={tile.key}>
                               <td><div className="sm-metric">{tile.label}</div></td>
@@ -2348,15 +2390,11 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                   onChange={() => updateGroupTile(group.id, tile.key, { excludeZero: !tile.excludeZero })} />
                               </td>
                               <td>
-                                <select className="sm-input" style={{ minWidth: 150 }}
+                                <RtaReportFlagsCell
+                                  heartbeat={!!tile.rtaReportHeartbeat} breachChange={!!tile.rtaReportBreachChange}
                                   disabled={!rtaLogsOn}
-                                  title={!rtaLogsOn ? 'Enable Workforce RTA Logs Reporting (Zoho Integrations tab) to use this' : undefined}
-                                  value={rtaMode}
-                                  onChange={e => updateGroupTile(group.id, tile.key, { rtaReportMode: e.target.value as 'off' | 'heartbeat' | 'breach_change' })}>
-                                  <option value="off">Off</option>
-                                  <option value="heartbeat">Every 60 min (always)</option>
-                                  <option value="breach_change">On breach, when value changes</option>
-                                </select>
+                                  onToggleHeartbeat={() => updateGroupTile(group.id, tile.key, { rtaReportHeartbeat: !tile.rtaReportHeartbeat })}
+                                  onToggleBreachChange={() => updateGroupTile(group.id, tile.key, { rtaReportBreachChange: !tile.rtaReportBreachChange })} />
                               </td>
                             </tr>
                           )
@@ -2660,13 +2698,16 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   </tbody>
                 </table>
                 <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10 }}>
-                  There is no account-wide "report KPI breaches" switch anymore — each independent
-                  KPI tile has its OWN RTA Reporting mode (Off / Every 60 min / On breach, when value
-                  changes), set per tile on the <strong>KPI Thresholds</strong> tab.
+                  There is no account-wide "report KPI breaches" switch anymore — every KPI threshold
+                  has its OWN two independent RTA Logs Reporting checkboxes ("Every 60 min" and "On breach,
+                  value changes" — both can be on at once), set on the <strong>KPI Thresholds</strong> tab.
                 </p>
-                {!rtaReportAgentStatusOn && !ds.groups.some(g => (g.tiles || []).some(t => t.rtaReportMode && t.rtaReportMode !== 'off')) && (
+                {!rtaReportAgentStatusOn
+                  && !(['sla', 'wait', 'aht', 'abn'] as const).some(k => kpi[k].rtaReportHeartbeat || kpi[k].rtaReportBreachChange)
+                  && !ds.groups.some(g => (g.tiles || []).some(t => t.rtaReportHeartbeat || t.rtaReportBreachChange))
+                  && (
                   <p className="sm-desc" style={{ marginTop: 4, marginBottom: 10, color: '#c0392b' }}>
-                    Agent Status reporting is off and no KPI tile has an RTA Reporting mode set — this
+                    Agent Status reporting is off and no KPI has an RTA Logs Reporting checkbox set — this
                     account&apos;s automatic Workforce RTA Logs reporting has nothing to send and will
                     always be skipped until at least one is turned on.
                   </p>

@@ -84,8 +84,13 @@ export function computeRtaLogsChangeSignal(breaches: BreachRow[], stored: RtaLog
 const HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000
 
 export interface RtaKpiSignalDueResult {
-  dueHeartbeat:    RtaKpiSignal[]
-  dueBreachChange: RtaKpiSignal[]
+  // A signal can be due via EITHER flag (or both at once) — split by
+  // severity, not by which flag triggered it, since that's what decides
+  // routing downstream: a breaching signal is AI-classification-eligible
+  // (it's a real breach, whichever flag fired it); a healthy one is only
+  // ever reporting its current value (only possible via the heartbeat flag).
+  dueBreaching: RtaKpiSignal[]
+  dueHealthy:   RtaKpiSignal[]
   // Pure bookkeeping, independent of whether anything is actually sent to
   // Zoho this cycle — always safe to merge into the stored state as-is:
   //   - clearedBreachChangeKeys: tiles that just healed. Dropping their
@@ -93,62 +98,65 @@ export interface RtaKpiSignalDueResult {
   //     (mirrors the account-wide baseline-clear this file's header
   //     documents, now scoped per tile).
   clearedBreachChangeKeys: string[]
-  // The NEW {key: value} entries for signals this result marks "due" —
-  // the caller merges these into stored state ONLY if its send this cycle
-  // actually succeeds (same "advance only on confirmed send" discipline as
-  // every other cooldown/baseline in this codebase, e.g. Cliq's own
-  // cliq_last_sent_at) — a failed send must stay due and retry next cycle,
-  // not go silent for another 60 minutes / until the next value change.
+  // The NEW {key: value} entries for every signal that ended up in
+  // dueBreaching/dueHealthy — the caller merges these into stored state
+  // ONLY if its send this cycle actually succeeds (same "advance only on
+  // confirmed send" discipline as every other cooldown/baseline in this
+  // codebase, e.g. Cliq's own cliq_last_sent_at) — a failed send must stay
+  // due and retry next cycle, not go silent for another 60 minutes / until
+  // the next value change. Advances WHICHEVER flag(s) this signal has
+  // enabled, regardless of which flag was the actual trigger this cycle —
+  // e.g. a heartbeat-triggered send of a breaching value also updates
+  // breachChangeAdvance, so breach-change doesn't immediately re-fire for a
+  // value just reported a moment ago via the heartbeat.
   heartbeatAdvance:    Record<string, string>
   breachChangeAdvance: Record<string, string>
 }
 
-// Per-tile counterpart to computeRtaLogsChangeSignal() above, for GroupTile.
-// rtaReportMode ('heartbeat' | 'breach_change') tiles — see
-// lib/breaches.ts's collectRtaKpiSignals(). Unlike the account-wide KPI
-// branch above (now unused), this is genuinely per-tile: each signal is
-// judged independently against its OWN last-sent state, keyed by the
-// stable `${groupId}:${tileKey}` (survives a tile being renamed, unlike the
-// old `${entity}|${metric}` text key).
+// Per-tile counterpart to computeRtaLogsChangeSignal() above, for KPIs with
+// rtaReportHeartbeat/rtaReportBreachChange set (see RtaReportFlags in
+// lib/types.ts, lib/breaches.ts's collectRtaKpiSignals()). Unlike the
+// account-wide KPI branch above (now unused), this is genuinely per-tile:
+// each signal is judged independently against its OWN last-sent state,
+// keyed by the stable `${groupId}:${tileKey}` (survives a tile being
+// renamed, unlike the old `${entity}|${metric}` text key).
 export function computeRtaKpiSignalDue(
   signals: RtaKpiSignal[], stored: RtaLogsState | null | undefined, now: number,
   // Mirrors the real scan's "Force Scan Now" forceSend flag — bypasses the
   // 60-minute heartbeat wait and the breach-change value-diff check, same as
   // forceSend already bypasses computeRtaLogsChangeSignal's agent check.
-  // Still only includes a 'breach_change' tile when it's ACTUALLY breaching
-  // right now (forcing a send for a healthy tile makes no sense) — only the
-  // "did it change" part is skipped.
+  // Still only treats a signal as breach-change-due when it's ACTUALLY
+  // breaching right now (forcing a send for a healthy tile via this flag
+  // makes no sense) — only the "did it change" part is skipped.
   force = false
 ): RtaKpiSignalDueResult {
   const prevHeartbeat    = stored?.kpiHeartbeat    ?? {}
   const prevBreachChange = stored?.kpiBreachChange ?? {}
 
-  const dueHeartbeat:    RtaKpiSignal[] = []
-  const dueBreachChange: RtaKpiSignal[] = []
+  const dueBreaching: RtaKpiSignal[] = []
+  const dueHealthy:   RtaKpiSignal[] = []
   const clearedBreachChangeKeys: string[] = []
   const heartbeatAdvance:    Record<string, string> = {}
   const breachChangeAdvance: Record<string, string> = {}
 
   for (const s of signals) {
-    if (s.mode === 'heartbeat') {
-      const lastSent = prevHeartbeat[s.key]
-      if (force || !lastSent || now - new Date(lastSent).getTime() >= HEARTBEAT_INTERVAL_MS) {
-        dueHeartbeat.push(s)
-        heartbeatAdvance[s.key] = new Date(now).toISOString()
-      }
-      continue
-    }
-    // 'breach_change' — only while breaching, only when the value differs
-    // from the last one actually reported.
-    if (s.severity === null) {
-      if (s.key in prevBreachChange) clearedBreachChangeKeys.push(s.key)
-      continue
-    }
-    if (force || prevBreachChange[s.key] !== s.value) {
-      dueBreachChange.push(s)
-      breachChangeAdvance[s.key] = s.value
-    }
+    const breaching = s.severity !== null
+
+    // Healed tiles' breach-change baseline clears regardless of whether
+    // this signal is due for any other reason this cycle.
+    if (!breaching && s.key in prevBreachChange) clearedBreachChangeKeys.push(s.key)
+
+    const heartbeatDue = s.wantsHeartbeat && (
+      force || !prevHeartbeat[s.key] || now - new Date(prevHeartbeat[s.key]).getTime() >= HEARTBEAT_INTERVAL_MS
+    )
+    const breachChangeDue = s.wantsBreachChange && breaching && (force || prevBreachChange[s.key] !== s.value)
+
+    if (!heartbeatDue && !breachChangeDue) continue
+
+    if (breaching) dueBreaching.push(s); else dueHealthy.push(s)
+    if (s.wantsHeartbeat) heartbeatAdvance[s.key] = new Date(now).toISOString()
+    if (s.wantsBreachChange && breaching) breachChangeAdvance[s.key] = s.value
   }
 
-  return { dueHeartbeat, dueBreachChange, clearedBreachChangeKeys, heartbeatAdvance, breachChangeAdvance }
+  return { dueBreaching, dueHealthy, clearedBreachChangeKeys, heartbeatAdvance, breachChangeAdvance }
 }

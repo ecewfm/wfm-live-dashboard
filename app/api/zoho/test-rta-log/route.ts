@@ -83,13 +83,13 @@ export async function POST(req: Request) {
     const allBreaches = buildBreaches(accountId, accountData, {}, kpiThresholds || ({} as Thresholds), statusThresholds || ({} as StatusThresholds), ds)
     const agentBreaches = reportAgentStatus ? allBreaches.filter(b => b.kind === 'agent') : []
     // force=true (no stored state) mirrors exactly what a "Force Scan Now"
-    // would currently classify — every breach_change-mode tile that's
-    // CURRENTLY breaching, regardless of whether its value changed since
-    // last time. Heartbeat-mode tiles aren't breaches, so they're excluded
-    // here too, same as the real scan.
+    // would currently classify — every KPI tile that's CURRENTLY breaching
+    // with either RTA Reporting flag on, regardless of whether its value
+    // changed since last time. Due-but-healthy (heartbeat-only) readings
+    // aren't breaches, so they're excluded here too, same as the real scan.
     const kpiSignals = collectRtaKpiSignals(ds, accountData, kpiThresholds || ({} as Thresholds))
     const kpiDue = computeRtaKpiSignalDue(kpiSignals, null, Date.now(), true)
-    const kpiBreachRows: BreachRow[] = kpiDue.dueBreachChange.map(s => ({
+    const kpiBreachRows: BreachRow[] = kpiDue.dueBreaching.map(s => ({
       entity: s.entity, metric: s.metric, value: s.value, threshold: s.threshold,
       severity: (s.severity || 'warning') as 'warning' | 'critical', kind: 'kpi' as const,
     }))

@@ -6,7 +6,7 @@
 // — whichever thresholds/KPI logic you see on screen is exactly what the
 // Cliq alert used to decide whether to fire.
 
-import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportMode } from './types'
+import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags } from './types'
 import { extractPercent, parseDurationToSeconds, formatSeconds, resolveCell, type StatusThresholds } from './utils'
 
 // ── Normalize one raw agent row from a configured AgentSource ────────────────
@@ -91,20 +91,22 @@ export interface RtaKpiSignal {
   metric:      string   // tile label
   value:       string
   threshold:   string
-  severity:    'warning' | 'critical' | null   // null = not currently breaching (only possible for 'heartbeat' mode)
-  mode:        'heartbeat' | 'breach_change'
+  severity:    'warning' | 'critical' | null   // null = not currently breaching (only possible when wantsHeartbeat)
+  // Independent checkboxes, not mutually exclusive — both can be true for
+  // the same KPI (see RtaReportFlags in lib/types.ts).
+  wantsHeartbeat:    boolean
+  wantsBreachChange: boolean
 }
 
-// ── RTA Logs per-KPI reporting mode — EVERY KPI threshold gets this control:
-// the 4 generic Thresholds keys (sla/wait/aht/abn, GroupTile.rtaReportMode
-// when seeded from a legacy binding), each GroupTile on an independent-tiles
-// group, and each account-wide ExtraTile. See RtaReportMode in lib/types.ts.
-// Deliberately a SEPARATE pass from buildBreaches(), not a side-channel on
-// it: 'heartbeat' mode needs a KPI's CURRENT value even when it is NOT
-// breaching, and buildBreaches() only ever pushes a row when something IS
-// breaching — every other consumer (Cliq, Workforce Logs, the live
-// Dashboard/Overview breach table) only ever wants actual breaches, so that
-// contract stays unchanged for them.
+// ── RTA Logs per-KPI reporting flags — EVERY KPI threshold gets this
+// control: the 4 generic Thresholds keys (sla/wait/aht/abn), each GroupTile
+// on an independent-tiles group, and each account-wide ExtraTile. See
+// RtaReportFlags in lib/types.ts. Deliberately a SEPARATE pass from
+// buildBreaches(), not a side-channel on it: the heartbeat flag needs a
+// KPI's CURRENT value even when it is NOT breaching, and buildBreaches()
+// only ever pushes a row when something IS breaching — every other consumer
+// (Cliq, Workforce Logs, the live Dashboard/Overview breach table) only ever
+// wants actual breaches, so that contract stays unchanged for them.
 export function collectRtaKpiSignals(
   ds: DataSourceConfig, accountData: AccountData | undefined, kpiTh: Thresholds
 ): RtaKpiSignal[] {
@@ -112,10 +114,12 @@ export function collectRtaKpiSignals(
   const kpiRows = accountData.kpiRows ?? []
   const out: RtaKpiSignal[] = []
 
-  const push = (key: string, entity: string, metric: string, num: number, value: string, thLabel: string, th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean }, mode: RtaReportMode | undefined) => {
-    if (!mode || mode === 'off' || isNaN(num)) return
+  const push = (key: string, entity: string, metric: string, num: number, value: string, thLabel: string, th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean }, flags: RtaReportFlags | undefined) => {
+    const wantsHeartbeat = !!flags?.rtaReportHeartbeat
+    const wantsBreachChange = !!flags?.rtaReportBreachChange
+    if ((!wantsHeartbeat && !wantsBreachChange) || isNaN(num)) return
     const { isCrit, isWarn } = evalThreshold(num, th)
-    out.push({ key, entity, metric, value, threshold: thLabel, severity: isCrit ? 'critical' : isWarn ? 'warning' : null, mode })
+    out.push({ key, entity, metric, value, threshold: thLabel, severity: isCrit ? 'critical' : isWarn ? 'warning' : null, wantsHeartbeat, wantsBreachChange })
   }
 
   ;(ds.groups ?? []).forEach(group => {
@@ -127,7 +131,7 @@ export function collectRtaKpiSignals(
       group.tiles.forEach(tile => {
         if (!tile.cell) return
         const raw = rc(tile.cell)
-        push(`${group.id}:${tile.key}`, g, tile.label, extractPercent(raw), raw.replace(/\s+/g, ''), String(tile.targ), tile, tile.rtaReportMode)
+        push(`${group.id}:${tile.key}`, g, tile.label, extractPercent(raw), raw.replace(/\s+/g, ''), String(tile.targ), tile, tile)
       })
       return
     }
@@ -138,21 +142,21 @@ export function collectRtaKpiSignals(
     // Dashboard/Cliq/Workforce Logs show for the exact same cell.
     if (group.cells.sla) {
       const raw = rc(group.cells.sla)
-      push(`${group.id}:sla`, g, ds.kpiLabels.sla, extractPercent(raw), raw.replace(/\s+/g, ''), `≥${kpiTh.sla.targ}%`, kpiTh.sla, kpiTh.sla.rtaReportMode)
+      push(`${group.id}:sla`, g, ds.kpiLabels.sla, extractPercent(raw), raw.replace(/\s+/g, ''), `≥${kpiTh.sla.targ}%`, kpiTh.sla, kpiTh.sla)
     }
     if (group.cells.wait) {
       const raw = rc(group.cells.wait)
       const n = parseInt(raw || '0')
-      push(`${group.id}:wait`, g, ds.kpiLabels.wait, n, String(n), String(kpiTh.wait.targ), kpiTh.wait, kpiTh.wait.rtaReportMode)
+      push(`${group.id}:wait`, g, ds.kpiLabels.wait, n, String(n), String(kpiTh.wait.targ), kpiTh.wait, kpiTh.wait)
     }
     if (group.cells.aht) {
       const raw = rc(group.cells.aht)
       const m = Math.round(parseDurationToSeconds(raw) / 60)
-      if (m > 0) push(`${group.id}:aht`, g, ds.kpiLabels.aht, m, raw, `<${kpiTh.aht.targ}m`, kpiTh.aht, kpiTh.aht.rtaReportMode)
+      if (m > 0) push(`${group.id}:aht`, g, ds.kpiLabels.aht, m, raw, `<${kpiTh.aht.targ}m`, kpiTh.aht, kpiTh.aht)
     }
     if (group.cells.abn) {
       const raw = rc(group.cells.abn)
-      push(`${group.id}:abn`, g, ds.kpiLabels.abn, extractPercent(raw), raw.replace(/\s+/g, ''), `<${kpiTh.abn.targ}%`, kpiTh.abn, kpiTh.abn.rtaReportMode)
+      push(`${group.id}:abn`, g, ds.kpiLabels.abn, extractPercent(raw), raw.replace(/\s+/g, ''), `<${kpiTh.abn.targ}%`, kpiTh.abn, kpiTh.abn)
     }
 
     ;(ds.extraTiles ?? []).forEach(t => {
@@ -160,7 +164,7 @@ export function collectRtaKpiSignals(
       const raw = rc(group.cells[t.key])
       const num = extractPercent(raw)
       const dir: 'asc' | 'desc' = t.higherIsBetter ? 'desc' : 'asc'
-      push(`${group.id}:${t.key}`, g, t.label, num, raw, String(t.targ), { warn: t.warn, crit: t.crit, direction: dir }, t.rtaReportMode)
+      push(`${group.id}:${t.key}`, g, t.label, num, raw, String(t.targ), { warn: t.warn, crit: t.crit, direction: dir }, t)
     })
   })
 
