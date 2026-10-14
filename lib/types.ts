@@ -90,15 +90,27 @@ export interface RtaReportFlags {
   rtaReportBreachChange?: boolean
 }
 
+// What KIND of value a KPI's warn/crit/targ numbers represent — drives both
+// how the raw scraped cell is parsed into a comparable number (lib/utils.ts's
+// extractKpiValue()) and how the threshold is edited/displayed (a plain "%"
+// number, an "m:ss" ClockInput, or a bare whole number). Per the user
+// (2026-10-14): every account wires different things into these slots (a
+// ticket count, Calls in Queue, SLA, Abandon Rate, ...), so this has to be an
+// explicit per-KPI choice, not inferred from the slot's name.
+//   'percent'  — e.g. SLA %, Abandon Rate — value like "85.3%"
+//   'duration' — e.g. ASA/AHT — value like "1:55" (mm:ss)
+//   'count'    — e.g. Calls in Queue, a ticket count — a bare whole number
+export type KpiUnit = 'percent' | 'duration' | 'count'
+
 // ── KPI threshold type ────────────────────────────────────────────────────────
 // excludeZero: when the account's CRM reports a metric as exactly 0 because
 // there's literally no volume to work (e.g. SLA% with zero calls offered),
 // skip breach-tagging it instead of treating 0 as a critical breach.
 export interface Thresholds {
-  sla:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean } & RtaReportFlags
-  wait: { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean } & RtaReportFlags
-  aht:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean } & RtaReportFlags
-  abn:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean } & RtaReportFlags
+  sla:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit } & RtaReportFlags
+  wait: { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit } & RtaReportFlags
+  aht:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit } & RtaReportFlags
+  abn:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit } & RtaReportFlags
 }
 
 // ── Data source configuration (per account, stored in wfm_settings + localStorage)
@@ -123,6 +135,9 @@ export interface ExtraTile extends RtaReportFlags {
   crit:           number
   targ:           number
   higherIsBetter: boolean  // true → low values are bad; false → high values are bad
+  // Absent = 'percent', matching this tile's historical always-extractPercent
+  // behavior (see lib/utils.ts's extractKpiValue()) — zero migration needed.
+  kpiUnit?:       KpiUnit
 }
 
 // A KpiGroup's own table, completely independent of the account's main
@@ -177,6 +192,9 @@ export interface GroupTile extends RtaReportFlags {
   targ:         number
   direction:    'asc' | 'desc'   // 'asc' = high values are bad, 'desc' = low values are bad (same convention as Thresholds)
   excludeZero?: boolean
+  // Absent = 'percent', matching this tile's historical always-extractPercent
+  // behavior (see lib/utils.ts's extractKpiValue()) — zero migration needed.
+  kpiUnit?:     KpiUnit
   // Per-tile Workforce RTA Logs (Zoho) reporting flags — replace the old
   // account-wide "Report KPI Tile breaches" toggle (wfm_settings.
   // rta_report_kpi), which was all-or-nothing across every KPI tile. See

@@ -1,4 +1,4 @@
-import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, GroupTile, AgentSource, DashboardLayout, HeaderColors } from './types'
+import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, GroupTile, AgentSource, DashboardLayout, HeaderColors, KpiUnit } from './types'
 
 // ── Status thresholds type ────────────────────────────────────────────────────
 // excluded: statuses like "Logged Out"/"Offline" that shouldn't be breach-
@@ -8,10 +8,10 @@ export type StatusThresholds = Record<string, { warn: number; crit: number; excl
 
 // ── Default KPI thresholds ────────────────────────────────────────────────────
 export const DEFAULT_THRESHOLDS: Thresholds = {
-  sla:  { warn: 75, crit: 65, targ: 80, direction: 'desc' },
-  wait: { warn: 15, crit: 25, targ: 10, direction: 'asc'  },
-  aht:  { warn: 30, crit: 60, targ: 25, direction: 'asc'  },
-  abn:  { warn: 5,  crit: 8,  targ: 3,  direction: 'asc'  },
+  sla:  { warn: 75, crit: 65, targ: 80, direction: 'desc', kpiUnit: 'percent'  },
+  wait: { warn: 15, crit: 25, targ: 10, direction: 'asc',  kpiUnit: 'count'    },
+  aht:  { warn: 30, crit: 60, targ: 25, direction: 'asc',  kpiUnit: 'duration' },
+  abn:  { warn: 5,  crit: 8,  targ: 3,  direction: 'asc',  kpiUnit: 'percent'  },
 }
 
 // ── Default status thresholds ─────────────────────────────────────────────────
@@ -46,7 +46,7 @@ export function newGroup(name = 'Global'): KpiGroup {
  *  ExtraTile's own defaults (addExtra in SettingsModal.tsx) so a newly-added
  *  independent tile behaves the same as adding an Extra KPI Tile used to. */
 export function newGroupTile(label = 'New Metric'): GroupTile {
-  return { key: 'tile_' + genId(), label, cell: null, warn: 10, crit: 20, targ: 5, direction: 'asc' }
+  return { key: 'tile_' + genId(), label, cell: null, warn: 10, crit: 20, targ: 5, direction: 'asc', kpiUnit: 'percent' }
 }
 
 /** A fresh agent source — one table + its column mapping, optionally grouped
@@ -482,6 +482,38 @@ export function extractPercent(str: string | null | undefined): number {
   if (m) return parseFloat(m[1])
   const n = parseFloat(cleaned)
   return isNaN(n) ? NaN : n
+}
+
+// ── Per-KPI unit-aware value extraction — CANONICAL, used by BOTH
+// lib/breaches.ts (buildBreaches/collectRtaKpiSignals) AND
+// components/Dashboard.tsx (KpiTile/OvKpiTile rendering) so a KPI's
+// `kpiUnit` (see KpiUnit in lib/types.ts) is interpreted identically
+// everywhere — the value shown on screen is exactly what the breach check
+// compared. `unit` undefined (an old tile/extra-tile saved before this
+// field existed) falls through to the 'percent' case, matching their
+// historical always-extractPercent behavior — zero migration needed.
+export function extractKpiValue(raw: string | null | undefined, unit: KpiUnit | undefined): { num: number; value: string } {
+  const r = raw ?? ''
+  if (unit === 'duration') {
+    return { num: parseDurationToSeconds(r) / 60, value: r }
+  }
+  if (unit === 'count') {
+    const n = parseInt(r || '0')
+    return { num: isNaN(n) ? NaN : n, value: String(isNaN(n) ? 0 : n) }
+  }
+  return { num: extractPercent(r), value: r.replace(/\s+/g, '') }
+}
+
+// ── Unit- and direction-aware breach threshold label — e.g. "≥80%",
+// "<1:55", or a bare "10" for a count (no comparator shown, matching
+// Calls-in-Queue's historical plain-number display). `direction: 'desc'`
+// (low = bad) reads "≥target" (must stay at/above); 'asc' (high = bad)
+// reads "<target" (must stay below).
+export function formatKpiThresholdLabel(unit: KpiUnit | undefined, targ: number, direction: 'asc' | 'desc'): string {
+  if (unit === 'count') return String(targ)
+  const cmp = direction === 'desc' ? '≥' : '<'
+  if (unit === 'duration') return `${cmp}${formatMinutesAsClock(targ)}`
+  return `${cmp}${targ}%`
 }
 
 export function isDataStale(updatedAt: string | null | undefined): boolean {

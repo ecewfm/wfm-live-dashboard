@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice, KpiUnit } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
@@ -34,12 +34,36 @@ function ClockInput({ value, onCommit }: { value: number; onCommit: (mmss: strin
   )
 }
 
-const KPI_ROWS: { key: keyof Thresholds; label: string; sublabel: string; unit: string }[] = [
-  { key: 'sla',  label: 'SLA %',         sublabel: 'Service Level Agreement',       unit: '%' },
-  { key: 'aht',  label: 'ASA',           sublabel: 'Avg Speed of Answer (mm:ss)',  unit: '' },
-  { key: 'abn',  label: 'ABN %',         sublabel: 'Abandon Rate Percentage',        unit: '%' },
-  { key: 'wait', label: 'Calls Waiting', sublabel: 'Current Queue Depth',            unit: ''  },
+// The display suffix/sublabel used to be static per row (every account's
+// "AHT" was always a duration, "SLA %" always a percent, etc.) — now that
+// kpiUnit is an explicit per-account choice (see KpiUnit in lib/types.ts),
+// the suffix is derived dynamically from the stored unit instead (see
+// kpiUnitSuffix below); only the row's identity/default sublabel stay static.
+const KPI_ROWS: { key: keyof Thresholds; label: string; sublabel: string }[] = [
+  { key: 'sla',  label: 'SLA %',         sublabel: 'Service Level Agreement' },
+  { key: 'aht',  label: 'ASA',           sublabel: 'Avg Speed of Answer' },
+  { key: 'abn',  label: 'ABN %',         sublabel: 'Abandon Rate Percentage' },
+  { key: 'wait', label: 'Calls Waiting', sublabel: 'Current Queue Depth' },
 ]
+
+function kpiUnitSuffix(unit: KpiUnit | undefined): string {
+  return unit === 'percent' ? '%' : ''
+}
+
+// ── The per-KPI unit selector — percent / duration / count (see KpiUnit in
+// lib/types.ts). Shared by all 3 places a KPI threshold is edited: the
+// shared KPI Thresholds table, each independent GroupTile table, and the
+// account-wide Extra KPI Tiles section on the Data Sources tab.
+function KpiUnitSelect({ value, onChange }: { value: KpiUnit | undefined; onChange: (unit: KpiUnit) => void }) {
+  return (
+    <select className="sm-input" style={{ minWidth: 118 }} value={value ?? 'percent'}
+      onChange={e => onChange(e.target.value as KpiUnit)}>
+      <option value="percent">Percentage (%)</option>
+      <option value="duration">Duration (mm:ss)</option>
+      <option value="count">Whole number</option>
+    </select>
+  )
+}
 
 // Known Zoho Creator "Site" records (per the Apollo integration's own docs) —
 // checkboxes for these, plus a free-text field below for anything not listed
@@ -1198,7 +1222,7 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   }, [])
   const addExtra = useCallback(() => {
     setLocalDs(prev => ({ ...prev, extraTiles: [...prev.extraTiles,
-      { key: 'extra_' + genId(), label: `Extra ${prev.extraTiles.length + 1}`, warn: 10, crit: 20, targ: 5, higherIsBetter: false }] }))
+      { key: 'extra_' + genId(), label: `Extra ${prev.extraTiles.length + 1}`, warn: 10, crit: 20, targ: 5, higherIsBetter: false, kpiUnit: 'percent' }] }))
   }, [])
   const updateExtra = useCallback((key: string, patch: Partial<ExtraTile>) => {
     setLocalDs(prev => ({ ...prev, extraTiles: prev.extraTiles.map(t => t.key === key ? { ...t, ...patch } : t) }))
@@ -1262,6 +1286,7 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
       if (g.id !== groupId) return g
       if (!on) return { ...g, tiles: undefined }
       const dirDefault: Record<string, 'asc' | 'desc'> = { sla: 'desc', wait: 'asc', aht: 'asc', abn: 'asc' }
+      const unitDefault: Record<string, GroupTile['kpiUnit']> = { sla: 'percent', wait: 'count', aht: 'duration', abn: 'percent' }
       const boundKeys = ['sla', 'wait', 'aht', 'abn', ...prev.extraTiles.map(t => t.key)].filter(k => g.cells[k])
       const tiles: GroupTile[] = boundKeys.length
         ? boundKeys.map(k => {
@@ -1271,6 +1296,7 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
               key: k, label, cell: g.cells[k] || null,
               warn: extra?.warn ?? 10, crit: extra?.crit ?? 20, targ: extra?.targ ?? 5,
               direction: extra ? (extra.higherIsBetter ? 'desc' : 'asc') : (dirDefault[k] ?? 'asc'),
+              kpiUnit: extra ? (extra.kpiUnit ?? 'percent') : (unitDefault[k] ?? 'percent'),
             }
           })
         : [newGroupTile()]
@@ -1650,18 +1676,32 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         {/* Extra tiles */}
         <div className="ds-extra-wrap">
           <div className="ds-section-title">EXTRA KPI TILES</div>
-          {localDs.extraTiles.map((t, i) => (
+          {localDs.extraTiles.map((t, i) => {
+            const unit = t.kpiUnit ?? 'percent'
+            return (
             <div key={t.key} className="ds-extra-row">
               <span className="ds-label-dot" style={{ background: EXTRA_COLORS[i % EXTRA_COLORS.length] }} />
               <input className="acc-add-input ds-extra-name" value={t.label} onChange={e => updateExtra(t.key, { label: e.target.value })} placeholder="Tile name" />
-              <label className="ds-extra-num">W<input type="number" value={t.warn} onChange={e => updateExtra(t.key, { warn: parseFloat(e.target.value) || 0 })} /></label>
-              <label className="ds-extra-num">C<input type="number" value={t.crit} onChange={e => updateExtra(t.key, { crit: parseFloat(e.target.value) || 0 })} /></label>
-              <label className="ds-extra-num">T<input type="number" value={t.targ} onChange={e => updateExtra(t.key, { targ: parseFloat(e.target.value) || 0 })} /></label>
+              <KpiUnitSelect value={unit} onChange={u => updateExtra(t.key, { kpiUnit: u })} />
+              {unit === 'duration' ? (
+                <>
+                  <label className="ds-extra-num">W<ClockInput value={t.warn} onCommit={mmss => updateExtra(t.key, { warn: parseClockToMinutes(mmss) })} /></label>
+                  <label className="ds-extra-num">C<ClockInput value={t.crit} onCommit={mmss => updateExtra(t.key, { crit: parseClockToMinutes(mmss) })} /></label>
+                  <label className="ds-extra-num">T<ClockInput value={t.targ} onCommit={mmss => updateExtra(t.key, { targ: parseClockToMinutes(mmss) })} /></label>
+                </>
+              ) : (
+                <>
+                  <label className="ds-extra-num">W<input type="number" value={t.warn} onChange={e => updateExtra(t.key, { warn: parseFloat(e.target.value) || 0 })} /></label>
+                  <label className="ds-extra-num">C<input type="number" value={t.crit} onChange={e => updateExtra(t.key, { crit: parseFloat(e.target.value) || 0 })} /></label>
+                  <label className="ds-extra-num">T<input type="number" value={t.targ} onChange={e => updateExtra(t.key, { targ: parseFloat(e.target.value) || 0 })} /></label>
+                </>
+              )}
               <button className={`ds-hib${t.higherIsBetter ? ' on' : ''}`} onClick={() => updateExtra(t.key, { higherIsBetter: !t.higherIsBetter })}
                 title="Toggle whether high or low values are bad">{t.higherIsBetter ? 'Low = Bad' : 'High = Bad'}</button>
               <button className="ds-x" onClick={() => removeExtra(t.key)}><i className="bx bx-trash" /></button>
             </div>
-          ))}
+            )
+          })}
           <button className="ds-add-btn" onClick={addExtra}><i className="bx bx-plus" /> Add Extra Tile</button>
         </div>
 
@@ -2172,8 +2212,14 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   // parseClockToMinutes in lib/utils.ts) — this is the ONLY generic KPI
   // that's a duration rather than a percent/count, so it gets its own mm:ss
   // text input instead of updateKpi's plain numeric one.
-  const updateAhtClock = (field: 'warn' | 'crit' | 'targ', mmss: string) => {
-    setKpi(prev => ({ ...prev, aht: { ...prev.aht, [field]: parseClockToMinutes(mmss) } }))
+  // Any of the 4 generic KPI rows can be set to kpiUnit:'duration' now (not
+  // just AHT), so this needs to write to whichever key is currently showing
+  // the ClockInput, not a hardcoded 'aht'.
+  const updateKpiClock = (key: keyof Thresholds, field: 'warn' | 'crit' | 'targ', mmss: string) => {
+    setKpi(prev => ({ ...prev, [key]: { ...prev[key], [field]: parseClockToMinutes(mmss) } }))
+  }
+  const setKpiUnit = (key: keyof Thresholds, unit: KpiUnit) => {
+    setKpi(prev => ({ ...prev, [key]: { ...prev[key], kpiUnit: unit } }))
   }
   const toggleDirection = (key: keyof Thresholds) => {
     setKpi(prev => ({
@@ -2315,7 +2361,8 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     <table className="sm-table">
                       <thead>
                         <tr>
-                          <th style={{ width: '22%' }}>Metric</th>
+                          <th style={{ width: '18%' }}>Metric</th>
+                          <th>Unit</th>
                           <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
                           <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Logs Reporting</th>
                         </tr>
@@ -2324,6 +2371,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                         {KPI_ROWS.map(row => {
                           const th = kpi[row.key]
                           const isAsc = th.direction === 'asc'
+                          const unit = th.kpiUnit ?? 'percent'
                           // Prefer this account's custom tile name (set on the Data
                           // Sources tab) over the generic default, so a renamed KPI
                           // (e.g. "AWAITING" → "Total Calls") shows the same name
@@ -2335,16 +2383,19 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                 <div className="sm-metric">{label}</div>
                                 <div className="sm-metric-sub">{row.sublabel}</div>
                               </td>
+                              <td>
+                                <KpiUnitSelect value={unit} onChange={u => setKpiUnit(row.key, u)} />
+                              </td>
                               {(['warn','crit','targ'] as const).map(f => (
                                 <td key={f}>
                                   <div className="sm-input-cell">
-                                    {row.key === 'aht' ? (
-                                      <ClockInput value={(th as any)[f]} onCommit={mmss => updateAhtClock(f, mmss)} />
+                                    {unit === 'duration' ? (
+                                      <ClockInput value={(th as any)[f]} onCommit={mmss => updateKpiClock(row.key, f, mmss)} />
                                     ) : (
                                       <input type="number" className="sm-input" value={(th as any)[f]} min={0}
                                         onChange={e => updateKpi(row.key, f, e.target.value)} />
                                     )}
-                                    {row.unit && <span className="sm-unit">{row.unit}</span>}
+                                    {unit === 'percent' && <span className="sm-unit">{kpiUnitSuffix(unit)}</span>}
                                   </div>
                                 </td>
                               ))}
@@ -2388,7 +2439,8 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     <table className="sm-table">
                       <thead>
                         <tr>
-                          <th style={{ width: '22%' }}>Metric</th>
+                          <th style={{ width: '18%' }}>Metric</th>
+                          <th>Unit</th>
                           <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
                           <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Logs Reporting</th>
                         </tr>
@@ -2396,14 +2448,23 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                       <tbody>
                         {group.tiles!.map(tile => {
                           const isAsc = tile.direction === 'asc'
+                          const unit = tile.kpiUnit ?? 'percent'
                           return (
                             <tr key={tile.key}>
                               <td><div className="sm-metric">{tile.label}</div></td>
+                              <td>
+                                <KpiUnitSelect value={unit} onChange={u => updateGroupTile(group.id, tile.key, { kpiUnit: u })} />
+                              </td>
                               {(['warn','crit','targ'] as const).map(f => (
                                 <td key={f}>
                                   <div className="sm-input-cell">
-                                    <input type="number" className="sm-input" value={tile[f]} min={0}
-                                      onChange={e => updateGroupTile(group.id, tile.key, { [f]: parseFloat(e.target.value) || 0 })} />
+                                    {unit === 'duration' ? (
+                                      <ClockInput value={tile[f]} onCommit={mmss => updateGroupTile(group.id, tile.key, { [f]: parseClockToMinutes(mmss) })} />
+                                    ) : (
+                                      <input type="number" className="sm-input" value={tile[f]} min={0}
+                                        onChange={e => updateGroupTile(group.id, tile.key, { [f]: parseFloat(e.target.value) || 0 })} />
+                                    )}
+                                    {unit === 'percent' && <span className="sm-unit">{kpiUnitSuffix(unit)}</span>}
                                   </div>
                                 </td>
                               ))}

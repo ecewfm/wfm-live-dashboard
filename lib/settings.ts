@@ -113,8 +113,21 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     if (data) {
       const localColors = loadHeaderColorsLocal(accountId)
       const settings: AccountSettings = {
+        // Per-KEY nested merge (not a shallow top-level spread) — an existing
+        // account's stored sla/wait/aht/abn object is missing any field added
+        // AFTER it was last saved (e.g. kpiUnit, 2026-10-14) until the modal
+        // is re-saved; a shallow `{...DEFAULT_THRESHOLDS, ...stored}` would
+        // replace the WHOLE per-key object wholesale instead of backfilling
+        // just the missing field, silently losing the default for every
+        // field the stored object doesn't happen to have. Mirrors
+        // loadKpiThresholds()'s own (localStorage) merge below.
         kpi:    data.kpi_thresholds
-                  ? { ...DEFAULT_THRESHOLDS,        ...data.kpi_thresholds    }
+                  ? {
+                      sla:  { ...DEFAULT_THRESHOLDS.sla,  ...data.kpi_thresholds.sla  },
+                      wait: { ...DEFAULT_THRESHOLDS.wait, ...data.kpi_thresholds.wait },
+                      aht:  { ...DEFAULT_THRESHOLDS.aht,  ...data.kpi_thresholds.aht  },
+                      abn:  { ...DEFAULT_THRESHOLDS.abn,  ...data.kpi_thresholds.abn  },
+                    }
                   : loadKpiThresholds(accountId),
         status: data.status_thresholds
                   ? { ...DEFAULT_STATUS_THRESHOLDS, ...data.status_thresholds }

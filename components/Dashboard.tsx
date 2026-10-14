@@ -14,7 +14,7 @@ import {
 } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
-  extractPercent, formatTime, formatSeconds, formatMinutesAsClock, isDataStale, parseDurationToSeconds, isCoarseDuration,
+  extractPercent, formatTime, formatSeconds, extractKpiValue, formatKpiThresholdLabel, isDataStale, parseDurationToSeconds, isCoarseDuration,
   getKpiColorClass, getStatusPillClass, resolveCell, getExtraTileColorClass,
   loadKpiThresholds, saveKpiThresholds,
   loadStatusThresholds, saveStatusThresholds,
@@ -1154,9 +1154,10 @@ function KpiGrid({ group, rows, kpiTh, ds }: {
       <div className="kpi-grid">
         {group.tiles.map(t => {
           const raw = rc(t.cell || undefined)
+          const { num } = extractKpiValue(raw, t.kpiUnit)
           return (
-            <KpiTile key={t.key} label={t.label} value={raw || '--'} numValue={extractPercent(raw)}
-              target={`Target ${t.direction === 'desc' ? '≥' : '<'}${t.targ}`} th={t} />
+            <KpiTile key={t.key} label={t.label} value={raw || '--'} numValue={num}
+              target={`Target ${formatKpiThresholdLabel(t.kpiUnit, t.targ, t.direction)}`} th={t} />
           )
         })}
       </div>
@@ -1170,16 +1171,17 @@ function KpiGrid({ group, rows, kpiTh, ds }: {
 
   return (
     <div className="kpi-grid">
-      <KpiTile label={ds.kpiLabels.sla}  value={slaVal || '--'}  numValue={extractPercent(slaVal)}                        target={`Target ≥${kpiTh.sla.targ}%`}  th={kpiTh.sla}  showBar />
-      <KpiTile label={ds.kpiLabels.wait} value={waitVal || '--'} numValue={parseInt(waitVal)}                            target="Calls in queue"                th={kpiTh.wait} />
-      <KpiTile label={ds.kpiLabels.aht}  value={ahtVal || '--'}  numValue={parseDurationToSeconds(ahtVal)/60} target={`Target <${formatMinutesAsClock(kpiTh.aht.targ)}`}  th={kpiTh.aht}  />
-      <KpiTile label={ds.kpiLabels.abn}  value={abnVal || '--'}  numValue={extractPercent(abnVal)}                        target={`Target <${kpiTh.abn.targ}%`} th={kpiTh.abn}  />
+      <KpiTile label={ds.kpiLabels.sla}  value={slaVal || '--'}  numValue={extractKpiValue(slaVal, kpiTh.sla.kpiUnit).num}  target={`Target ${formatKpiThresholdLabel(kpiTh.sla.kpiUnit, kpiTh.sla.targ, kpiTh.sla.direction)}`}  th={kpiTh.sla}  showBar />
+      <KpiTile label={ds.kpiLabels.wait} value={waitVal || '--'} numValue={extractKpiValue(waitVal, kpiTh.wait.kpiUnit).num} target="Calls in queue"                th={kpiTh.wait} />
+      <KpiTile label={ds.kpiLabels.aht}  value={ahtVal || '--'}  numValue={extractKpiValue(ahtVal, kpiTh.aht.kpiUnit).num}  target={`Target ${formatKpiThresholdLabel(kpiTh.aht.kpiUnit, kpiTh.aht.targ, kpiTh.aht.direction)}`}  th={kpiTh.aht}  />
+      <KpiTile label={ds.kpiLabels.abn}  value={abnVal || '--'}  numValue={extractKpiValue(abnVal, kpiTh.abn.kpiUnit).num}  target={`Target ${formatKpiThresholdLabel(kpiTh.abn.kpiUnit, kpiTh.abn.targ, kpiTh.abn.direction)}`} th={kpiTh.abn}  />
       {(ds.extraTiles ?? []).map(t => {
         const raw = rc(group.cells[t.key])
+        const { num } = extractKpiValue(raw, t.kpiUnit)
         return (
-          <KpiTile key={t.key} label={t.label} value={raw || '--'} numValue={NaN}
-            target={`Target ${t.targ}`} th={kpiTh.sla}
-            colorOverride={getExtraTileColorClass(extractPercent(raw), t)} />
+          <KpiTile key={t.key} label={t.label} value={raw || '--'} numValue={num}
+            target={`Target ${formatKpiThresholdLabel(t.kpiUnit, t.targ, t.higherIsBetter ? 'desc' : 'asc')}`} th={kpiTh.sla}
+            colorOverride={getExtraTileColorClass(num, t)} />
         )
       })}
     </div>
@@ -1574,7 +1576,7 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
                 <div className="ov-kpi-tiles">
                   {group.tiles.map(t => {
                     const raw = rc(t.cell || undefined)
-                    return <OvKpiTile key={t.key} label={t.label} value={raw} colorClass={getKpiColorClass(extractPercent(raw), t)} />
+                    return <OvKpiTile key={t.key} label={t.label} value={raw} colorClass={getKpiColorClass(extractKpiValue(raw, t.kpiUnit).num, t)} />
                   })}
                 </div>
               </div>
@@ -1589,14 +1591,14 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
             <div key={group.id} style={{ marginBottom: 10 }}>
               <div className="ov-section-label">{group.name || 'Global'}</div>
               <div className="ov-kpi-tiles">
-                {group.cells.sla  && <OvKpiTile label={ds.kpiLabels.sla}  value={slaVal}  colorClass={getKpiColorClass(extractPercent(slaVal), kpiTh.sla)} />}
-                {group.cells.wait && <OvKpiTile label={ds.kpiLabels.wait} value={waitVal} colorClass={getKpiColorClass(parseInt(waitVal)||0, kpiTh.wait)} />}
-                {group.cells.aht  && <OvKpiTile label={ds.kpiLabels.aht}  value={ahtVal}  colorClass="text-main" />}
-                {group.cells.abn  && <OvKpiTile label={ds.kpiLabels.abn}  value={abnVal}  colorClass={getKpiColorClass(extractPercent(abnVal), kpiTh.abn)} />}
+                {group.cells.sla  && <OvKpiTile label={ds.kpiLabels.sla}  value={slaVal}  colorClass={getKpiColorClass(extractKpiValue(slaVal, kpiTh.sla.kpiUnit).num, kpiTh.sla)} />}
+                {group.cells.wait && <OvKpiTile label={ds.kpiLabels.wait} value={waitVal} colorClass={getKpiColorClass(extractKpiValue(waitVal, kpiTh.wait.kpiUnit).num, kpiTh.wait)} />}
+                {group.cells.aht  && <OvKpiTile label={ds.kpiLabels.aht}  value={ahtVal}  colorClass={getKpiColorClass(extractKpiValue(ahtVal, kpiTh.aht.kpiUnit).num, kpiTh.aht)} />}
+                {group.cells.abn  && <OvKpiTile label={ds.kpiLabels.abn}  value={abnVal}  colorClass={getKpiColorClass(extractKpiValue(abnVal, kpiTh.abn.kpiUnit).num, kpiTh.abn)} />}
                 {(ds.extraTiles ?? []).map(t => {
                   if (!group.cells[t.key]) return null
                   const raw = rc(group.cells[t.key])
-                  return <OvKpiTile key={t.key} label={t.label} value={raw} colorClass={getExtraTileColorClass(extractPercent(raw), t)} />
+                  return <OvKpiTile key={t.key} label={t.label} value={raw} colorClass={getExtraTileColorClass(extractKpiValue(raw, t.kpiUnit).num, t)} />
                 })}
               </div>
             </div>

@@ -6,8 +6,8 @@
 // — whichever thresholds/KPI logic you see on screen is exactly what the
 // Cliq alert used to decide whether to fire.
 
-import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags } from './types'
-import { extractPercent, parseDurationToSeconds, formatSeconds, formatMinutesAsClock, resolveCell, type StatusThresholds } from './utils'
+import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags, KpiUnit } from './types'
+import { extractPercent, parseDurationToSeconds, formatSeconds, extractKpiValue, formatKpiThresholdLabel, resolveCell, type StatusThresholds } from './utils'
 
 // ── Normalize one raw agent row from a configured AgentSource ────────────────
 // CANONICAL — used by BOTH components/Dashboard.tsx (client, live polling)
@@ -114,12 +114,25 @@ export function collectRtaKpiSignals(
   const kpiRows = accountData.kpiRows ?? []
   const out: RtaKpiSignal[] = []
 
-  const push = (key: string, entity: string, metric: string, num: number, value: string, thLabel: string, th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean }, flags: RtaReportFlags | undefined) => {
+  const push = (
+    key: string, entity: string, metric: string, raw: string, targ: number,
+    th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean },
+    unit: KpiUnit | undefined, flags: RtaReportFlags | undefined
+  ) => {
     const wantsHeartbeat = !!flags?.rtaReportHeartbeat
     const wantsBreachChange = !!flags?.rtaReportBreachChange
-    if ((!wantsHeartbeat && !wantsBreachChange) || isNaN(num)) return
+    if (!wantsHeartbeat && !wantsBreachChange) return
+    const { num, value } = extractKpiValue(raw, unit)
+    if (isNaN(num)) return
+    // A duration sitting at/below 0 (e.g. "00:00") means no data yet, not a
+    // real measurement — same guard buildBreaches() applies below, now
+    // generalized from "aht specifically" to "whichever KPI is unit:duration".
+    if (unit === 'duration' && num <= 0) return
     const { isCrit, isWarn } = evalThreshold(num, th)
-    out.push({ key, entity, metric, value, threshold: thLabel, severity: isCrit ? 'critical' : isWarn ? 'warning' : null, wantsHeartbeat, wantsBreachChange })
+    out.push({
+      key, entity, metric, value, threshold: formatKpiThresholdLabel(unit, targ, th.direction),
+      severity: isCrit ? 'critical' : isWarn ? 'warning' : null, wantsHeartbeat, wantsBreachChange,
+    })
   }
 
   ;(ds.groups ?? []).forEach(group => {
@@ -130,8 +143,7 @@ export function collectRtaKpiSignals(
     if (group.tiles && group.tiles.length) {
       group.tiles.forEach(tile => {
         if (!tile.cell) return
-        const raw = rc(tile.cell)
-        push(`${group.id}:${tile.key}`, g, tile.label, extractPercent(raw), raw.replace(/\s+/g, ''), String(tile.targ), tile, tile)
+        push(`${group.id}:${tile.key}`, g, tile.label, rc(tile.cell), tile.targ, tile, tile.kpiUnit, tile)
       })
       return
     }
@@ -140,31 +152,15 @@ export function collectRtaKpiSignals(
     // buildBreaches()'s own legacy path (same function, below) exactly, or
     // a heartbeat/breach-change reading here would disagree with what the
     // Dashboard/Cliq/Workforce Logs show for the exact same cell.
-    if (group.cells.sla) {
-      const raw = rc(group.cells.sla)
-      push(`${group.id}:sla`, g, ds.kpiLabels.sla, extractPercent(raw), raw.replace(/\s+/g, ''), `≥${kpiTh.sla.targ}%`, kpiTh.sla, kpiTh.sla)
-    }
-    if (group.cells.wait) {
-      const raw = rc(group.cells.wait)
-      const n = parseInt(raw || '0')
-      push(`${group.id}:wait`, g, ds.kpiLabels.wait, n, String(n), String(kpiTh.wait.targ), kpiTh.wait, kpiTh.wait)
-    }
-    if (group.cells.aht) {
-      const raw = rc(group.cells.aht)
-      const m = parseDurationToSeconds(raw) / 60
-      if (m > 0) push(`${group.id}:aht`, g, ds.kpiLabels.aht, m, raw, `<${formatMinutesAsClock(kpiTh.aht.targ)}`, kpiTh.aht, kpiTh.aht)
-    }
-    if (group.cells.abn) {
-      const raw = rc(group.cells.abn)
-      push(`${group.id}:abn`, g, ds.kpiLabels.abn, extractPercent(raw), raw.replace(/\s+/g, ''), `<${kpiTh.abn.targ}%`, kpiTh.abn, kpiTh.abn)
-    }
+    if (group.cells.sla)  push(`${group.id}:sla`,  g, ds.kpiLabels.sla,  rc(group.cells.sla),  kpiTh.sla.targ,  kpiTh.sla,  kpiTh.sla.kpiUnit,  kpiTh.sla)
+    if (group.cells.wait) push(`${group.id}:wait`, g, ds.kpiLabels.wait, rc(group.cells.wait), kpiTh.wait.targ, kpiTh.wait, kpiTh.wait.kpiUnit, kpiTh.wait)
+    if (group.cells.aht)  push(`${group.id}:aht`,  g, ds.kpiLabels.aht,  rc(group.cells.aht),  kpiTh.aht.targ,  kpiTh.aht,  kpiTh.aht.kpiUnit,  kpiTh.aht)
+    if (group.cells.abn)  push(`${group.id}:abn`,  g, ds.kpiLabels.abn,  rc(group.cells.abn),  kpiTh.abn.targ,  kpiTh.abn,  kpiTh.abn.kpiUnit,  kpiTh.abn)
 
     ;(ds.extraTiles ?? []).forEach(t => {
       if (!group.cells[t.key]) return
-      const raw = rc(group.cells[t.key])
-      const num = extractPercent(raw)
       const dir: 'asc' | 'desc' = t.higherIsBetter ? 'desc' : 'asc'
-      push(`${group.id}:${t.key}`, g, t.label, num, raw, String(t.targ), { warn: t.warn, crit: t.crit, direction: dir }, t)
+      push(`${group.id}:${t.key}`, g, t.label, rc(group.cells[t.key]), t.targ, { warn: t.warn, crit: t.crit, direction: dir }, t.kpiUnit, t)
     })
   })
 
@@ -215,11 +211,17 @@ export function buildBreaches(
   const kpiRows = accountData.kpiRows ?? []
 
   const checkKpi = (
-    num: number, th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean },
-    entity: string, metric: string, value: string, thLabel: string
+    raw: string, targ: number, th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean },
+    entity: string, metric: string, unit: KpiUnit | undefined
   ) => {
+    const { num, value } = extractKpiValue(raw, unit)
     if (isNaN(num)) return
+    // A duration sitting at/below 0 (e.g. "00:00") means no data yet, not a
+    // real measurement — generalized from the old "aht specifically" guard
+    // to whichever KPI is unit:duration.
+    if (unit === 'duration' && num <= 0) return
     const { isCrit, isWarn } = evalThreshold(num, th)
+    const thLabel = formatKpiThresholdLabel(unit, targ, th.direction)
     if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical', kind: 'kpi' })
     else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning',  kind: 'kpi' })
   }
@@ -241,32 +243,26 @@ export function buildBreaches(
     if (group.tiles && group.tiles.length) {
       group.tiles.forEach(tile => {
         if (!tile.cell) return
-        const raw = rc(tile.cell)
-        const num = extractPercent(raw)
-        checkKpi(num, tile, g, tile.label, raw.replace(/\s+/g, ''), String(tile.targ))
+        checkKpi(rc(tile.cell), tile.targ, tile, g, tile.label, tile.kpiUnit)
       })
       return
     }
 
-    // Legacy shared-label/shared-threshold path — unchanged.
-    const slaRaw  = rc(group.cells.sla)
-    const waitRaw = rc(group.cells.wait)
-    const ahtRaw  = rc(group.cells.aht)
-    const abnRaw  = rc(group.cells.abn)
-
-    if (group.cells.sla)  checkKpi(extractPercent(slaRaw), kpiTh.sla, g, ds.kpiLabels.sla, slaRaw.replace(/\s+/g,''), `≥${kpiTh.sla.targ}%`)
-    if (group.cells.wait) { const n = parseInt(waitRaw || '0'); checkKpi(n, kpiTh.wait, g, ds.kpiLabels.wait, String(n), String(kpiTh.wait.targ)) }
-    if (group.cells.aht)  { const m = parseDurationToSeconds(ahtRaw) / 60; if (m > 0) checkKpi(m, kpiTh.aht, g, ds.kpiLabels.aht, ahtRaw, `<${formatMinutesAsClock(kpiTh.aht.targ)}`) }
-    if (group.cells.abn)  checkKpi(extractPercent(abnRaw), kpiTh.abn, g, ds.kpiLabels.abn, abnRaw.replace(/\s+/g,''), `<${kpiTh.abn.targ}%`)
+    // Legacy shared-label/shared-threshold path — formulas driven by each
+    // key's kpiUnit (lib/types.ts's KpiUnit) instead of a hardcoded per-key
+    // extraction, so "what does this slot actually measure" is an explicit
+    // per-account choice (see Thresholds.kpiUnit) rather than assumed from
+    // the slot's name.
+    if (group.cells.sla)  checkKpi(rc(group.cells.sla),  kpiTh.sla.targ,  kpiTh.sla,  g, ds.kpiLabels.sla,  kpiTh.sla.kpiUnit)
+    if (group.cells.wait) checkKpi(rc(group.cells.wait), kpiTh.wait.targ, kpiTh.wait, g, ds.kpiLabels.wait, kpiTh.wait.kpiUnit)
+    if (group.cells.aht)  checkKpi(rc(group.cells.aht),  kpiTh.aht.targ,  kpiTh.aht,  g, ds.kpiLabels.aht,  kpiTh.aht.kpiUnit)
+    if (group.cells.abn)  checkKpi(rc(group.cells.abn),  kpiTh.abn.targ,  kpiTh.abn,  g, ds.kpiLabels.abn,  kpiTh.abn.kpiUnit)
 
     // Extra custom tiles carry their own thresholds
     ;(ds.extraTiles ?? []).forEach(t => {
       if (!group.cells[t.key]) return
-      const raw = rc(group.cells[t.key])
-      const num = extractPercent(raw)
-      if (isNaN(num)) return
       const dir: 'asc' | 'desc' = t.higherIsBetter ? 'desc' : 'asc'
-      checkKpi(num, { warn: t.warn, crit: t.crit, direction: dir }, g, t.label, raw, String(t.targ))
+      checkKpi(rc(group.cells[t.key]), t.targ, { warn: t.warn, crit: t.crit, direction: dir }, g, t.label, t.kpiUnit)
     })
   })
 
