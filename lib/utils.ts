@@ -454,6 +454,24 @@ export function formatSeconds(totalSec: number): string {
   return parts.join(' ')
 }
 
+// ── mm:ss <-> fractional-minutes conversion for the AHT KPI threshold ──────
+// Thresholds.aht's warn/crit/targ are plain minutes (a `number`, same as
+// ever) — this just stops forcing them to be WHOLE minutes, so a threshold
+// like "breach at 1:55" (1 minute 55 seconds) can be set and checked at
+// full precision instead of rounding to the nearest minute first. No schema
+// change: an existing account's warn=30 still means exactly 30 minutes,
+// unchanged — these only add precision for a NEW sub-minute value.
+export function formatMinutesAsClock(totalMinutes: number): string {
+  const totalSeconds = Math.round(Math.max(0, totalMinutes) * 60)
+  const m = Math.floor(totalSeconds / 60)
+  const s = totalSeconds % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+export function parseClockToMinutes(str: string): number {
+  return parseDurationToSeconds(str) / 60
+}
+
 export function extractPercent(str: string | null | undefined): number {
   if (!str || str === 'N/A' || str === '-') return NaN
   // Strip thousands-separator commas too — needed for plain-count metrics

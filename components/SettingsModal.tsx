@@ -8,7 +8,7 @@ import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
   PRESET_AIRCALL, PRESET_TALKDESK, PRESET_FIVE9, PRESET_UNITERS,
   DEFAULT_KPI_LABELS, genId, newGroup, newGroupTile, newAgentSource,
-  fetchPublicTables
+  fetchPublicTables, formatMinutesAsClock, parseClockToMinutes
 } from '@/lib/utils'
 import { addAccount, removeAccount, renameAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
 import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
@@ -17,9 +17,26 @@ import { loadGeminiModels, saveGeminiModels } from '@/lib/geminiModels'
 
 type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq'
 
+// ── A free-typed mm:ss input that only reformats/commits on blur — a plain
+// controlled input reformatting on every keystroke would fight the user
+// mid-type (e.g. typing "1:5" gets reformatted to "1:05" before they can
+// type the second "5"). Used for AHT's warn/crit/targ, the only generic KPI
+// that's a duration rather than a percent/count.
+function ClockInput({ value, onCommit }: { value: number; onCommit: (mmss: string) => void }) {
+  const [draft, setDraft] = useState(formatMinutesAsClock(value))
+  useEffect(() => { setDraft(formatMinutesAsClock(value)) }, [value])
+  return (
+    <input type="text" className="sm-input" style={{ width: 56, textAlign: 'center' }}
+      value={draft} placeholder="m:ss"
+      onChange={e => setDraft(e.target.value)}
+      onBlur={() => onCommit(draft)}
+      onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />
+  )
+}
+
 const KPI_ROWS: { key: keyof Thresholds; label: string; sublabel: string; unit: string }[] = [
   { key: 'sla',  label: 'SLA %',         sublabel: 'Service Level Agreement',       unit: '%' },
-  { key: 'aht',  label: 'ASA',           sublabel: 'Avg Speed of Answer (minutes)',  unit: 'm' },
+  { key: 'aht',  label: 'ASA',           sublabel: 'Avg Speed of Answer (mm:ss)',  unit: '' },
   { key: 'abn',  label: 'ABN %',         sublabel: 'Abandon Rate Percentage',        unit: '%' },
   { key: 'wait', label: 'Calls Waiting', sublabel: 'Current Queue Depth',            unit: ''  },
 ]
@@ -2150,6 +2167,14 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
     const value = field === 'direction' ? rawVal : (parseFloat(rawVal) || 0)
     setKpi(prev => ({ ...prev, [key]: { ...prev[key], [field]: value } }))
   }
+  // AHT's warn/crit/targ are stored as plain minutes (same field, same unit,
+  // just no longer forced to be a WHOLE minute — see formatMinutesAsClock/
+  // parseClockToMinutes in lib/utils.ts) — this is the ONLY generic KPI
+  // that's a duration rather than a percent/count, so it gets its own mm:ss
+  // text input instead of updateKpi's plain numeric one.
+  const updateAhtClock = (field: 'warn' | 'crit' | 'targ', mmss: string) => {
+    setKpi(prev => ({ ...prev, aht: { ...prev.aht, [field]: parseClockToMinutes(mmss) } }))
+  }
   const toggleDirection = (key: keyof Thresholds) => {
     setKpi(prev => ({
       ...prev,
@@ -2313,8 +2338,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                               {(['warn','crit','targ'] as const).map(f => (
                                 <td key={f}>
                                   <div className="sm-input-cell">
-                                    <input type="number" className="sm-input" value={(th as any)[f]} min={0}
-                                      onChange={e => updateKpi(row.key, f, e.target.value)} />
+                                    {row.key === 'aht' ? (
+                                      <ClockInput value={(th as any)[f]} onCommit={mmss => updateAhtClock(f, mmss)} />
+                                    ) : (
+                                      <input type="number" className="sm-input" value={(th as any)[f]} min={0}
+                                        onChange={e => updateKpi(row.key, f, e.target.value)} />
+                                    )}
                                     {row.unit && <span className="sm-unit">{row.unit}</span>}
                                   </div>
                                 </td>

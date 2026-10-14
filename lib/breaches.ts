@@ -7,7 +7,7 @@
 // Cliq alert used to decide whether to fire.
 
 import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags } from './types'
-import { extractPercent, parseDurationToSeconds, formatSeconds, resolveCell, type StatusThresholds } from './utils'
+import { extractPercent, parseDurationToSeconds, formatSeconds, formatMinutesAsClock, resolveCell, type StatusThresholds } from './utils'
 
 // ── Normalize one raw agent row from a configured AgentSource ────────────────
 // CANONICAL — used by BOTH components/Dashboard.tsx (client, live polling)
@@ -151,8 +151,8 @@ export function collectRtaKpiSignals(
     }
     if (group.cells.aht) {
       const raw = rc(group.cells.aht)
-      const m = Math.round(parseDurationToSeconds(raw) / 60)
-      if (m > 0) push(`${group.id}:aht`, g, ds.kpiLabels.aht, m, raw, `<${kpiTh.aht.targ}m`, kpiTh.aht, kpiTh.aht)
+      const m = parseDurationToSeconds(raw) / 60
+      if (m > 0) push(`${group.id}:aht`, g, ds.kpiLabels.aht, m, raw, `<${formatMinutesAsClock(kpiTh.aht.targ)}`, kpiTh.aht, kpiTh.aht)
     }
     if (group.cells.abn) {
       const raw = rc(group.cells.abn)
@@ -256,7 +256,7 @@ export function buildBreaches(
 
     if (group.cells.sla)  checkKpi(extractPercent(slaRaw), kpiTh.sla, g, ds.kpiLabels.sla, slaRaw.replace(/\s+/g,''), `≥${kpiTh.sla.targ}%`)
     if (group.cells.wait) { const n = parseInt(waitRaw || '0'); checkKpi(n, kpiTh.wait, g, ds.kpiLabels.wait, String(n), String(kpiTh.wait.targ)) }
-    if (group.cells.aht)  { const m = Math.round(parseDurationToSeconds(ahtRaw) / 60); if (m > 0) checkKpi(m, kpiTh.aht, g, ds.kpiLabels.aht, ahtRaw, `<${kpiTh.aht.targ}m`) }
+    if (group.cells.aht)  { const m = parseDurationToSeconds(ahtRaw) / 60; if (m > 0) checkKpi(m, kpiTh.aht, g, ds.kpiLabels.aht, ahtRaw, `<${formatMinutesAsClock(kpiTh.aht.targ)}`) }
     if (group.cells.abn)  checkKpi(extractPercent(abnRaw), kpiTh.abn, g, ds.kpiLabels.abn, abnRaw.replace(/\s+/g,''), `<${kpiTh.abn.targ}%`)
 
     // Extra custom tiles carry their own thresholds

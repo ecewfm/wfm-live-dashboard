@@ -14,7 +14,7 @@ import {
 } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
-  extractPercent, formatTime, formatSeconds, isDataStale, parseDurationToSeconds, isCoarseDuration,
+  extractPercent, formatTime, formatSeconds, formatMinutesAsClock, isDataStale, parseDurationToSeconds, isCoarseDuration,
   getKpiColorClass, getStatusPillClass, resolveCell, getExtraTileColorClass,
   loadKpiThresholds, saveKpiThresholds,
   loadStatusThresholds, saveStatusThresholds,
@@ -1172,7 +1172,7 @@ function KpiGrid({ group, rows, kpiTh, ds }: {
     <div className="kpi-grid">
       <KpiTile label={ds.kpiLabels.sla}  value={slaVal || '--'}  numValue={extractPercent(slaVal)}                        target={`Target ≥${kpiTh.sla.targ}%`}  th={kpiTh.sla}  showBar />
       <KpiTile label={ds.kpiLabels.wait} value={waitVal || '--'} numValue={parseInt(waitVal)}                            target="Calls in queue"                th={kpiTh.wait} />
-      <KpiTile label={ds.kpiLabels.aht}  value={ahtVal || '--'}  numValue={Math.round(parseDurationToSeconds(ahtVal)/60)} target={`Target <${kpiTh.aht.targ}m`}  th={kpiTh.aht}  />
+      <KpiTile label={ds.kpiLabels.aht}  value={ahtVal || '--'}  numValue={parseDurationToSeconds(ahtVal)/60} target={`Target <${formatMinutesAsClock(kpiTh.aht.targ)}`}  th={kpiTh.aht}  />
       <KpiTile label={ds.kpiLabels.abn}  value={abnVal || '--'}  numValue={extractPercent(abnVal)}                        target={`Target <${kpiTh.abn.targ}%`} th={kpiTh.abn}  />
       {(ds.extraTiles ?? []).map(t => {
         const raw = rc(group.cells[t.key])
