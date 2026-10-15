@@ -4,7 +4,15 @@ import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, Gr
 // excluded: statuses like "Logged Out"/"Offline" that shouldn't be breach-
 // checked OR shown in the Agent Status table at all — separate from just
 // setting warn/crit to N/A (999), which still leaves the agent visible.
-export type StatusThresholds = Record<string, { warn: number; crit: number; excluded?: boolean }>
+// sendToCliq: per the user (2026-10-15), NOT every status breach should go
+// to Cliq — absent/false (the default) means this status's breaches are
+// computed/shown everywhere else as normal but held back from the Cliq
+// channel message specifically (lib/cliqScan.ts). Deliberately defaults to
+// OFF (opt-in per status), unlike every other toggle in this codebase which
+// defaults to preserving old behavior — this was an explicit choice by the
+// user, so every account's Cliq channel goes quiet on status-duration
+// breaches until someone turns the relevant ones back on.
+export type StatusThresholds = Record<string, { warn: number; crit: number; excluded?: boolean; sendToCliq?: boolean }>
 
 // ── Default KPI thresholds ────────────────────────────────────────────────────
 export const DEFAULT_THRESHOLDS: Thresholds = {

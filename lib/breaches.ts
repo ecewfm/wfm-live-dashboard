@@ -177,6 +177,17 @@ export interface BreachRow {
   // an agent breach is new only when a NAME not seen before joins that
   // breach type, not on every duration tick for an already-known agent.
   kind: 'kpi' | 'agent'
+  // Only set for a 'kind:agent' row that came from the named-status duration
+  // check below (StatusThresholds-driven, e.g. "On Call" / "Not Ready
+  // (Break)") — absent for the OTHER two agent-breach paths (the static-
+  // duration-threshold check and the text-trigger custom-column check),
+  // which aren't tied to a status from the Status Durations tab at all.
+  // Lets lib/cliqScan.ts filter the Cliq message by StatusThresholds[status]
+  // .sendToCliq without fragile string-parsing of `metric` (which for THIS
+  // path is always `${status} Duration`, but for the other two paths can be
+  // any account-configured label that might coincidentally also end in
+  // "Duration").
+  status?: string
 }
 
 // ── Freshest updated_at across all of an account's KPI rows ───────────────────
@@ -290,8 +301,8 @@ export function buildBreaches(
       const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
       const mins = secs / 60
       const dur  = formatSeconds(secs)
-      if (mins >= thSt.crit)      rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical', kind: 'agent' })
-      else if (mins >= thSt.warn) rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning',  kind: 'agent' })
+      if (mins >= thSt.crit)      rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical', kind: 'agent', status })
+      else if (mins >= thSt.warn) rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning',  kind: 'agent', status })
     }
 
     // Static-mode Duration: a plain NUMERIC threshold on the value itself

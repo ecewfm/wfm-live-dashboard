@@ -512,21 +512,35 @@ async function processAccount(
 
   // ── Zoho Cliq channel alert ──────────────────────────────────────────────
   if (globalSettings.enabled && acc.cliq_channel) {
-    const lastSent = acc.cliq_last_sent_at ? new Date(acc.cliq_last_sent_at).getTime() : 0
-    if (forceSend || Date.now() - lastSent >= cooldownMs) {
-      try {
-        const message = formatMessage(accountId, breaches, globalSettings.testMode)
-        await sendCliqChannelMessage(acc.cliq_channel, message)
-        l(`${accountId}: sent to Cliq #${acc.cliq_channel}.`)
-        // Cooldown only advances on a CONFIRMED send — a failed Cliq API call
-        // (thrown above) must not silently eat the cooldown window.
-        updates.cliq_last_sent_at = new Date().toISOString()
-        didAnything = true
-      } catch (e: any) {
-        l(`${accountId}: Cliq send failed — ${e.message}`)
-      }
+    // Per the user (2026-10-15): not every status-duration breach should go
+    // to Cliq — each status on the Status Durations tab has its own "Send to
+    // Cliq" toggle (StatusThresholds.sendToCliq, default OFF — opt-in,
+    // deliberately NOT preserving old "send everything" behavior). KPI
+    // breaches and the other two agent-breach kinds (static-duration-
+    // threshold, text-trigger — neither has a `status`, see BreachRow) are
+    // untouched by this filter; it's specifically for named-status duration
+    // breaches. This is Cliq-ONLY — Workforce Logs/RTA Logs keep using the
+    // full/unfiltered `breaches` as before.
+    const cliqBreaches = breaches.filter(b => b.kind !== 'agent' || !b.status || statusTh[b.status]?.sendToCliq)
+    if (cliqBreaches.length === 0) {
+      l(`${accountId}: Cliq — no breach has "Send to Cliq" on for its status — skipping.`)
     } else {
-      l(`${accountId}: Cliq within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
+      const lastSent = acc.cliq_last_sent_at ? new Date(acc.cliq_last_sent_at).getTime() : 0
+      if (forceSend || Date.now() - lastSent >= cooldownMs) {
+        try {
+          const message = formatMessage(accountId, cliqBreaches, globalSettings.testMode)
+          await sendCliqChannelMessage(acc.cliq_channel, message)
+          l(`${accountId}: sent to Cliq #${acc.cliq_channel}.`)
+          // Cooldown only advances on a CONFIRMED send — a failed Cliq API call
+          // (thrown above) must not silently eat the cooldown window.
+          updates.cliq_last_sent_at = new Date().toISOString()
+          didAnything = true
+        } catch (e: any) {
+          l(`${accountId}: Cliq send failed — ${e.message}`)
+        }
+      } else {
+        l(`${accountId}: Cliq within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
+      }
     }
   }
 
