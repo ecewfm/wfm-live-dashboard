@@ -378,6 +378,7 @@ interface Props {
   rtaReportAgentStatus: boolean           // this account's automatic RTA Logs reporting considers Agent Status breaches — default false
   zohoLookups:       ZohoLookups          // this account's x_Account/Category/Sub_Categories/Site picks
   alarmSound:        string               // this account's Overview-card breach alarm sound ('' = silent)
+  knownStatuses:     string[]             // every agent-status value ever seen for this account (see lib/settings.ts's appendKnownStatuses()) — read-only here, accumulated automatically outside the Save flow
   onSave:           (kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string, wfLogsEnabled: boolean, zohoLookups: ZohoLookups, alarmSound: string, rtaLogsEnabled: boolean, rtaSites: string[], rtaAccountName: string, rtaAiCategorizationEnabled: boolean, rtaReportKpi: boolean, rtaReportAgentStatus: boolean) => void
   onSaveCliqGlobal: (settings: CliqGlobalSettings) => void
   onAccountsChange: () => void           // called after add/remove
@@ -1949,7 +1950,7 @@ function RtaReportFlagsCell({ heartbeat, breachChange, disabled, onToggleHeartbe
 }
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, rtaReportKpi, rtaReportAgentStatus, zohoLookups, alarmSound, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, rtaReportKpi, rtaReportAgentStatus, zohoLookups, alarmSound, knownStatuses, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
   const [tab, setTab]   = useState<Tab>('accounts')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
@@ -2193,15 +2194,27 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
     return () => { cancelled = true }
   }, [ds.agentTable, ds.agentAccountCol, ds.agentStatusCol, JSON.stringify(ds.agentSources), accountId, statSupaUrl, statSupaKey])
 
-  // Rows shown = discovered live statuses, PLUS any status already explicitly
-  // configured (so a prior custom threshold doesn't disappear just because
-  // that status didn't happen to appear in this particular fetch), MINUS the
-  // old generic default keys unless they're also actually live for this
+  // Split into two sections (per the user, 2026-10-15): a status this live
+  // scan actually found just now vs. one that's ONLY known from history —
+  // already-configured thresholds, or lib/settings.ts's knownStatuses (every
+  // status value Dashboard.tsx has EVER seen an agent in for this account,
+  // accumulated automatically, never shrinks — see sql/known_statuses.sql).
+  // Without that accumulated history, a status nobody happens to be in RIGHT
+  // NOW (e.g. a rarely-used one) would silently vanish from this tab and
+  // become unconfigurable the moment it stopped being live. MINUS the old
+  // generic default keys unless they're also actually live/known for this
   // account — otherwise every account would always show the same irrelevant
   // legacy list underneath the real ones.
   const legacyDefaultKeys = new Set(Object.keys(DEFAULT_STATUS_THRESHOLDS))
   const customConfiguredKeys = Object.keys(stat).filter(k => !legacyDefaultKeys.has(k))
-  const statusRows = Array.from(new Set([...discoveredStatuses, ...customConfiguredKeys])).sort((a, b) => a.localeCompare(b))
+  const liveSet = new Set(discoveredStatuses)
+  const currentStatusRows = Array.from(new Set(discoveredStatuses)).sort((a, b) => a.localeCompare(b))
+  const pastStatusRows = Array.from(new Set([...knownStatuses, ...customConfiguredKeys]))
+    .filter(k => !liveSet.has(k))
+    .sort((a, b) => a.localeCompare(b))
+  // Kept for "Reset to Defaults" (resets every row currently shown, in
+  // either section) — not rendered directly.
+  const statusRows = Array.from(new Set([...currentStatusRows, ...pastStatusRows]))
 
   const updateKpi = (key: keyof Thresholds, field: string, rawVal: string) => {
     const value = field === 'direction' ? rawVal : (parseFloat(rawVal) || 0)
@@ -2537,54 +2550,86 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   every status, so pick which ones should actually page the channel (Workforce Logs/RTA Logs are
                   unaffected, they have their own scope settings on the Zoho Integrations tab).
                 </p>
-                <div className="sm-section-title">AGENT STATUS DURATION THRESHOLDS</div>
-                <div style={{ overflowX: 'auto' }}>
-                <table className="sm-table">
-                  <thead>
-                    <tr>
-                      <th style={{ width: '28%' }}>Status</th><th>Warning (min)</th><th>Critical (min)</th><th>Exclude</th>
-                      <th title="Whether a breach on THIS status is included in the Zoho Cliq channel message (independent of Workforce Logs/RTA Logs, which have their own scope settings)">Send to Cliq</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {statusRows.length === 0 ? (
-                      <tr><td colSpan={5} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-                        No agent statuses discovered yet — set up an Agent Data Source on the Data Sources tab first
-                        (or check back once the scraper has written some data).
-                      </td></tr>
-                    ) : statusRows.map(key => {
-                      const th = stat[key] ?? { warn: 999, crit: 999 }
-                      const excluded = !!th.excluded
-                      const cliqDisabled = !(cliqGlobal.enabled && cliqChan)
-                      return (
-                        <tr key={key}>
-                          <td><div className="sm-metric">{key}</div></td>
-                          {(['warn','crit'] as const).map(f => (
-                            <td key={f}>
-                              <div className="sm-input-cell">
-                                <input type="number" className="sm-input" min={0} disabled={excluded}
-                                  value={th[f] >= 999 ? '' : th[f]} placeholder="N/A"
-                                  onChange={e => updateStat(key, f, e.target.value)} />
-                                <span className="sm-unit">min</span>
-                              </div>
-                            </td>
-                          ))}
-                          <td style={{ textAlign: 'center' }}>
-                            <input type="checkbox" checked={excluded} onChange={() => toggleExcluded(key)} />
+                {(() => {
+                  // Shared row renderer for both sections below — identical
+                  // columns/mutators regardless of which section a status is
+                  // currently sorted into (it can move between them over
+                  // time as agents enter/leave it).
+                  const renderStatusRow = (key: string) => {
+                    const th = stat[key] ?? { warn: 999, crit: 999 }
+                    const excluded = !!th.excluded
+                    const cliqDisabled = !(cliqGlobal.enabled && cliqChan)
+                    return (
+                      <tr key={key}>
+                        <td><div className="sm-metric">{key}</div></td>
+                        {(['warn','crit'] as const).map(f => (
+                          <td key={f}>
+                            <div className="sm-input-cell">
+                              <input type="number" className="sm-input" min={0} disabled={excluded}
+                                value={th[f] >= 999 ? '' : th[f]} placeholder="N/A"
+                                onChange={e => updateStat(key, f, e.target.value)} />
+                              <span className="sm-unit">min</span>
+                            </div>
                           </td>
-                          <td style={{ textAlign: 'center' }}>
-                            <span className="sm-toggle" title={cliqDisabled ? 'Enable Cliq globally and set this account\'s channel (Zoho Integrations tab) to use this' : undefined}>
-                              <input type="checkbox" checked={!!th.sendToCliq} disabled={cliqDisabled || excluded}
-                                onChange={() => toggleSendToCliq(key)} />
-                              <span className="sm-toggle-track" />
-                            </span>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-                </div>
+                        ))}
+                        <td style={{ textAlign: 'center' }}>
+                          <input type="checkbox" checked={excluded} onChange={() => toggleExcluded(key)} />
+                        </td>
+                        <td style={{ textAlign: 'center' }}>
+                          <span className="sm-toggle" title={cliqDisabled ? 'Enable Cliq globally and set this account\'s channel (Zoho Integrations tab) to use this' : undefined}>
+                            <input type="checkbox" checked={!!th.sendToCliq} disabled={cliqDisabled || excluded}
+                              onChange={() => toggleSendToCliq(key)} />
+                            <span className="sm-toggle-track" />
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  }
+                  const statusTableHead = (
+                    <thead>
+                      <tr>
+                        <th style={{ width: '28%' }}>Status</th><th>Warning (min)</th><th>Critical (min)</th><th>Exclude</th>
+                        <th title="Whether a breach on THIS status is included in the Zoho Cliq channel message (independent of Workforce Logs/RTA Logs, which have their own scope settings)">Send to Cliq</th>
+                      </tr>
+                    </thead>
+                  )
+                  return (
+                    <>
+                      <div className="sm-section-title">CURRENTLY ACTIVE STATUSES</div>
+                      <div style={{ overflowX: 'auto' }}>
+                      <table className="sm-table">
+                        {statusTableHead}
+                        <tbody>
+                          {currentStatusRows.length === 0 ? (
+                            <tr><td colSpan={5} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                              No agent statuses currently live — set up an Agent Data Source on the Data Sources tab first
+                              (or check back once the scraper has written some data).
+                            </td></tr>
+                          ) : currentStatusRows.map(renderStatusRow)}
+                        </tbody>
+                      </table>
+                      </div>
+
+                      <div className="sm-section-title" style={{ marginTop: 22 }}>PREVIOUSLY SEEN STATUSES</div>
+                      <p className="sm-desc" style={{ marginBottom: 10 }}>
+                        Statuses no agent is in RIGHT NOW, but that this account has been seen in before — kept here (and
+                        fully configurable) instead of disappearing just because nobody happens to be in them this moment.
+                      </p>
+                      <div style={{ overflowX: 'auto' }}>
+                      <table className="sm-table">
+                        {statusTableHead}
+                        <tbody>
+                          {pastStatusRows.length === 0 ? (
+                            <tr><td colSpan={5} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                              Nothing here yet — every status ever seen for this account is currently active above.
+                            </td></tr>
+                          ) : pastStatusRows.map(renderStatusRow)}
+                        </tbody>
+                      </table>
+                      </div>
+                    </>
+                  )
+                })()}
 
                 <div className="sm-section-title" style={{ marginTop: 22 }}>
                   RTA LOGS REPORTING — ALL STATUSES

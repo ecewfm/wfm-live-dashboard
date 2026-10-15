@@ -36,6 +36,9 @@ export interface AccountSettings {
   rtaReportAgentStatus: boolean
   zohoLookups: ZohoLookups
   alarmSound: string
+  // Every agent-status value ever seen for this account, accumulated by
+  // appendKnownStatuses() below — see sql/known_statuses.sql.
+  knownStatuses: string[]
 }
 
 // ── Load settings for one account ─────────────────────────────────────────────
@@ -59,6 +62,18 @@ export interface AccountSettings {
 // loading fine on none, or vice versa, depending which tier the two ops
 // each happened to fall back to.
 const SELECT_TIERS = [
+  `kpi_thresholds, status_thresholds, data_source, dashboard_layout,
+   header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
+   rta_logs_enabled, rta_sites, rta_account_name, rta_ai_categorization_enabled,
+   rta_report_kpi, rta_report_agent_status,
+   zoho_account_name, zoho_account_id,
+   zoho_category_text, zoho_category_id,
+   zoho_subcategory_text, zoho_subcategory_id,
+   zoho_site_text, zoho_site_id, alarm_sound, known_statuses`,
+  // Drop ONLY known_statuses — in case sql/known_statuses.sql hasn't been
+  // run yet on this project. Same granular-isolation reasoning as every
+  // tier below: never bundle a brand-new, unconfirmed column with older,
+  // definitely-present ones.
   `kpi_thresholds, status_thresholds, data_source, dashboard_layout,
    header_band_color, header_text_color, cliq_channel, wf_logs_enabled,
    rta_logs_enabled, rta_sites, rta_account_name, rta_ai_categorization_enabled,
@@ -163,6 +178,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
           site:        { id: (data as any).zoho_site_id        || '', text: (data as any).zoho_site_text       || '' },
         },
         alarmSound: (data as any).alarm_sound || '',
+        knownStatuses: String((data as any).known_statuses || '').split(',').map(s => s.trim()).filter(Boolean),
       }
       // Refresh localStorage cache
       saveKpiThresholds(accountId, settings.kpi)
@@ -190,6 +206,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
     rtaReportAgentStatus: false,
     zohoLookups: { ...DEFAULT_ZOHO_LOOKUPS },
     alarmSound: '',
+    knownStatuses: [],
   }
 }
 
@@ -232,6 +249,40 @@ export async function saveHeaderColors(accountId: string, colors: HeaderColors):
   } catch (e) {
     console.warn('[settings] header colors save failed:', e)
     return false
+  }
+}
+
+// ── Accumulate agent-status history (never shrinks) ──────────────────────────
+// Separate from saveSettings — called automatically by Dashboard.tsx's
+// fetchAccount() whenever it sees an agent status value not already known,
+// not gated behind the Settings modal's Save button (see sql/
+// known_statuses.sql). Re-reads the CURRENT stored value right before
+// writing (rather than trusting a caller-held copy) so two tabs discovering
+// different new statuses around the same time both end up merged in,
+// instead of the second write clobbering the first's addition. Returns the
+// merged list (even when nothing new was added) so the caller can update its
+// own in-memory copy without a second round trip; null only on a hard
+// failure (e.g. the column doesn't exist yet on this project).
+export async function appendKnownStatuses(accountId: string, newStatuses: string[]): Promise<string[] | null> {
+  const toAdd = newStatuses.map(s => s.trim()).filter(Boolean)
+  if (toAdd.length === 0) return null
+  try {
+    const { data, error: selErr } = await supabase
+      .from('wfm_settings').select('known_statuses').eq('id', accountId).maybeSingle()
+    if (selErr) { console.warn('[settings] known_statuses read error:', selErr.message); return null }
+    const existing = String((data as any)?.known_statuses || '').split(',').map(s => s.trim()).filter(Boolean)
+    const merged = Array.from(new Set([...existing, ...toAdd]))
+    if (merged.length === existing.length) return existing // nothing actually new
+    const { error } = await supabase.from('wfm_settings').upsert({
+      id: accountId, account_id: accountId,
+      known_statuses: merged.join(','),
+      updated_at: new Date().toISOString(),
+    })
+    if (error) { console.warn('[settings] known_statuses save error:', error.message); return null }
+    return merged
+  } catch (e) {
+    console.warn('[settings] known_statuses save failed:', e)
+    return null
   }
 }
 

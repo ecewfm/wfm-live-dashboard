@@ -1,0 +1,23 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Agent status history — "known_statuses" column on wfm_settings
+-- Run once in: Supabase Dashboard → SQL Editor → New Query
+--
+-- Per the user (2026-10-15): the Status Durations tab's status list only
+-- ever showed whichever status values a live scan of the agent table
+-- happened to find AT THAT MOMENT (see SettingsModal.tsx's discoveredStatuses)
+-- — a status nobody is currently in (e.g. a rarely-used one, or one that
+-- only shows up on a particular shift) would silently disappear from the
+-- list and become unconfigurable, even if it had a threshold already set,
+-- once it stopped being live.
+--
+-- known_statuses is a running, NEVER-SHRINKING history of every status value
+-- this account has ever been seen in, accumulated automatically by
+-- Dashboard.tsx's fetchAccount() (lib/settings.ts's appendKnownStatuses())
+-- every time it notices an agent's status it hasn't recorded before — same
+-- comma-separated TEXT convention as rta_sites, not a new array-type
+-- precedent. SettingsModal.tsx unions this with the live discovery scan to
+-- show a separate "Previously Seen Statuses" section below "Currently
+-- Active Statuses", so a once-seen status's threshold config is never lost.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE wfm_settings ADD COLUMN IF NOT EXISTS known_statuses text;

@@ -9,8 +9,8 @@ import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, collectKpiGroupS
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
-  loadCliqSettings, saveCliqSettings, DEFAULT_CLIQ_GLOBAL_SETTINGS,
-  type AccountConfig
+  loadCliqSettings, saveCliqSettings, appendKnownStatuses, DEFAULT_CLIQ_GLOBAL_SETTINGS,
+  type AccountConfig, type AccountSettings
 } from '@/lib/settings'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
@@ -84,6 +84,11 @@ export default function Dashboard() {
   const [rtaReportAgentStatusMap, setRtaReportAgentStatusMap]     = useState<Record<string, boolean>>({})
   const [zohoLookupsMap, setZohoLookupsMap]     = useState<Record<string, ZohoLookups>>({})
   const [alarmSounds, setAlarmSounds]           = useState<Record<string, string>>({})
+  // Every agent-status value ever seen per account (see lib/settings.ts's
+  // appendKnownStatuses()) — accumulated by fetchAccount() below, read by
+  // SettingsModal's "Previously Seen Statuses" section so a status that
+  // stops being live doesn't disappear from the Status Durations tab.
+  const [knownStatusesMap, setKnownStatusesMap] = useState<Record<string, string[]>>({})
   const [cliqGlobal, setCliqGlobal]             = useState<CliqGlobalSettings>(DEFAULT_CLIQ_GLOBAL_SETTINGS)
   const [displayNames, setDisplayNames]         = useState<Record<string, string>>({})
 
@@ -97,6 +102,12 @@ export default function Dashboard() {
   // without this a burst of simultaneous events for the same account was
   // triggering that many fully-redundant fetchAccount() calls back to back.
   const refetchTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  // Mirrors knownStatusesMap so fetchAccount() (a stable useCallback) can
+  // read the latest value without needing the map itself in its dependency
+  // array — that would recreate fetchAccount (and re-trigger every effect
+  // keyed on its identity) every time a new status gets accumulated.
+  const knownStatusesRef = useRef<Record<string, string[]>>({})
+  useEffect(() => { knownStatusesRef.current = knownStatusesMap }, [knownStatusesMap])
 
   useEffect(() => { setMounted(true) }, [])
 
@@ -176,6 +187,21 @@ export default function Dashboard() {
         }
       }))
 
+      // ── Accumulate agent-status history (see sql/known_statuses.sql) ───────
+      // Every status value seen in THIS fetch, compared against what's
+      // already known for this account — only hits Supabase when there's
+      // actually something new (the common case, after the first few
+      // cycles, is nothing new at all). See SettingsModal.tsx's "Previously
+      // Seen Statuses" section for why this exists.
+      const liveStatuses = Array.from(new Set(agents.map(a => String(a._status ?? '').trim()).filter(Boolean)))
+      const alreadyKnown = knownStatusesRef.current[accId] ?? []
+      const newStatuses = liveStatuses.filter(s => !alreadyKnown.includes(s))
+      if (newStatuses.length > 0) {
+        appendKnownStatuses(accId, newStatuses).then(merged => {
+          if (merged) setKnownStatusesMap(prev => ({ ...prev, [accId]: merged }))
+        })
+      }
+
       // Update agent timers
       setAgentTimers(prev => {
         const next = { ...prev }
@@ -232,6 +258,65 @@ export default function Dashboard() {
     }
   }, [])
 
+  // ── Apply a bulk loadAllSettings() result to every settings-related state
+  // map at once — shared by the initial load (init() below) AND the periodic
+  // settings poll (a few effects down), so the two never drift out of sync
+  // the way a second hand-copied version of this exact assembly would (same
+  // class of bug CLAUDE.md documents being bitten by twice already).
+  const applySettingsMap = useCallback((ids: string[], allSettings: Record<string, AccountSettings>) => {
+    const kpiMap: Record<string, Thresholds>          = {}
+    const statusMap: Record<string, StatusThresholds> = {}
+    const dsMap: Record<string, DataSourceConfig>     = {}
+    const layoutMap: Record<string, DashboardLayout>  = {}
+    const colorMap: Record<string, HeaderColors>      = {}
+    const cliqChanMap: Record<string, string>         = {}
+    const wfLogsMap: Record<string, boolean>          = {}
+    const rtaLogsMap: Record<string, boolean>         = {}
+    const rtaSitesMap2: Record<string, string[]>      = {}
+    const rtaAcctNameMap2: Record<string, string>     = {}
+    const rtaAiCatMap2: Record<string, boolean>       = {}
+    const rtaReportKpiMap2: Record<string, boolean>         = {}
+    const rtaReportAgentStatusMap2: Record<string, boolean> = {}
+    const zohoLuMap: Record<string, ZohoLookups>      = {}
+    const alarmMap: Record<string, string>            = {}
+    const knownStatusesMap2: Record<string, string[]> = {}
+    ids.forEach(id => {
+      if (!allSettings[id]) return
+      kpiMap[id]      = allSettings[id].kpi
+      statusMap[id]   = allSettings[id].status
+      dsMap[id]       = allSettings[id].ds
+      layoutMap[id]   = allSettings[id].layout
+      colorMap[id]    = allSettings[id].headerColors
+      cliqChanMap[id] = allSettings[id].cliqChannel
+      wfLogsMap[id]   = allSettings[id].wfLogsEnabled
+      rtaLogsMap[id]  = allSettings[id].rtaLogsEnabled
+      rtaSitesMap2[id] = allSettings[id].rtaSites
+      rtaAcctNameMap2[id] = allSettings[id].rtaAccountName
+      rtaAiCatMap2[id] = allSettings[id].rtaAiCategorizationEnabled
+      rtaReportKpiMap2[id] = allSettings[id].rtaReportKpi
+      rtaReportAgentStatusMap2[id] = allSettings[id].rtaReportAgentStatus
+      zohoLuMap[id]   = allSettings[id].zohoLookups
+      alarmMap[id]    = allSettings[id].alarmSound
+      knownStatusesMap2[id] = allSettings[id].knownStatuses
+    })
+    setKpiThresholds(kpiMap)
+    setStatusThresholds(statusMap)
+    setDataSources(dsMap)
+    setDashboardLayouts(layoutMap)
+    setHeaderColors(colorMap)
+    setCliqChannels(cliqChanMap)
+    setWfLogsEnabledMap(wfLogsMap)
+    setRtaLogsEnabledMap(rtaLogsMap)
+    setRtaSitesMap(rtaSitesMap2)
+    setRtaAccountNameMap(rtaAcctNameMap2)
+    setRtaAiCategorizationMap(rtaAiCatMap2)
+    setRtaReportKpiMap(rtaReportKpiMap2)
+    setRtaReportAgentStatusMap(rtaReportAgentStatusMap2)
+    setZohoLookupsMap(zohoLuMap)
+    setAlarmSounds(alarmMap)
+    setKnownStatusesMap(knownStatusesMap2)
+  }, [])
+
   // ── Discover accounts from all known tables ────────────────────────────────
   useEffect(() => {
     async function init() {
@@ -263,53 +348,7 @@ export default function Dashboard() {
 
       // Load per-account settings from Supabase (shared) with localStorage fallback
       const allSettings = await loadAllSettings(ids)
-      const kpiMap: Record<string, Thresholds>          = {}
-      const statusMap: Record<string, StatusThresholds> = {}
-      const dsMap: Record<string, DataSourceConfig>     = {}
-      const layoutMap: Record<string, DashboardLayout>  = {}
-      const colorMap: Record<string, HeaderColors>      = {}
-      const cliqChanMap: Record<string, string>         = {}
-      const wfLogsMap: Record<string, boolean>          = {}
-      const rtaLogsMap: Record<string, boolean>         = {}
-      const rtaSitesMap2: Record<string, string[]>      = {}
-      const rtaAcctNameMap2: Record<string, string>     = {}
-      const rtaAiCatMap2: Record<string, boolean>       = {}
-      const rtaReportKpiMap2: Record<string, boolean>         = {}
-      const rtaReportAgentStatusMap2: Record<string, boolean> = {}
-      const zohoLuMap: Record<string, ZohoLookups>      = {}
-      const alarmMap: Record<string, string>            = {}
-      ids.forEach(id => {
-        kpiMap[id]      = allSettings[id].kpi
-        statusMap[id]   = allSettings[id].status
-        dsMap[id]       = allSettings[id].ds
-        layoutMap[id]   = allSettings[id].layout
-        colorMap[id]    = allSettings[id].headerColors
-        cliqChanMap[id] = allSettings[id].cliqChannel
-        wfLogsMap[id]   = allSettings[id].wfLogsEnabled
-        rtaLogsMap[id]  = allSettings[id].rtaLogsEnabled
-        rtaSitesMap2[id] = allSettings[id].rtaSites
-        rtaAcctNameMap2[id] = allSettings[id].rtaAccountName
-        rtaAiCatMap2[id] = allSettings[id].rtaAiCategorizationEnabled
-        rtaReportKpiMap2[id] = allSettings[id].rtaReportKpi
-        rtaReportAgentStatusMap2[id] = allSettings[id].rtaReportAgentStatus
-        zohoLuMap[id]   = allSettings[id].zohoLookups
-        alarmMap[id]    = allSettings[id].alarmSound
-      })
-      setKpiThresholds(kpiMap)
-      setStatusThresholds(statusMap)
-      setDataSources(dsMap)
-      setDashboardLayouts(layoutMap)
-      setHeaderColors(colorMap)
-      setCliqChannels(cliqChanMap)
-      setWfLogsEnabledMap(wfLogsMap)
-      setRtaLogsEnabledMap(rtaLogsMap)
-      setRtaSitesMap(rtaSitesMap2)
-      setRtaAccountNameMap(rtaAcctNameMap2)
-      setRtaAiCategorizationMap(rtaAiCatMap2)
-      setRtaReportKpiMap(rtaReportKpiMap2)
-      setRtaReportAgentStatusMap(rtaReportAgentStatusMap2)
-      setZohoLookupsMap(zohoLuMap)
-      setAlarmSounds(alarmMap)
+      applySettingsMap(ids, allSettings)
       loadCliqSettings().then(setCliqGlobal)
 
       const savedAcc = localStorage.getItem('wfm_current_account')
@@ -317,10 +356,10 @@ export default function Dashboard() {
       setCurrentAccount(first)
 
       // Fetch all accounts
-      await Promise.all(ids.map(id => fetchAccount(id, dsMap[id])))
+      await Promise.all(ids.map(id => fetchAccount(id, allSettings[id].ds)))
     }
     init()
-  }, [fetchAccount])
+  }, [fetchAccount, applySettingsMap])
 
   // ── Realtime — TEMPORARILY DISABLED (band-aid) ──────────────────────────────
   // Supabase bills Realtime messages per-recipient (1 change × N listening
@@ -419,6 +458,37 @@ export default function Dashboard() {
     }, 30_000)
     return () => clearInterval(poll)
   }, [accounts, fetchAccount, dataSources])
+
+  // ── Settings poll — sole settings-sync mechanism while Realtime is disabled ─
+  // The wfm_settings postgres_changes handler above (dead code while
+  // REALTIME_ENABLED is false) used to be what let one session's Save
+  // Changes show up in every OTHER open session automatically. With Realtime
+  // off, nothing re-fetches kpi_thresholds/status_thresholds/data_source/
+  // cliq_channel/etc. after the initial page load — a save in one browser
+  // was invisible everywhere else (including new Settings toggles/values)
+  // until a manual page refresh. This re-loads every account's settings on a
+  // fixed interval and reapplies them so another session's save shows up
+  // here without anyone needing to reload — same API-Gateway-billed poll
+  // pattern as the KPI/agent poll just above, not Realtime Messages. 60s
+  // (vs the KPI poll's 30s) since settings change far less often than live
+  // KPI data and this fetches every account's FULL settings payload each
+  // tick. Skips while THIS tab's own Settings modal is open, same reasoning
+  // as the deploy-version check below — an in-progress local edit shouldn't
+  // get silently overwritten by a refetch mid-edit.
+  useEffect(() => {
+    if (accounts.length === 0) return
+    const poll = async () => {
+      if (settingsOpen) return
+      try {
+        const allSettings = await loadAllSettings(accounts)
+        applySettingsMap(accounts, allSettings)
+      } catch (err) {
+        console.error('[settings poll] failed:', err)
+      }
+    }
+    const interval = setInterval(poll, 60_000)
+    return () => clearInterval(interval)
+  }, [accounts, settingsOpen, applySettingsMap])
 
   // ── Auto-reload on new deployment ───────────────────────────────────────────
   // A tab that's been open since before a deploy keeps running the OLD JS
@@ -553,6 +623,7 @@ export default function Dashboard() {
           rtaReportAgentStatus={rtaReportAgentStatusMap[currentAccount] ?? false}
           zohoLookups={zohoLookupsMap[currentAccount] ?? DEFAULT_ZOHO_LOOKUPS}
           alarmSound={alarmSounds[currentAccount] ?? ''}
+          knownStatuses={knownStatusesMap[currentAccount] ?? []}
           onSave={handleSaveSettings}
           onSaveCliqGlobal={handleSaveCliqGlobal}
           onAccountsChange={async () => {
