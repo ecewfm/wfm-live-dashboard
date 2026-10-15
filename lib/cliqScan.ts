@@ -512,18 +512,22 @@ async function processAccount(
 
   // ── Zoho Cliq channel alert ──────────────────────────────────────────────
   if (globalSettings.enabled && acc.cliq_channel) {
-    // Per the user (2026-10-15): not every status-duration breach should go
-    // to Cliq — each status on the Status Durations tab has its own "Send to
-    // Cliq" toggle (StatusThresholds.sendToCliq, default OFF — opt-in,
-    // deliberately NOT preserving old "send everything" behavior). KPI
-    // breaches and the other two agent-breach kinds (static-duration-
-    // threshold, text-trigger — neither has a `status`, see BreachRow) are
-    // untouched by this filter; it's specifically for named-status duration
-    // breaches. This is Cliq-ONLY — Workforce Logs/RTA Logs keep using the
-    // full/unfiltered `breaches` as before.
-    const cliqBreaches = breaches.filter(b => b.kind !== 'agent' || !b.status || statusTh[b.status]?.sendToCliq)
+    // Per the user (2026-10-15): not every breach should go to Cliq — each
+    // status on the Status Durations tab has its own "Send to Cliq" toggle
+    // (StatusThresholds.sendToCliq), and each KPI (Thresholds/GroupTile/
+    // ExtraTile.sendToCliq, lib/types.ts) now has the SAME toggle on the KPI
+    // Thresholds tab — both default OFF, opt-in, deliberately NOT preserving
+    // old "send everything" behavior. The other two agent-breach kinds
+    // (static-duration-threshold, text-trigger — neither has a `status`, see
+    // BreachRow) are untouched by this filter; it's specifically for named-
+    // status duration breaches and KPI breaches. This is Cliq-ONLY —
+    // Workforce Logs/RTA Logs keep using the full/unfiltered `breaches` as
+    // before.
+    const cliqBreaches = breaches.filter(b =>
+      b.kind === 'agent' ? (!b.status || statusTh[b.status]?.sendToCliq) : !!b.sendToCliq
+    )
     if (cliqBreaches.length === 0) {
-      l(`${accountId}: Cliq — no breach has "Send to Cliq" on for its status — skipping.`)
+      l(`${accountId}: Cliq — no breach has "Send to Cliq" on — skipping.`)
     } else {
       const lastSent = acc.cliq_last_sent_at ? new Date(acc.cliq_last_sent_at).getTime() : 0
       if (forceSend || Date.now() - lastSent >= cooldownMs) {

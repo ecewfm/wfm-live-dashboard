@@ -2239,6 +2239,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const toggleKpiRtaFlag = (key: keyof Thresholds, flag: 'rtaReportHeartbeat' | 'rtaReportBreachChange') => {
     setKpi(prev => ({ ...prev, [key]: { ...prev[key], [flag]: !prev[key][flag] } }))
   }
+  const toggleKpiSendToCliq = (key: keyof Thresholds) => {
+    setKpi(prev => ({ ...prev, [key]: { ...prev[key], sendToCliq: !prev[key].sendToCliq } }))
+  }
 
   // ── Per-group independent tile thresholds (see GroupTile in lib/types.ts) —
   // a group that opted into "Independent tiles" on the Data Sources tab owns
@@ -2374,6 +2377,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                           <th>Unit</th>
                           <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
                           <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Logs Reporting</th>
+                          <th title="Whether a breach on THIS KPI is included in the Zoho Cliq channel message (independent of Workforce Logs/RTA Logs, which have their own scope settings)">Send to Cliq</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2386,6 +2390,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                           // (e.g. "AWAITING" → "Total Calls") shows the same name
                           // here instead of reverting to the hardcoded default.
                           const label = ds.kpiLabels?.[row.key] || row.label
+                          const cliqDisabled = !(cliqGlobal.enabled && cliqChan)
                           return (
                             <tr key={row.key}>
                               <td>
@@ -2425,6 +2430,13 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                   onToggleHeartbeat={() => toggleKpiRtaFlag(row.key, 'rtaReportHeartbeat')}
                                   onToggleBreachChange={() => toggleKpiRtaFlag(row.key, 'rtaReportBreachChange')} />
                               </td>
+                              <td style={{ textAlign: 'center' }}>
+                                <span className="sm-toggle" title={cliqDisabled ? 'Enable Cliq globally and set this account\'s channel (Zoho Integrations tab) to use this' : undefined}>
+                                  <input type="checkbox" checked={!!th.sendToCliq} disabled={cliqDisabled}
+                                    onChange={() => toggleKpiSendToCliq(row.key)} />
+                                  <span className="sm-toggle-track" />
+                                </span>
+                              </td>
                             </tr>
                           )
                         })}
@@ -2452,12 +2464,14 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                           <th>Unit</th>
                           <th>Warning</th><th>Critical</th><th>Target</th><th>Direction</th><th>Exclude 0</th>
                           <th title="Controls whether (and how) this KPI reports to Zoho's Workforce RTA Logs">RTA Logs Reporting</th>
+                          <th title="Whether a breach on THIS KPI is included in the Zoho Cliq channel message (independent of Workforce Logs/RTA Logs, which have their own scope settings)">Send to Cliq</th>
                         </tr>
                       </thead>
                       <tbody>
                         {group.tiles!.map(tile => {
                           const isAsc = tile.direction === 'asc'
                           const unit = tile.kpiUnit ?? 'percent'
+                          const cliqDisabled = !(cliqGlobal.enabled && cliqChan)
                           return (
                             <tr key={tile.key}>
                               <td><div className="sm-metric">{tile.label}</div></td>
@@ -2494,6 +2508,13 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                   disabled={!rtaLogsOn}
                                   onToggleHeartbeat={() => updateGroupTile(group.id, tile.key, { rtaReportHeartbeat: !tile.rtaReportHeartbeat })}
                                   onToggleBreachChange={() => updateGroupTile(group.id, tile.key, { rtaReportBreachChange: !tile.rtaReportBreachChange })} />
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                <span className="sm-toggle" title={cliqDisabled ? 'Enable Cliq globally and set this account\'s channel (Zoho Integrations tab) to use this' : undefined}>
+                                  <input type="checkbox" checked={!!tile.sendToCliq} disabled={cliqDisabled}
+                                    onChange={() => updateGroupTile(group.id, tile.key, { sendToCliq: !tile.sendToCliq })} />
+                                  <span className="sm-toggle-track" />
+                                </span>
                               </td>
                             </tr>
                           )

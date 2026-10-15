@@ -106,11 +106,16 @@ export type KpiUnit = 'percent' | 'duration' | 'count'
 // excludeZero: when the account's CRM reports a metric as exactly 0 because
 // there's literally no volume to work (e.g. SLA% with zero calls offered),
 // skip breach-tagging it instead of treating 0 as a critical breach.
+// sendToCliq: whether a breach on THIS KPI is included in the Zoho Cliq
+// channel message — same "off by default, opt in per metric" posture as
+// StatusThresholds.sendToCliq (lib/utils.ts), independent of Workforce
+// Logs/RTA Logs reporting (which have their own scope settings). Absent =
+// false, zero migration needed — see lib/cliqScan.ts's cliqBreaches filter.
 export interface Thresholds {
-  sla:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit } & RtaReportFlags
-  wait: { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit } & RtaReportFlags
-  aht:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit } & RtaReportFlags
-  abn:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit } & RtaReportFlags
+  sla:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit; sendToCliq?: boolean } & RtaReportFlags
+  wait: { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit; sendToCliq?: boolean } & RtaReportFlags
+  aht:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit; sendToCliq?: boolean } & RtaReportFlags
+  abn:  { warn: number; crit: number; targ: number; direction: 'asc' | 'desc'; excludeZero?: boolean; kpiUnit?: KpiUnit; sendToCliq?: boolean } & RtaReportFlags
 }
 
 // ── Data source configuration (per account, stored in wfm_settings + localStorage)
@@ -138,6 +143,8 @@ export interface ExtraTile extends RtaReportFlags {
   // Absent = 'percent', matching this tile's historical always-extractPercent
   // behavior (see lib/utils.ts's extractKpiValue()) — zero migration needed.
   kpiUnit?:       KpiUnit
+  // See Thresholds.sendToCliq above — same semantics, per extra tile.
+  sendToCliq?:    boolean
 }
 
 // A KpiGroup's own table, completely independent of the account's main
@@ -195,6 +202,8 @@ export interface GroupTile extends RtaReportFlags {
   // Absent = 'percent', matching this tile's historical always-extractPercent
   // behavior (see lib/utils.ts's extractKpiValue()) — zero migration needed.
   kpiUnit?:     KpiUnit
+  // See Thresholds.sendToCliq above — same semantics, per independent tile.
+  sendToCliq?:  boolean
   // Per-tile Workforce RTA Logs (Zoho) reporting flags — replace the old
   // account-wide "Report KPI Tile breaches" toggle (wfm_settings.
   // rta_report_kpi), which was all-or-nothing across every KPI tile. See

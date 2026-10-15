@@ -188,6 +188,11 @@ export interface BreachRow {
   // any account-configured label that might coincidentally also end in
   // "Duration").
   status?: string
+  // Only set for a 'kind:kpi' row — carries that KPI's own Thresholds/
+  // GroupTile/ExtraTile.sendToCliq (lib/types.ts) straight through from
+  // checkKpi() below, so lib/cliqScan.ts can filter the Cliq message
+  // per-KPI the same way it does per-status above.
+  sendToCliq?: boolean
 }
 
 // ── Freshest updated_at across all of an account's KPI rows ───────────────────
@@ -223,7 +228,7 @@ export function buildBreaches(
 
   const checkKpi = (
     raw: string, targ: number, th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean },
-    entity: string, metric: string, unit: KpiUnit | undefined
+    entity: string, metric: string, unit: KpiUnit | undefined, sendToCliq?: boolean
   ) => {
     const { num, value } = extractKpiValue(raw, unit)
     if (isNaN(num)) return
@@ -233,8 +238,8 @@ export function buildBreaches(
     if (unit === 'duration' && num <= 0) return
     const { isCrit, isWarn } = evalThreshold(num, th)
     const thLabel = formatKpiThresholdLabel(unit, targ, th.direction)
-    if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical', kind: 'kpi' })
-    else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning',  kind: 'kpi' })
+    if (isCrit)       rows.push({ entity, metric, value, threshold: thLabel, severity: 'critical', kind: 'kpi', sendToCliq })
+    else if (isWarn)  rows.push({ entity, metric, value, threshold: thLabel, severity: 'warning',  kind: 'kpi', sendToCliq })
   }
 
   // KPI breaches — one pass per manually-defined group
@@ -254,7 +259,7 @@ export function buildBreaches(
     if (group.tiles && group.tiles.length) {
       group.tiles.forEach(tile => {
         if (!tile.cell) return
-        checkKpi(rc(tile.cell), tile.targ, tile, g, tile.label, tile.kpiUnit)
+        checkKpi(rc(tile.cell), tile.targ, tile, g, tile.label, tile.kpiUnit, tile.sendToCliq)
       })
       return
     }
@@ -264,16 +269,16 @@ export function buildBreaches(
     // extraction, so "what does this slot actually measure" is an explicit
     // per-account choice (see Thresholds.kpiUnit) rather than assumed from
     // the slot's name.
-    if (group.cells.sla)  checkKpi(rc(group.cells.sla),  kpiTh.sla.targ,  kpiTh.sla,  g, ds.kpiLabels.sla,  kpiTh.sla.kpiUnit)
-    if (group.cells.wait) checkKpi(rc(group.cells.wait), kpiTh.wait.targ, kpiTh.wait, g, ds.kpiLabels.wait, kpiTh.wait.kpiUnit)
-    if (group.cells.aht)  checkKpi(rc(group.cells.aht),  kpiTh.aht.targ,  kpiTh.aht,  g, ds.kpiLabels.aht,  kpiTh.aht.kpiUnit)
-    if (group.cells.abn)  checkKpi(rc(group.cells.abn),  kpiTh.abn.targ,  kpiTh.abn,  g, ds.kpiLabels.abn,  kpiTh.abn.kpiUnit)
+    if (group.cells.sla)  checkKpi(rc(group.cells.sla),  kpiTh.sla.targ,  kpiTh.sla,  g, ds.kpiLabels.sla,  kpiTh.sla.kpiUnit,  kpiTh.sla.sendToCliq)
+    if (group.cells.wait) checkKpi(rc(group.cells.wait), kpiTh.wait.targ, kpiTh.wait, g, ds.kpiLabels.wait, kpiTh.wait.kpiUnit, kpiTh.wait.sendToCliq)
+    if (group.cells.aht)  checkKpi(rc(group.cells.aht),  kpiTh.aht.targ,  kpiTh.aht,  g, ds.kpiLabels.aht,  kpiTh.aht.kpiUnit,  kpiTh.aht.sendToCliq)
+    if (group.cells.abn)  checkKpi(rc(group.cells.abn),  kpiTh.abn.targ,  kpiTh.abn,  g, ds.kpiLabels.abn,  kpiTh.abn.kpiUnit,  kpiTh.abn.sendToCliq)
 
     // Extra custom tiles carry their own thresholds
     ;(ds.extraTiles ?? []).forEach(t => {
       if (!group.cells[t.key]) return
       const dir: 'asc' | 'desc' = t.higherIsBetter ? 'desc' : 'asc'
-      checkKpi(rc(group.cells[t.key]), t.targ, { warn: t.warn, crit: t.crit, direction: dir }, g, t.label, t.kpiUnit)
+      checkKpi(rc(group.cells[t.key]), t.targ, { warn: t.warn, crit: t.crit, direction: dir }, g, t.label, t.kpiUnit, t.sendToCliq)
     })
   })
 
