@@ -10,6 +10,11 @@ import {
   DEFAULT_KPI_LABELS, genId, newGroup, newGroupTile, newAgentSource,
   fetchPublicTables, formatMinutesAsClock, parseClockToMinutes
 } from '@/lib/utils'
+// effectiveKpiSource is the SAME precedence function the renderers and the
+// Cliq/RTA scan resolve with — imported rather than re-implemented here so
+// the editor's idea of which table a slot binds against cannot disagree with
+// what the runtime actually reads (that mismatch yields '--' with no error).
+import { effectiveKpiSource } from '@/lib/breaches'
 import { addAccount, removeAccount, renameAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
 import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
 import type { GeminiKeyMasked } from '@/lib/geminiKeys'
@@ -1080,31 +1085,65 @@ function AgentSourceCard({ source, tables, supaUrl, supaKey, extraCols, onAddExt
 // simpler column-only DsPreviewTable the Agent source cards use — agent
 // tables are one-row-per-entity with no row-pinning concept, KPI tables
 // commonly are not).
-function KpiGroupSourcePreview({ table, supaUrl, supaKey, hasActiveSlot, onPick }: {
-  table: string; supaUrl: string; supaKey: string
+function KpiGroupSourcePreview({ table, accountCol, accountId, supaUrl, supaKey, hasActiveSlot, onPick }: {
+  table: string; accountCol?: string; accountId: string; supaUrl: string; supaKey: string
   hasActiveSlot: boolean
   onPick: (row: Record<string, any>, col: string) => void
 }) {
   const [preview, setPreview] = useState<Record<string, any>[]>([])
   const [loading, setLoading] = useState(false)
+  // Opt-in escape hatch: rows for OTHER accounts, shown for orientation only
+  // and deliberately NOT clickable (see the fetch comment below).
+  const [showAll, setShowAll] = useState(false)
 
   useEffect(() => {
-    if (!table) { setPreview([]); return }
+    // Clear synchronously, not in the .then — otherwise for one render this
+    // table shows the PREVIOUS table's rows with live click handlers, and a
+    // mistimed click binds a column from the wrong table entirely. Matters
+    // much more now that one panel can swap between tiles pointing at
+    // different tables.
+    setPreview([])
+    if (!table) return
     setLoading(true)
-    fetch(`${supaUrl}/rest/v1/${table}?limit=20`, { headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` } })
+    // Filter to THIS account. A TALL key/value table (one row per metric per
+    // account, e.g. homebase_omni_queue_stats) can easily push this account's
+    // rows past an unfiltered window, leaving the exact row you need to click
+    // invisible. The runtime fetch ALWAYS filters by accountCol, so an
+    // unfiltered preview is not just unhelpful — a click on another account's
+    // row writes a matchVal the runtime can never match.
+    const col = accountCol || 'account_id'
+    const url = showAll
+      ? `${supaUrl}/rest/v1/${table}?limit=20`
+      : `${supaUrl}/rest/v1/${table}?${col}=eq.${encodeURIComponent(accountId)}&limit=50`
+    fetch(url, { headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` } })
       .then(r => r.ok ? r.json() : [])
       .then(d => setPreview(Array.isArray(d) ? d : []))
       .catch(() => setPreview([]))
       .finally(() => setLoading(false))
-  }, [table, supaUrl, supaKey])
+  }, [table, accountCol, accountId, showAll, supaUrl, supaKey])
 
   if (!table) return null
   if (loading) return <div style={{ padding: 12, textAlign: 'center', fontSize: 11, color: 'var(--text-muted)' }}>Loading preview...</div>
-  if (preview.length === 0) return <div style={{ padding: 12, textAlign: 'center', fontSize: 11, color: 'var(--text-muted)' }}>No rows in this table</div>
+  if (preview.length === 0) return (
+    <div style={{ padding: 12, textAlign: 'center', fontSize: 11, color: 'var(--text-muted)' }}>
+      {showAll ? 'No rows in this table' : <>No rows in <code>{table}</code> for <strong>{accountId}</strong> (matching on <code>{accountCol || 'account_id'}</code>) — check the table and Account col, or the scraper may not have written yet.{' '}
+        <a style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setShowAll(true)}>show all rows (read-only)</a></>}
+    </div>
+  )
 
   const cols = Object.keys(preview[0])
+  // Rows from the "show all" escape hatch belong to other accounts — binding
+  // against one would store a matchVal this account's runtime query never
+  // returns, so clicking is disabled there regardless of hasActiveSlot.
+  const clickable = hasActiveSlot && !showAll
   return (
     <div style={{ overflow: 'auto', maxHeight: 200, fontSize: 11, border: '1px solid var(--border,#e1e6e4)', borderRadius: 6, marginTop: 6 }}>
+      {showAll && (
+        <div style={{ padding: '4px 8px', fontSize: 10, background: 'rgba(217,122,53,0.12)', color: 'var(--text-muted)' }}>
+          Showing ALL accounts&apos; rows — not bindable.{' '}
+          <a style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setShowAll(false)}>back to {accountId}</a>
+        </div>
+      )}
       <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: 'max-content' }}>
         <thead><tr>{cols.map(c => <th key={c} className="ds-th">{c}</th>)}</tr></thead>
         <tbody>
@@ -1113,8 +1152,8 @@ function KpiGroupSourcePreview({ table, supaUrl, supaKey, hasActiveSlot, onPick 
               {cols.map(c => (
                 <td key={c} className="ds-td"
                   title={String(row[c] ?? '')}
-                  style={{ cursor: hasActiveSlot ? 'pointer' : 'default' }}
-                  onClick={() => hasActiveSlot && onPick(row, c)}>
+                  style={{ cursor: clickable ? 'pointer' : 'default' }}
+                  onClick={() => clickable && onPick(row, c)}>
                   {String(row[c] ?? '')}
                 </td>
               ))}
@@ -1122,6 +1161,62 @@ function KpiGroupSourcePreview({ table, supaUrl, supaKey, hasActiveSlot, onPick 
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// One source editor, used for a whole GROUP and for a single TILE — four
+// pickers plus the account-filtered preview. Lifted verbatim out of the
+// per-group panel rather than re-typed, for the same reason the resolver is
+// shared: two hand-maintained copies is how the tile editor ends up missing a
+// field the group editor gained.
+function KpiSourcePanel({ title, color, source, tables, supaUrl, supaKey, accountId, hint, previewClickable, onPatch, onRevert, onPick }: {
+  title: string; color?: string; source: KpiGroupSource
+  tables: string[]; supaUrl: string; supaKey: string; accountId: string
+  hint: React.ReactNode; previewClickable: boolean
+  onPatch: (patch: Partial<KpiGroupSource>) => void
+  onRevert?: () => void
+  onPick: (row: Record<string, any>, col: string) => void
+}) {
+  return (
+    <div className="ds-group-source-panel" style={{ background: 'var(--bg-card,#fff)', border: '1px solid var(--border,#e1e6e4)', borderLeft: color ? `3px solid ${color}` : undefined, borderRadius: 8, padding: 8, marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <div className="ds-section-title" style={{ borderBottom: 'none', padding: 0, margin: 0, color }}>{title}</div>
+        {/* Reverting to the inherited source is an EXPLICIT control here, not
+            the same icon that opens this panel — otherwise the obvious thing
+            to click when you want to re-check a configured tile destroys its
+            table/row key. */}
+        {onRevert && (
+          <button className="ds-mode-btn" style={{ marginLeft: 'auto' }}
+            title="Stop this tile reading its own table — revert it to whatever the rest of its group reads. The cell binding is left alone."
+            onClick={onRevert}><i className="bx bx-undo" /> Use group&apos;s source</button>
+        )}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="ds-mini-label">Table</span>
+          <DsTableSelector field="table" value={source.table} tables={tables} onChange={(_, v) => onPatch({ table: v })} />
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="ds-mini-label">Account col</span>
+          <input className="ds-select" style={{ minWidth: 120 }} value={source.accountCol} onChange={e => onPatch({ accountCol: e.target.value })} />
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="ds-mini-label">Row key</span>
+          <input className="ds-select" style={{ minWidth: 120 }} placeholder="(one row)" value={source.rowKeyCol} onChange={e => onPatch({ rowKeyCol: e.target.value })} />
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span className="ds-mini-label">Updated at</span>
+          <input className="ds-select" style={{ minWidth: 120 }} placeholder="(none)" value={source.updatedAtCol} onChange={e => onPatch({ updatedAtCol: e.target.value })} />
+        </div>
+      </div>
+      <p className="ds-hint" style={{ marginBottom: 0 }}>{hint}</p>
+      {/* key: force a fresh mount when the table changes, so stale rows from
+          the previous table can never be left on screen and clickable. */}
+      <KpiGroupSourcePreview key={`${source.table}::${source.accountCol}`}
+        table={source.table} accountCol={source.accountCol} accountId={accountId}
+        supaUrl={supaUrl} supaKey={supaKey}
+        hasActiveSlot={previewClickable} onPick={onPick} />
     </div>
   )
 }
@@ -1214,6 +1309,29 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
       return { ...g, source: { table: '', accountCol: 'account_id', rowKeyCol: '', updatedAtCol: '', ...(g.source || {}), ...patch } }
     }) }))
   }, [])
+  // Toggle/edit ONE TILE's own data source (see GroupTile.source in
+  // lib/types.ts) — exactly setGroupSource's semantics one level deeper:
+  // OFF (patch=null) reverts this tile to reading whatever the REST of its
+  // group reads (group.source if set, else the shared ds.kpiTable), with zero
+  // other changes; ON seeds the same defaults (accountCol 'account_id', the
+  // overwhelmingly common column name) the user can override below.
+  //
+  // Writes ONLY `source`, never `key`: the Workforce RTA Logs heartbeat /
+  // breach-change baselines in wfm_settings.rta_logs_state are keyed
+  // `${group.id}:${tile.key}` (see lib/breaches.ts), so re-keying a tile here
+  // would silently reset its baseline and fire a spurious immediate report.
+  // The tile's existing `cell` binding is deliberately left alone too —
+  // re-point the table, then re-click the cell, same as the group-level flow.
+  const setGroupTileSource = useCallback((groupId: string, tileKey: string, patch: Partial<KpiGroupSource> | null) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => {
+      if (g.id !== groupId || !g.tiles) return g
+      return { ...g, tiles: g.tiles.map(t => {
+        if (t.key !== tileKey) return t
+        if (patch === null) return { ...t, source: null }
+        return { ...t, source: { table: '', accountCol: 'account_id', rowKeyCol: '', updatedAtCol: '', ...(t.source || {}), ...patch } }
+      }) }
+    }) }))
+  }, [])
   const clearCell = useCallback((groupId: string, kpiKey: string) => {
     setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => {
       if (g.id !== groupId) return g
@@ -1249,12 +1367,19 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         // single click always binds ONE cell.
         const cols = Object.keys(row)
         const activeGroup = prev.groups.find(g => g.id === cur.groupId)
+        const activeTile  = activeGroup?.tiles?.find(t => t.key === cur.kpiKey) ?? null
         const autoDetect = cols.includes('kpi_key') ? 'kpi_key' : cols.includes('id') ? 'id' : ''
-        // An alt-source group's row key is scoped to ITS OWN table's columns —
-        // it must never fall back to the account-wide kpiRowKeyCol (a column
-        // from a completely different table that may not even exist here).
-        const rk = activeGroup?.source
-          ? (activeGroup.source.rowKeyCol || autoDetect)
+        // The row key is scoped to whichever table this cell actually came
+        // from — a TILE with its own source first (GroupTile.source), then its
+        // GROUP's, then the account-wide kpiRowKeyCol. Precedence comes from
+        // lib/breaches.ts's effectiveKpiSource(), the SAME function the
+        // renderers and the Cliq/RTA scan resolve with, so the editor cannot
+        // pin a row against a table the runtime won't read. A row key is NEVER
+        // inherited across tables: a column from one table may not exist in
+        // another at all.
+        const pickSrc = activeGroup ? effectiveKpiSource(activeGroup, activeTile) : null
+        const rk = pickSrc
+          ? (pickSrc.rowKeyCol || autoDetect)
           : (prev.kpiRowKeyCol || autoDetect)
         if (rk) { binding.matchCol = rk; binding.matchVal = String(row[rk] ?? '') }
         return { ...prev, groups: prev.groups.map(g => {
@@ -1412,8 +1537,18 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   // The shared KPI preview table reflects the account-wide kpiTable — if the
   // active slot belongs to a group with its OWN source, clicks there must be
   // disabled (its own KpiGroupSourcePreview handles that group's binding instead).
-  const activeGroupObj = activeCell ? localDs.groups.find(g => g.id === activeCell.groupId) : null
-  const sharedPreviewClickable = !!activeCell && !activeGroupObj?.source
+  // Which preview accepts the next click is decided by the ARMED SLOT's
+  // EFFECTIVE source (tile.source -> group.source -> account-wide), using the
+  // same lib/breaches.ts precedence the renderers resolve with — so a click
+  // can only ever land in the preview of the table the binding will actually
+  // be read from. Without the tile tier, a tile with its own source inside a
+  // shared-source group would still make the bottom account-wide preview
+  // clickable, writing a valueCol from a table that doesn't contain it — a
+  // binding that silently resolves to '' forever.
+  const activeGroupObj = activeCell ? (localDs.groups.find(g => g.id === activeCell.groupId) ?? null) : null
+  const activeTileObj  = activeCell ? (activeGroupObj?.tiles?.find(t => t.key === activeCell.kpiKey) ?? null) : null
+  const activeEffSource = activeGroupObj ? effectiveKpiSource(activeGroupObj, activeTileObj) : null
+  const sharedPreviewClickable = !!activeCell && !activeEffSource
   // Carries each row's ORIGINAL index alongside it — cellColor() below pins
   // "no filter configured" bindings to the first row by POSITION (ri === 0),
   // so sorting must not change which row that logic considers "first";
@@ -1568,9 +1703,18 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         {/* Groups */}
         {localDs.groups.map(group => {
           const isCustom = !!(group.tiles && group.tiles.length)
+          // `tile` is the single injection point that lets the ONE shared
+          // slot-render loop below show the per-tile source affordance
+          // without branching in JSX.
           const slots = isCustom
-            ? group.tiles!.map((t, i) => ({ key: t.key, label: t.label, binding: t.cell, color: EXTRA_COLORS[i % EXTRA_COLORS.length] }))
-            : allKpiKeys.map(k => ({ key: k, label: tileLabel(k), binding: group.cells[k], color: tileColor(k) }))
+            ? group.tiles!.map((t, i) => ({ key: t.key, label: t.label, binding: t.cell, color: EXTRA_COLORS[i % EXTRA_COLORS.length], tile: t as GroupTile | undefined }))
+            // Legacy shared-tiles groups bind through g.cells, a plain
+            // Record<string, CellBinding> with nowhere to hang a table — so
+            // per-tile sources are an independent-tiles-only feature and this
+            // branch always reports `tile: undefined`. Flip the group to
+            // "Independent tiles" (setGroupCustomMode, which carries existing
+            // bindings across) to use them.
+            : allKpiKeys.map(k => ({ key: k, label: tileLabel(k), binding: group.cells[k], color: tileColor(k), tile: undefined as GroupTile | undefined }))
           return (
           <div key={group.id} className="ds-group">
             <div className="ds-group-head">
@@ -1586,7 +1730,18 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                 title={isCustom
                   ? 'This group has its own independent tiles (labels, bindings, and — on the KPI Thresholds tab — thresholds), separate from every other group. Click to revert to the account-wide shared tiles.'
                   : 'Give this group its own independent tiles — different labels, bindings, and thresholds from every other group (e.g. "Messaging SLA" vs "Email SLA" with completely different columns).'}
-                onClick={() => setGroupCustomMode(group.id, !isCustom)}>
+                onClick={() => {
+                  // Turning Independent tiles OFF drops `tiles` entirely, and
+                  // per-tile sources live ON those tiles — so this silently
+                  // destroys every per-tile table choice in the group. Only
+                  // confirm when there is actually something to lose.
+                  const losing = isCustom ? (group.tiles ?? []).filter(t => t.source).length : 0
+                  if (losing > 0 && !window.confirm(
+                    `Switching "${group.name || 'this group'}" back to Shared tiles will delete the per-tile data source on ${losing} tile${losing === 1 ? '' : 's'}.\n\n` +
+                    `Those tiles will go back to reading the group's table. Continue?`
+                  )) return
+                  setGroupCustomMode(group.id, !isCustom)
+                }}>
                 <i className={`bx ${isCustom ? 'bx-git-branch' : 'bx-link'}`} /> {isCustom ? 'Independent tiles' : 'Shared tiles'}
               </button>
               <button className={`ds-mode-btn${group.source ? ' on' : ''}`}
@@ -1600,43 +1755,24 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             </div>
 
             {group.source && (
-              <div className="ds-group-source-panel" style={{ background: 'var(--bg-card,#fff)', border: '1px solid var(--border,#e1e6e4)', borderRadius: 8, padding: 8, marginBottom: 8 }}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="ds-mini-label">Table</span>
-                    <DsTableSelector field="table" value={group.source.table} tables={tables}
-                      onChange={(_, v) => setGroupSource(group.id, { table: v })} />
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="ds-mini-label">Account col</span>
-                    <input className="ds-select" style={{ minWidth: 120 }} value={group.source.accountCol}
-                      onChange={e => setGroupSource(group.id, { accountCol: e.target.value })} />
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="ds-mini-label">Row key</span>
-                    <input className="ds-select" style={{ minWidth: 120 }} placeholder="(one row)" value={group.source.rowKeyCol}
-                      onChange={e => setGroupSource(group.id, { rowKeyCol: e.target.value })} />
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="ds-mini-label">Updated at</span>
-                    <input className="ds-select" style={{ minWidth: 120 }} placeholder="(none)" value={group.source.updatedAtCol}
-                      onChange={e => setGroupSource(group.id, { updatedAtCol: e.target.value })} />
-                  </div>
-                </div>
-                <p className="ds-hint" style={{ marginBottom: 0 }}>
-                  This group&apos;s tiles bind against THIS table only — click a slot below, then click a cell in the preview that appears here (not the shared preview at the bottom of this section).
-                </p>
-                <KpiGroupSourcePreview table={group.source.table} supaUrl={supaUrl} supaKey={supaKey}
-                  hasActiveSlot={!!activeCell && activeCell.groupId === group.id}
-                  onPick={(row, col) => pickCell(row, col)} />
-              </div>
+              <KpiSourcePanel title={`${group.name || 'GROUP'} — OWN SOURCE`} source={group.source}
+                tables={tables} supaUrl={supaUrl} supaKey={supaKey} accountId={accountId}
+                hint={<>This group&apos;s tiles bind against THIS table — click a slot below, then click a cell here. A tile with its OWN source (the database icon on its card) overrides this for that one tile.</>}
+                previewClickable={!!activeCell && activeCell.groupId === group.id && !activeTileObj?.source}
+                onPatch={p => setGroupSource(group.id, p)}
+                onPick={(row, col) => pickCell(row, col)} />
             )}
 
             <div className="ds-slot-grid">
               {slots.map(slot => {
-                const { key: k, label, binding: b, color } = slot
+                const { key: k, label, binding: b, color, tile } = slot
                 const isActive = !!activeCell && activeCell.groupId === group.id && activeCell.kpiKey === k
-                const disp = b ? (b.matchVal ? `${b.matchVal} → ${b.valueCol}` : b.valueCol) : (isActive ? '← click a cell' : 'not set')
+                // Prefix the table when this tile reads one of its own —
+                // otherwise a group mixing two tables is unreadable at a
+                // glance, which is exactly the state that made the original
+                // bug ("only one tile shows") so confusing.
+                const bindDisp = b ? (b.matchVal ? `${b.matchVal} → ${b.valueCol}` : b.valueCol) : (isActive ? '← click a cell' : 'not set')
+                const disp = b && tile?.source?.table ? `${tile.source.table}: ${bindDisp}` : bindDisp
                 return (
                   <div key={k} className="ds-cellcard"
                     style={{ borderColor: isActive ? color : 'var(--border,#e1e6e4)', animation: isActive ? 'slot-pulse 1s infinite' : 'none' }}
@@ -1660,6 +1796,25 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                           fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.4px',
                           width: '100%', minWidth: 0, padding: 0, margin: 0, fontFamily: 'inherit', cursor: 'text',
                         }} />
+                      {/* Per-tile source. ARMS the tile and turns its source
+                          ON — never off: on a configured tile this is the
+                          obvious thing to click to reopen its panel, and
+                          making it destructive would also flip
+                          sharedPreviewClickable true, so the next click in
+                          the bottom account-wide preview would silently
+                          rebind this tile to the wrong table. Reverting lives
+                          in the panel ("Use group's source"). */}
+                      {isCustom && (
+                        <i className={`bx bx-data`} style={{ cursor: 'pointer', flexShrink: 0, opacity: tile?.source ? 1 : 0.55 }}
+                          title={tile?.source
+                            ? `This tile reads its own table (${tile.source.table || 'none picked yet'}) — edit it in the panel below`
+                            : 'Give THIS tile its own data source, separate from the rest of the group'}
+                          onClick={e => {
+                            e.stopPropagation()
+                            if (!tile?.source) setGroupTileSource(group.id, k, {})
+                            setActiveCell({ groupId: group.id, kpiKey: k })
+                          }} />
+                      )}
                       {b && <i className="bx bx-x" title="Clear binding" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); clearCell(group.id, k) }} />}
                       {isCustom && <i className="bx bx-trash" title="Remove this tile" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); removeGroupTile(group.id, k) }} />}
                     </div>
@@ -1669,6 +1824,29 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
               })}
               {isCustom && <AddSlotCard onClick={() => addGroupTile(group.id)} />}
             </div>
+
+            {/* One panel per tile that has its own source. Rendered for ANY
+                such tile, NOT only the armed one: pickCell() ends by clearing
+                activeCell, so an arm-gated panel would unmount the instant a
+                cell is clicked — taking Table/Account col/Row key off screen
+                before the user can confirm what they just bound. Only the
+                preview's CLICKABILITY is gated on arming. */}
+            {isCustom && group.tiles!.filter(t => t.source).map(t => {
+              const i = group.tiles!.findIndex(x => x.key === t.key)
+              const color = EXTRA_COLORS[i % EXTRA_COLORS.length]
+              const armed = !!activeCell && activeCell.groupId === group.id && activeCell.kpiKey === t.key
+              return (
+                <KpiSourcePanel key={t.key} title={`${t.label} — OWN SOURCE`} color={color} source={t.source!}
+                  tables={tables} supaUrl={supaUrl} supaKey={supaKey} accountId={accountId}
+                  hint={armed
+                    ? <>Only <strong>{t.label}</strong> binds against this table — click a cell below. For a TALL table (one row per metric) set <strong>Row key</strong> to a column that is UNIQUE per row (on <code>homebase_omni_queue_stats</code> that is <code>id</code>, not <code>metric</code> — <code>metric</code> repeats once a second queue is scraped); for a WIDE one-row table leave Row key empty.</>
+                    : <>Click the <strong>{t.label}</strong> card above to arm it, then click a cell here to bind it.</>}
+                  previewClickable={armed}
+                  onPatch={p => setGroupTileSource(group.id, t.key, p)}
+                  onRevert={() => setGroupTileSource(group.id, t.key, null)}
+                  onPick={(row, col) => pickCell(row, col)} />
+              )
+            })}
           </div>
           )
         })}

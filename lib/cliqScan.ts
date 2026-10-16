@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, collectKpiGroupSourceQueries, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
@@ -77,21 +77,21 @@ export async function fetchAccountData(ds: DataSourceConfig, accountId: string):
   if (ds.agentSources) agentSourcesToFetch.push(...ds.agentSources)
   const agentLists = await Promise.all(agentSourcesToFetch.map(src => fetchAgentSource(src, accountId)))
 
-  // Per-group KPI sources — mirrors components/Dashboard.tsx's own fetch
-  // exactly (same shared collectKpiGroupSourceQueries() so this can't drift
-  // out of sync the way agent-row normalization once did, see
-  // normalizeAgentRow's comment above) — any KpiGroup with its own `source`
-  // reads from ITS OWN table instead of ds.kpiTable, so Cliq/Workforce Logs/
-  // RTA Logs breach-check this scan runs sees exactly the same data the
-  // live Dashboard/Overview pages show.
-  const kpiGroupQueries = collectKpiGroupSourceQueries(ds)
-  const kpiGroupResults = await Promise.all(
-    kpiGroupQueries.map(q => supabase.from(q.table as any).select('*').eq(q.accountCol, accountId).then(r => (r.data as any[]) ?? []))
-  )
-  const kpiRowsByGroup: Record<string, any[]> = {}
-  kpiGroupQueries.forEach((q, i) => { q.groupIds.forEach(gid => { kpiRowsByGroup[gid] = kpiGroupResults[i] }) })
+  // Alternate KPI sources — any GROUP (KpiGroup.source) or individual TILE
+  // (GroupTile.source) reading its own table instead of ds.kpiTable. This is
+  // the SAME fetchKpiSourceRows() components/Dashboard.tsx calls; the only
+  // thing contributed here is the server's Supabase client. It used to be a
+  // hand-written loop copied into both files — and that pair HAD already
+  // drifted — so the loop is deliberately gone from both rather than
+  // "mirrored carefully". Result: Cliq/Workforce Logs/RTA Logs breach-check
+  // exactly the data the live Dashboard/Overview pages show.
+  const kpiRowsBySource = await fetchKpiSourceRows(ds, accountId,
+    async (table, accountCol, accId) => {
+      const r = await supabase.from(table as any).select('*').eq(accountCol, accId)
+      return (r.data as any[]) ?? []
+    })
 
-  return { kpi: null, kpiRows, kpiRowsByGroup, agents: agentLists.flat(), status: null, calls: [] }
+  return { kpi: null, kpiRows, kpiRowsBySource, agents: agentLists.flat(), status: null, calls: [] }
 }
 
 // ── Message formatting — mirrors the old GAS tool's format ──────────────────
@@ -309,7 +309,11 @@ async function processAccount(
   // overlay (5 min, lib/utils.ts's isDataStale). Applies even on a forced
   // scan: stale data can't reliably trigger an alert regardless of how the
   // scan was triggered.
-  const freshest = mostRecentUpdatedAt(accountData.kpiRows, ds.kpiUpdatedAt)
+  // Cross-source: an account whose omni/chat table has frozen while its
+  // phones table keeps ticking is NOT live, and must not keep firing Cliq
+  // alerts and RTA Logs off stale numbers. Same function the browser
+  // overlay uses.
+  const freshest = freshestAcrossSources(ds, accountData)
   if (isDataStale(freshest)) {
     l(`${accountId}: DATA NOT IN SYNC (freshest=${freshest || 'none'}) — suppressing.`)
     return false

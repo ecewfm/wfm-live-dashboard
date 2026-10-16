@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, mostRecentUpdatedAt, normalizeAgentRow, collectKpiGroupSourceQueries, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
@@ -15,7 +15,11 @@ import {
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
   extractPercent, formatTime, formatSeconds, extractKpiValue, formatKpiThresholdLabel, isDataStale, parseDurationToSeconds, isCoarseDuration,
-  getKpiColorClass, getStatusPillClass, resolveCell, getExtraTileColorClass,
+  // NOTE: resolveCell is deliberately NOT imported here. Every cell read on
+  // this page goes through makeKpiCellResolver() in lib/breaches.ts so the
+  // browser and the Cliq/RTA scan resolve identically — re-importing it is
+  // how the drift CLAUDE.md documents would start again.
+  getKpiColorClass, getStatusPillClass, getExtraTileColorClass,
   loadKpiThresholds, saveKpiThresholds,
   loadStatusThresholds, saveStatusThresholds,
   loadDataSource, saveDataSource,
@@ -159,18 +163,19 @@ export default function Dashboard() {
       if (src.agentSources) agentSourcesToFetch.push(...src.agentSources)
       const agents: any[] = (await Promise.all(agentSourcesToFetch.map(as_ => fetchAgentSource(as_, accId)))).flat()
 
-      // Per-group KPI sources — any KpiGroup with its own `source` (see
-      // lib/types.ts's KpiGroup.source) reads from ITS OWN table instead of
-      // src.kpiTable above, e.g. Flex's "First Reply Time" group reading
-      // flex_overwatch_first_reply. One query per DISTINCT table (groups
-      // sharing the same source table+accountCol fetch together), then
-      // fanned back out to every group id that table feeds.
-      const kpiGroupQueries = collectKpiGroupSourceQueries(src)
-      const kpiGroupResults = await Promise.all(
-        kpiGroupQueries.map(q => supabase.from(q.table as any).select('*').eq(q.accountCol, accId).then(r => (r.data as any[]) ?? []))
-      )
-      const kpiRowsByGroup: Record<string, any[]> = {}
-      kpiGroupQueries.forEach((q, i) => { q.groupIds.forEach(gid => { kpiRowsByGroup[gid] = kpiGroupResults[i] }) })
+      // Alternate KPI sources — any GROUP (KpiGroup.source) or individual
+      // TILE (GroupTile.source) that reads from its own table instead of
+      // src.kpiTable above. Which tables, how they're deduped and how the
+      // results are keyed all live in lib/breaches.ts's fetchKpiSourceRows();
+      // the ONLY thing contributed here is the browser's Supabase client.
+      // lib/cliqScan.ts calls the exact same function with the server client,
+      // so the two cannot drift — this used to be a hand-written loop copied
+      // into both files, and that pair had already drifted by a token.
+      const kpiRowsBySource = await fetchKpiSourceRows(src, accId,
+        async (table, accountCol, accountId) => {
+          const r = await supabase.from(table as any).select('*').eq(accountCol, accountId)
+          return (r.data as any[]) ?? []
+        })
 
       const kpiRows = (kpiRes.data as any[]) ?? []
 
@@ -179,7 +184,7 @@ export default function Dashboard() {
         [accId]: {
           kpi:     kpiRows[0] ?? null,
           kpiRows: kpiRows,
-          kpiRowsByGroup,
+          kpiRowsBySource,
           agents:  agents,
           status:  null,
           calls:   [],
@@ -1103,7 +1108,7 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
           <LayoutPanel key={group.id} id={`kpi:${group.id}`} rect={liveLayout[`kpi:${group.id}`] ?? effectiveLayout[`kpi:${group.id}`]}
             title={group.name || 'Metrics'} onChange={handlePanelChange} onCommit={handlePanelCommit}>
             <div style={{ padding: 12 }}>
-              <KpiGrid group={group} rows={group.source ? (accountData?.kpiRowsByGroup?.[group.id] ?? []) : kpiRows} kpiTh={kpiTh} ds={ds} />
+              <KpiGrid group={group} accountData={accountData} kpiTh={kpiTh} ds={ds} />
             </div>
           </LayoutPanel>
         ))}
@@ -1213,18 +1218,23 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
 }
 
 // ── KPI Grid — renders one group's cell-bound tiles ───────────────────────────
-function KpiGrid({ group, rows, kpiTh, ds }: {
-  group: KpiGroup; rows: Record<string, any>[]; kpiTh: Thresholds; ds: DataSourceConfig
+// Takes the whole accountData, NOT a pre-resolved `rows` array. That prop was
+// the structural reason per-tile sources were impossible: the caller picked
+// the table one component up, before this ever saw the tiles. With
+// accountData there is no way to hand it a group-level wrong answer.
+function KpiGrid({ group, accountData, kpiTh, ds }: {
+  group: KpiGroup; accountData: AccountData | undefined; kpiTh: Thresholds; ds: DataSourceConfig
 }) {
-  const rc = (b: any) => resolveCell(rows, b, ds.kpiGroupCol, group.groupVal)
+  const rc = makeKpiCellResolver(ds, group, accountData)
 
   // Independent-tiles group (see GroupTile) — its own labels/bindings/
   // thresholds, entirely separate from every other group on this account.
+  // Each tile may ALSO carry its own `source`, so pass the tile through.
   if (group.tiles && group.tiles.length) {
     return (
       <div className="kpi-grid">
         {group.tiles.map(t => {
-          const raw = rc(t.cell || undefined)
+          const raw = rc(t.cell || undefined, t)
           const { num } = extractKpiValue(raw, t.kpiUnit)
           return (
             <KpiTile key={t.key} label={t.label} value={raw || '--'} numValue={num}
@@ -1538,7 +1548,8 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
 }) {
   const kpiRows = accountData?.kpiRows ?? []
   const groups  = ds.groups ?? []
-  const freshestUpdatedAt = mostRecentUpdatedAt(kpiRows, ds.kpiUpdatedAt)
+  // Cross-source — see the same call on the Dashboard page above.
+  const freshestUpdatedAt = freshestAcrossSources(ds, accountData)
   const stale   = isDataStale(freshestUpdatedAt)
   const hasCrit = breaches.some(b => b.severity === 'critical')
 
@@ -1633,20 +1644,22 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
 
         {/* KPI tiles — one set per manually-defined group */}
         {groups.map(group => {
-          // A group with its own `source` reads from ITS OWN fetched rows
-          // instead of the account-wide kpiRows — see KpiGroup.source.
-          const groupRows = group.source ? (accountData?.kpiRowsByGroup?.[group.id] ?? []) : kpiRows
-          const rc      = (b: any) => resolveCell(groupRows, b, ds.kpiGroupCol, group.groupVal)
+          // ONE resolver — the SAME function KpiGrid() and the server-side
+          // breach scan use, so this page and the Dashboard page can never
+          // disagree about which table a tile reads. Holds the
+          // tile.source -> group.source -> account-wide precedence.
+          const rc = makeKpiCellResolver(ds, group, accountData)
 
           // Independent-tiles group (see GroupTile) — own labels/bindings/
           // thresholds, separate from every other group on this account.
+          // Each tile may ALSO carry its own `source`, so pass the tile.
           if (group.tiles && group.tiles.length) {
             return (
               <div key={group.id} style={{ marginBottom: 10 }}>
                 <div className="ov-section-label">{group.name || 'Global'}</div>
                 <div className="ov-kpi-tiles">
                   {group.tiles.map(t => {
-                    const raw = rc(t.cell || undefined)
+                    const raw = rc(t.cell || undefined, t)
                     return <OvKpiTile key={t.key} label={t.label} value={raw} colorClass={getKpiColorClass(extractKpiValue(raw, t.kpiUnit).num, t)} />
                   })}
                 </div>

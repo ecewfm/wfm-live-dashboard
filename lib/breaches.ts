@@ -6,7 +6,7 @@
 // — whichever thresholds/KPI logic you see on screen is exactly what the
 // Cliq alert used to decide whether to fire.
 
-import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags, KpiUnit } from './types'
+import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags, KpiUnit, KpiGroup, GroupTile, CellBinding, KpiGroupSource } from './types'
 import { extractPercent, parseDurationToSeconds, formatSeconds, extractKpiValue, formatKpiThresholdLabel, resolveCell, type StatusThresholds } from './utils'
 
 // ── Normalize one raw agent row from a configured AgentSource ────────────────
@@ -41,35 +41,135 @@ export function normalizeAgentRow(row: Record<string, any>, src: AgentSource): R
   return out
 }
 
-// ── Which extra KPI tables does this account's config actually need? ───────
+// ── Which KPI tables does this account's config actually need? ────────────
 // CANONICAL — used by BOTH components/Dashboard.tsx (client fetch) AND
-// lib/cliqScan.ts (server fetch) so there is only ever one implementation of
-// "given a DataSourceConfig, which distinct per-group source tables need
-// fetching, and which group id(s) does each one feed" — same reasoning as
-// normalizeAgentRow() above (and the SAME class of client/server drift bug
-// that one was fixed for, avoided here by sharing this from the start
-// instead of writing it twice). Pure — no Supabase client, no I/O — each
-// caller does its own `.from(table).select('*').eq(accountCol, accountId)`
-// with its own client (anon client in the browser, service/anon in
-// cliqScan.ts), then threads the results back keyed by group id the same
-// way via kpiRowsByGroup.
-export interface KpiGroupSourceQuery {
-  key:        string    // dedup key, "table::accountCol" — identical source config shared by multiple groups fetches once
+// lib/cliqScan.ts (server fetch), via fetchKpiSourceRows() below, so there is
+// only ever one implementation of "given a DataSourceConfig, which distinct
+// alternate tables need fetching" — same reasoning as normalizeAgentRow()
+// above (and the SAME class of client/server drift bug that one was fixed
+// for). Pure — no Supabase client, no I/O.
+//
+// Walks TWO levels now: a whole group's `source` (KpiGroup.source) AND an
+// individual tile's (GroupTile.source). Dedup is unchanged — one query per
+// distinct table+accountCol — so homebase's two TALL tiles (LONGEST WAIT
+// TIME + ONLINE AGENTS, both on homebase_omni_queue_stats) still cost
+// exactly ONE query, shared with the group if it happens to point there too.
+export interface KpiSourceQuery {
+  key:        string    // "table::accountCol" — ALSO the AccountData.kpiRowsBySource key, so there is no separate fan-out mapping to get wrong
   table:      string
   accountCol: string
-  groupIds:   string[]
 }
 
-export function collectKpiGroupSourceQueries(ds: DataSourceConfig): KpiGroupSourceQuery[] {
-  const map = new Map<string, KpiGroupSourceQuery>()
+/** The ONE identity an alternate KPI source is addressed by. The planner
+ *  below (write side) and makeKpiCellResolver()/freshestAcrossSources()
+ *  (read side) all derive their key from HERE, so "which bucket do these rows
+ *  go in" and "which bucket does this tile read" are the same call rather
+ *  than two string templates that have to be kept spelled identically. */
+export function kpiSourceKey(src: KpiGroupSource): string {
+  return `${src.table}::${src.accountCol || 'account_id'}`
+}
+
+/** The ONE precedence rule: tile.source -> group.source -> the account-wide
+ *  ds.kpiTable (returned as null). Imported by components/Dashboard.tsx,
+ *  lib/cliqScan.ts (indirectly, via the resolver) AND
+ *  components/SettingsModal.tsx, so the Settings editor's idea of which table
+ *  a slot binds against is literally the same function the renderers and the
+ *  Cliq/RTA scan resolve with — bind-time and read-time cannot disagree.
+ *
+ *  Truthiness of the OBJECT, not fullness of its contents, exactly matching
+ *  the existing `group.source ? ... : kpiRows` test: a source toggled ON but
+ *  with no table picked yet resolves to an EMPTY row set, so the tile shows
+ *  '--' rather than silently reading a different table. */
+export function effectiveKpiSource(group: KpiGroup, tile?: GroupTile | null): KpiGroupSource | null {
+  if (tile?.source) return tile.source
+  return group.source ?? null
+}
+
+export function collectKpiSourceQueries(ds: DataSourceConfig): KpiSourceQuery[] {
+  const map = new Map<string, KpiSourceQuery>()
+  const add = (src: KpiGroupSource | null | undefined) => {
+    if (!src || !src.table) return
+    const key = kpiSourceKey(src)
+    if (!map.has(key)) map.set(key, { key, table: src.table, accountCol: src.accountCol || 'account_id' })
+  }
   ;(ds.groups ?? []).forEach(g => {
-    if (!g.source || !g.source.table) return
-    const accountCol = g.source.accountCol || 'account_id'
-    const key = `${g.source.table}::${accountCol}`
-    if (!map.has(key)) map.set(key, { key, table: g.source.table, accountCol, groupIds: [] })
-    map.get(key)!.groupIds.push(g.id)
+    add(g.source)
+    // Per-TILE sources (GroupTile.source). Array.isArray, NOT `g.tiles ?? []`:
+    // lib/cliqScan.ts does a bare `acc.data_source as DataSourceConfig` with
+    // NO migrateDataSource() call, so on the server this walks RAW JSONB — a
+    // malformed non-array `tiles` would otherwise throw inside
+    // fetchAccountData() and take that account's whole scan down.
+    ;(Array.isArray(g.tiles) ? g.tiles : []).forEach(t => add(t?.source))
   })
   return [...map.values()]
+}
+
+/** How a caller fetches one table's rows for one account. The ONLY thing
+ *  each side contributes — the browser passes its anon Supabase client, the
+ *  scan passes the server one. Everything else (which tables, dedup, how the
+ *  results are keyed) is decided here, once. */
+export type KpiSourceFetcher = (table: string, accountCol: string, accountId: string) => Promise<Record<string, any>[]>
+
+/** CANONICAL execute + fan-out. This replaces the two BYTE-IDENTICAL loops
+ *  that used to live in components/Dashboard.tsx (fetchAccount) and
+ *  lib/cliqScan.ts (fetchAccountData) — the half of the per-group-source
+ *  machinery that was never actually shared. Those two had already drifted
+ *  by a token elsewhere in the same pair of functions (cliqScan defaults
+ *  `ds.kpiAccountCol || 'account_id'` for the account-wide fetch, Dashboard
+ *  does not), which is why this one is not left to "mirror it carefully". */
+export async function fetchKpiSourceRows(
+  ds: DataSourceConfig, accountId: string, fetchTable: KpiSourceFetcher
+): Promise<Record<string, Record<string, any>[]>> {
+  const queries = collectKpiSourceQueries(ds)
+  const results = await Promise.all(queries.map(q => fetchTable(q.table, q.accountCol, accountId)))
+  const out: Record<string, Record<string, any>[]> = {}
+  queries.forEach((q, i) => { out[q.key] = results[i] ?? [] })
+  return out
+}
+
+// ── The ONE "which rows does this binding read, and how" function ─────────
+// CANONICAL — used by buildBreaches() and collectRtaKpiSignals() below AND by
+// KpiGrid()/OverviewCard() in components/Dashboard.tsx. Same reasoning as
+// normalizeAgentRow() above, and for the same documented reason: CLAUDE.md
+// records TWO separate incidents where a client-side copy and a server-side
+// copy of exactly this kind of per-binding step drifted apart silently.
+//
+// Before per-tile sources this was the one-liner
+//     group.source ? (accountData.kpiRowsByGroup?.[group.id] ?? []) : kpiRows
+// pasted at FOUR sites (lib/breaches.ts twice, components/Dashboard.tsx
+// twice) with a fifth implicit copy inside KpiGrid's `rows` prop. A one-line
+// ternary survives being copied; three-tier precedence plus a filtering rule
+// does not — so there is now exactly one implementation to call.
+export function makeKpiCellResolver(
+  ds: DataSourceConfig, group: KpiGroup, accountData: AccountData | undefined
+): (binding?: CellBinding | null, tile?: GroupTile | null) => string {
+  const accountRows = accountData?.kpiRows ?? []
+  return (binding, tile) => {
+    const src = effectiveKpiSource(group, tile)
+
+    // No override anywhere up the chain -> the account-wide table, filtered
+    // by this group's LOB value. Byte-for-byte the call every one of those
+    // five sites made before this function existed.
+    if (!src) return resolveCell(accountRows, binding ?? undefined, ds.kpiGroupCol, group.groupVal)
+
+    // An alternate table's rows. `?? []` mirrors the EXISTING semantics of a
+    // source toggled ON with no table picked yet (collectKpiSourceQueries
+    // skips it, so nothing was fetched): show '--', never silently fall back
+    // to a DIFFERENT table's data.
+    const rows = accountData?.kpiRowsBySource?.[kpiSourceKey(src)] ?? []
+
+    // ds.kpiGroupCol/group.groupVal describe the shape of the ACCOUNT-WIDE
+    // table. They are deliberately NOT applied to a foreign table, which has
+    // no such column and carries its own row key instead — the same rule
+    // pickCell() in components/SettingsModal.tsx already applies to the row
+    // key ("a column from a completely different table that may not even
+    // exist here"). Passing them through filters every row away (r[groupCol]
+    // is undefined, so '' !== groupVal) and only survives via resolveCell's
+    // matchCol-only rescue — i.e. today it is either a no-op or a silent
+    // '--'. This is a deterministic rule about the CONFIG, not a sniff of
+    // whichever rows a given poll happened to return.
+    return resolveCell(rows, binding ?? undefined)
+  }
 }
 
 // ── Shared warn/crit evaluation — used by both the breach-row builder below
@@ -137,13 +237,16 @@ export function collectRtaKpiSignals(
 
   ;(ds.groups ?? []).forEach(group => {
     const g = group.name || 'KPI'
-    const groupRows = group.source ? (accountData.kpiRowsByGroup?.[group.id] ?? []) : kpiRows
-    const rc = (b: any) => resolveCell(groupRows, b, ds.kpiGroupCol, group.groupVal)
+    // ONE resolver — holds the tile.source -> group.source -> account-wide
+    // precedence. Pass the TILE for independent-tile groups so a per-tile
+    // source is honoured; the legacy `cells` calls below pass no tile and
+    // therefore behave exactly as before.
+    const rc = makeKpiCellResolver(ds, group, accountData)
 
     if (group.tiles && group.tiles.length) {
       group.tiles.forEach(tile => {
         if (!tile.cell) return
-        push(`${group.id}:${tile.key}`, g, tile.label, rc(tile.cell), tile.targ, tile, tile.kpiUnit, tile)
+        push(`${group.id}:${tile.key}`, g, tile.label, rc(tile.cell, tile), tile.targ, tile, tile.kpiUnit, tile)
       })
       return
     }
@@ -211,6 +314,63 @@ export function mostRecentUpdatedAt(rows: Record<string, any>[], colName: string
   return best
 }
 
+// ── How fresh is this account's data, across EVERY table it reads? ────────
+// CANONICAL — used by components/Dashboard.tsx's page overlay AND its
+// OverviewCard AND lib/cliqScan.ts's suppression gate, so the "DATA NOT IN
+// SYNC" stamp and the scan's decision to suppress Cliq/Workforce Logs/RTA
+// Logs can never disagree about whether an account is live.
+//
+// Why this has to exist now: until per-tile sources, every staleness check
+// read ONLY accountData.kpiRows + ds.kpiUpdatedAt, and KpiGroupSource
+// .updatedAtCol was a dead field (written by Settings, read by nothing).
+// With one card legitimately mixing three tables that is no longer
+// defensible — homebase's Omni-Channel supervisor panel is deliberately not
+// re-navigated each scrape cycle, so homebase_omni_queue_stats can freeze
+// while the phones table keeps updating, and a frozen ONLINE AGENTS would
+// otherwise sit under a green "Live" dot and keep firing Cliq alerts and RTA
+// Logs forever.
+//
+// OLDEST wins: if ANY table feeding this account is stale, the account is
+// stale. A source with a blank updatedAtCol contributes NOTHING, so with
+// today's saved configs (where that field is blank everywhere) this returns
+// exactly what mostRecentUpdatedAt(accountData.kpiRows, ds.kpiUpdatedAt)
+// returns — zero behaviour change until someone fills one in.
+export function freshestAcrossSources(
+  ds: DataSourceConfig, accountData: AccountData | undefined
+): string | undefined {
+  if (!accountData) return undefined
+  const stamps: string[] = []
+
+  const accountWide = mostRecentUpdatedAt(accountData.kpiRows ?? [], ds.kpiUpdatedAt)
+  if (accountWide) stamps.push(accountWide)
+
+  // Every DISTINCT alternate source this config actually references, group-
+  // level and tile-level alike. Deduped by kpiSourceKey so a table used by
+  // three tiles is considered once.
+  const seen = new Set<string>()
+  const consider = (src: KpiGroupSource | null | undefined) => {
+    if (!src || !src.table || !src.updatedAtCol) return
+    const key = kpiSourceKey(src)
+    if (seen.has(key)) return
+    seen.add(key)
+    const rows = accountData.kpiRowsBySource?.[key] ?? []
+    const t = mostRecentUpdatedAt(rows, src.updatedAtCol)
+    // A referenced source with an updatedAtCol configured but NO rows back
+    // is a genuine problem (wrong table, wrong accountCol, scraper down),
+    // but it has no timestamp to contribute — leaving it out keeps this
+    // function honest; the unresolved-binding log in lib/cliqScan.ts is
+    // what makes that case visible.
+    if (t) stamps.push(t)
+  }
+  ;(ds.groups ?? []).forEach(g => {
+    consider(g.source)
+    ;(Array.isArray(g.tiles) ? g.tiles : []).forEach(t => consider(t?.source))
+  })
+
+  if (!stamps.length) return undefined   // nothing to judge -> isDataStale(undefined) === false, unchanged from today
+  return stamps.reduce((oldest, s) => (new Date(s).getTime() < new Date(oldest).getTime() ? s : oldest))
+}
+
 // ── Build breaches for one account ────────────────────────────────────────────
 // agentTimers: live in-memory ticking timers, keyed `${accountId}:${agentName}`
 // — a browser-UI-only feature (Dashboard.tsx ticks these every second between
@@ -250,8 +410,10 @@ export function buildBreaches(
     // of the account-wide kpiRows — e.g. Flex's "First Reply Time" group
     // reading flex_overwatch_first_reply while every other group keeps
     // reading flex_explore_tiles via the shared kpiRows below.
-    const groupRows = group.source ? (accountData.kpiRowsByGroup?.[group.id] ?? []) : kpiRows
-    const rc      = (b: any) => resolveCell(groupRows, b, ds.kpiGroupCol, group.groupVal)
+    // ONE resolver — see makeKpiCellResolver(). Must stay identical to the
+    // one collectRtaKpiSignals() uses above, which is why it is the same
+    // function rather than a second copy of the same ternary.
+    const rc = makeKpiCellResolver(ds, group, accountData)
 
     // Independent-tiles group (see GroupTile in lib/types.ts) — every tile
     // carries its OWN label/binding/thresholds, entirely separate from every
@@ -259,7 +421,7 @@ export function buildBreaches(
     if (group.tiles && group.tiles.length) {
       group.tiles.forEach(tile => {
         if (!tile.cell) return
-        checkKpi(rc(tile.cell), tile.targ, tile, g, tile.label, tile.kpiUnit, tile.sendToCliq)
+        checkKpi(rc(tile.cell, tile), tile.targ, tile, g, tile.label, tile.kpiUnit, tile.sendToCliq)
       })
       return
     }

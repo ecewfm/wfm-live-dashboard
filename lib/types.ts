@@ -62,12 +62,30 @@ export interface AccountData {
   status:  Record<string, any> | null
   calls:   Record<string, any>[]
   syncing?: boolean
-  // Per-group KPI rows for any KpiGroup with its own `source` override (see
-  // KpiGroup.source below) — keyed by KpiGroup.id. A group WITHOUT `source`
-  // is absent here and keeps reading the shared `kpiRows` above exactly as
-  // before; this is additive, never a replacement for the legacy single-
-  // table path.
-  kpiRowsByGroup?: Record<string, Record<string, any>[]>
+  // Rows fetched from every ALTERNATE KPI table this account's config points
+  // at — keyed by the SOURCE's own identity, `${table}::${accountCol}` (see
+  // kpiSourceKey() in lib/breaches.ts), NOT by group id.
+  //
+  // Keyed by source rather than by group because a per-TILE source
+  // (GroupTile.source) has no group id of its own to hang rows on, and
+  // because two tiles — or a tile and a group, or tiles in two different
+  // groups — pointing at the same table must share ONE fetch. Keying this
+  // way makes a group-level source a special case of a tile-level one
+  // instead of a second mechanism.
+  //
+  // WRITTEN only by lib/breaches.ts's fetchKpiSourceRows(); READ only by
+  // lib/breaches.ts's makeKpiCellResolver() and freshestAcrossSources(). If
+  // you are about to read this field anywhere else, read CLAUDE.md's
+  // normalizeAgentRow incident first — that is the whole reason it is
+  // addressed through one shared function rather than inline.
+  //
+  // A group/tile with no `source` is absent here and keeps reading the
+  // shared `kpiRows` above exactly as before. Rebuilt on every poll
+  // (components/Dashboard.tsx) and every scan (lib/cliqScan.ts) and
+  // persisted NOWHERE, so this rename (it was `kpiRowsByGroup`, keyed by
+  // KpiGroup.id) is purely in-memory — nothing saved in Supabase or
+  // localStorage changes shape.
+  kpiRowsBySource?: Record<string, Record<string, any>[]>
 }
 
 // Per-KPI Workforce RTA Logs (Zoho) reporting flags — both absent/false means
@@ -194,6 +212,28 @@ export interface GroupTile extends RtaReportFlags {
   key:          string   // stable id, e.g. 'tile_1699...' (or 'sla'/'wait'/etc./an extra.key when seeded from a legacy group's existing bindings)
   label:        string
   cell:         CellBinding | null
+  // NEW, optional: when set, THIS TILE binds against its own table (see
+  // KpiGroupSource above) instead of whatever the rest of its group reads —
+  // so ONE KPI card can mix physically different tables. Homebase's "CHAT"
+  // group is the case this exists for: its "SLA" tile reads the WIDE
+  // homebase_chat_kpis (one row per account, value in avg_sla_pct) while
+  // "LONGEST WAIT TIME"/"ONLINE AGENTS" read the TALL
+  // homebase_omni_queue_stats (one row per metric, pinned by the binding's
+  // own matchCol/matchVal, value in `value`) — without splitting them into
+  // three separate groups the user doesn't want.
+  // Precedence is exactly three tiers, resolved in ONE place —
+  // effectiveKpiSource()/makeKpiCellResolver() in lib/breaches.ts:
+  //     tile.source  ->  group.source  ->  the account-wide ds.kpiTable
+  // Absent/null = LEGACY behavior: this tile reads whatever its GROUP reads,
+  // exactly as before this field existed, so no already-configured tile on
+  // any existing account needs to be touched or migrated.
+  // INDEPENDENT-TILES groups only — the legacy `cells` path is a
+  // Record<string, CellBinding> with no per-entry record to hang a table on,
+  // and a source stored on CellBinding would be wiped by clearCell() in
+  // components/SettingsModal.tsx every time a binding is re-picked.
+  // NEVER read this directly — go through lib/breaches.ts's
+  // effectiveKpiSource(), which is also what the Settings editor calls.
+  source?:      KpiGroupSource | null
   warn:         number
   crit:         number
   targ:         number
