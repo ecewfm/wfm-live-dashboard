@@ -8,6 +8,12 @@
 // role column) stops an import. A bad row is skipped, an account name that
 // isn't in WFM Live yet is ignored, and both are reported — the rest goes in.
 //
+// ONLY PEOPLE WITH A REAL ACCOUNT ARE CREATED: someone whose listed accounts
+// are ALL missing from WFM Live is shown in the preview (with the account
+// names from the file) but not created on commit. Partially matched people
+// are created with the accounts that exist. Super users are always eligible —
+// their role covers every account.
+//
 // RE-RUNNABLE AND ADDITIVE: importing the same file again creates anyone new
 // and ADDS any of a person's listed accounts they don't have yet — which is
 // how an account that didn't exist on the first import gets picked up once
@@ -19,7 +25,7 @@
 
 import { requireRole, errorResponse, json, AuthError, admin, validateAccountIds } from '@/lib/authServer'
 import { provisionUser } from '@/lib/userAdmin'
-import { parseCsv, parseRoster, type AccountRef, type RosterUser, type RosterIssue } from '@/lib/rosterImport'
+import { parseCsv, parseRoster, planImport, type AccountRef, type ExistingUser } from '@/lib/rosterImport'
 import { can, type UserRole } from '@/lib/authEmail'
 
 /** Guard against someone uploading a 500MB file to a serverless function. */
@@ -48,8 +54,6 @@ async function gridFromExcel(buf: ArrayBuffer): Promise<string[][]> {
   return grid
 }
 
-interface ExistingUser { id: string; username: string; role: UserRole; accountIds: string[] }
-
 /** Every current user keyed by LOWERCASE username, with their accounts. */
 async function loadExisting(): Promise<Map<string, ExistingUser>> {
   const db = admin()
@@ -69,34 +73,6 @@ async function loadExisting(): Promise<Map<string, ExistingUser>> {
     out.set(p.username.toLowerCase(), { id: p.id, username: p.username, role: p.role as UserRole, accountIds: accountsOf.get(p.id) ?? [] })
   }
   return out
-}
-
-interface Plan {
-  willCreate: RosterUser[]
-  willAddAccounts: { id: string; username: string; add: string[]; ignoredAccounts: string[] }[]
-  upToDate: string[]
-  extraIssues: RosterIssue[]
-}
-
-/** Decide, per person in the file, whether to create, top up, or leave alone. */
-function plan(users: RosterUser[], existing: Map<string, ExistingUser>): Plan {
-  const p: Plan = { willCreate: [], willAddAccounts: [], upToDate: [], extraIssues: [] }
-  for (const u of users) {
-    const have = existing.get(u.username.toLowerCase())
-    if (!have) { p.willCreate.push(u); continue }
-
-    if (have.role !== u.role) {
-      p.extraIssues.push({
-        row: u.sourceRows[0], severity: 'warning',
-        message: `"${have.username}" already exists as ${have.role}; the file says ${u.role}. Their role is left as it is — change it in the Users list if needed.`,
-      })
-    }
-    // A superuser already sees everything; nothing to add.
-    const add = have.role === 'superuser' ? [] : u.accountIds.filter(a => !have.accountIds.includes(a))
-    if (add.length) p.willAddAccounts.push({ id: have.id, username: have.username, add, ignoredAccounts: u.ignoredAccounts })
-    else p.upToDate.push(have.username)
-  }
-  return p
 }
 
 export async function POST(req: Request) {
@@ -129,7 +105,9 @@ export async function POST(req: Request) {
 
     const parsed = parseRoster(grid, accounts)
     const existing = await loadExisting()
-    const { willCreate, willAddAccounts, upToDate, extraIssues } = plan(parsed.users, existing)
+    // willSkip = new people with no account in WFM Live: listed in the
+    // preview, never created (see planImport in lib/rosterImport.ts).
+    const { willCreate, willSkip, willAddAccounts, upToDate, extraIssues } = planImport(parsed.users, existing)
     const issues = [...parsed.issues, ...extraIssues]
 
     // Only a file-level problem (no username/role column) blocks the import.
@@ -140,6 +118,7 @@ export async function POST(req: Request) {
       return json({
         mode: 'preview',
         willCreate,
+        willSkip,
         willAddAccounts,
         upToDate,
         issues,
@@ -162,13 +141,15 @@ export async function POST(req: Request) {
         // Re-checked server-side even though only superusers reach here, so
         // the rule stays in one place if RTAs are ever given import rights.
         await validateAccountIds(me, u.accountIds)
+        // willCreate never contains an RTA / team lead without an account —
+        // and provisionUser refuses one anyway, so this holds even if the
+        // planning step is ever changed carelessly.
         await provisionUser({
           username: u.username,
           fullName: u.fullName,
           role: u.role,
           accountIds: u.accountIds,
           isActive: u.isActive,
-          allowNoAccounts: true,       // their accounts may not exist yet
         })
         created.push(u.username)
       } catch (e) {
@@ -193,7 +174,10 @@ export async function POST(req: Request) {
       }
     }
 
-    return json({ mode: 'commit', created, accountsAdded: topped, upToDate, failed, issues })
+    return json({
+      mode: 'commit', created, accountsAdded: topped, upToDate, failed, issues,
+      skipped: willSkip.map(u => ({ username: u.username, accounts: u.ignoredAccounts })),
+    })
   } catch (e) { return errorResponse(e) }
 }
 

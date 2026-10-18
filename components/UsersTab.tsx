@@ -349,33 +349,63 @@ function RosterImport({ onDone, accountLabel }: { onDone: () => Promise<void>; a
 
           {preview && (() => {
             const nCreate = preview.willCreate.length
+            const nSkip   = preview.willSkip?.length ?? 0
             const nTopUp  = preview.willAddAccounts.length
             return (
               <div style={{ marginTop: 8 }}>
                 <p>
-                  <strong>{nCreate}</strong> new user(s)
+                  <strong>{nCreate}</strong> will be added
+                  {nSkip > 0 && <> · <strong>{nSkip}</strong> won&apos;t be added (no WFM Live account)</>}
                   {nTopUp > 0 && <> · <strong>{nTopUp}</strong> existing user(s) get new accounts</>}
                   {preview.upToDate.length > 0 && <> · <strong>{preview.upToDate.length}</strong> already up to date</>}
                 </p>
 
                 {nCreate > 0 && (
-                  <table className="sm-table">
-                    <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Accounts</th><th>Not in WFM Live yet (ignored)</th></tr></thead>
-                    <tbody>
-                      {preview.willCreate.map((u: any) => (
-                        <tr key={u.username}>
-                          <td>{u.username}</td><td>{u.fullName}</td>
-                          <td>{ROLE_LABELS[u.role as UserRole]}</td>
-                          <td>
-                            {u.role === 'superuser'
-                              ? <span className="sm-metric-sub">all accounts</span>
-                              : u.accountIds.map(accountLabel).join(', ') || <span className="sm-metric-sub">none yet</span>}
-                          </td>
-                          <td className="sm-metric-sub">{u.ignoredAccounts.join(', ') || '—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <>
+                    <div className="ds-mini-label" style={{ marginTop: 10 }}>Will be added</div>
+                    <table className="sm-table">
+                      <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Accounts</th><th>Not in WFM Live yet (ignored)</th></tr></thead>
+                      <tbody>
+                        {preview.willCreate.map((u: any) => (
+                          <tr key={u.username}>
+                            <td>{u.username}</td><td>{u.fullName}</td>
+                            <td>{ROLE_LABELS[u.role as UserRole]}</td>
+                            <td>
+                              {u.role === 'superuser'
+                                ? <span className="sm-metric-sub">all accounts</span>
+                                : u.accountIds.map(accountLabel).join(', ')}
+                            </td>
+                            <td className="sm-metric-sub">{u.ignoredAccounts.join(', ') || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                )}
+
+                {/* Shown so it's clear who was left out and why — but these
+                    people are NOT created when you confirm. */}
+                {nSkip > 0 && (
+                  <>
+                    <div className="ds-mini-label" style={{ marginTop: 10, color: 'var(--danger)' }}>
+                      Won&apos;t be added — none of their accounts exist in WFM Live
+                    </div>
+                    <table className="sm-table" style={{ opacity: 0.75 }}>
+                      <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Accounts in the file</th></tr></thead>
+                      <tbody>
+                        {preview.willSkip.map((u: any) => (
+                          <tr key={u.username}>
+                            <td>{u.username}</td><td>{u.fullName}</td>
+                            <td>{ROLE_LABELS[u.role as UserRole]}</td>
+                            <td className="sm-metric-sub">{u.ignoredAccounts.join(', ') || '(none listed)'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="sm-desc">
+                      Once their account is created in WFM Live, import this file again and they&apos;ll be added.
+                    </p>
+                  </>
                 )}
 
                 {nTopUp > 0 && (
@@ -405,14 +435,16 @@ function RosterImport({ onDone, accountLabel }: { onDone: () => Promise<void>; a
                 )}
 
                 <button className="sm-btn-save" disabled={busy || !preview.canCommit} onClick={() => send('commit')}>
-                  {busy ? 'Importing…' : 'Import'}
+                  {busy ? 'Importing…' : nCreate > 0 ? `Add ${nCreate} user(s)` : 'Import'}
                 </button>
                 <button className="sm-btn-cancel" disabled={busy} onClick={reset}>Cancel</button>
                 {!preview.canCommit && (
                   <p className="sm-desc">
                     {preview.issues.some((i: any) => i.severity === 'error')
                       ? "This file can't be read — see above. Nothing has been written."
-                      : 'Nothing to do — everyone in this file is already set up.'}
+                      : nSkip > 0
+                        ? 'Nothing to add — everyone new in this file is missing a WFM Live account.'
+                        : 'Nothing to do — everyone in this file is already set up.'}
                   </p>
                 )}
               </div>
@@ -422,10 +454,16 @@ function RosterImport({ onDone, accountLabel }: { onDone: () => Promise<void>; a
           {result && (
             <div style={{ marginTop: 8 }}>
               <p>
-                <strong>{result.created.length}</strong> created
+                <strong>{result.created.length}</strong> added
                 {result.accountsAdded?.length > 0 && <> · <strong>{result.accountsAdded.length}</strong> given new accounts</>}
+                {result.skipped?.length > 0 && <> · <strong>{result.skipped.length}</strong> not added (no WFM Live account)</>}
                 {result.failed?.length > 0 && <> · <strong>{result.failed.length}</strong> failed</>}
               </p>
+              {result.skipped?.length > 0 && (
+                <p className="sm-desc">
+                  Not added: {result.skipped.map((s: any) => `${s.username}${s.accounts.length ? ` (${s.accounts.join(', ')})` : ''}`).join(', ')}
+                </p>
+              )}
               {result.created.length > 0 && (
                 <p className="sm-desc">
                   New users start on the default password and choose their own at first sign-in: {result.created.join(', ')}

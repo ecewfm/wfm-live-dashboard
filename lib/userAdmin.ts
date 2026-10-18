@@ -24,13 +24,6 @@ export interface ProvisionInput {
   /** Defaults to DEFAULT_PASSWORD with a forced reset on first sign-in. */
   password?: string
   isActive?: boolean
-  /**
-   * Let an RTA / team lead be created with no accounts. Only the roster
-   * import sets this: its accounts may not exist in WFM Live yet, and the
-   * person should still get a login (they see an empty dashboard until one is
-   * assigned). The single-create form keeps requiring at least one.
-   */
-  allowNoAccounts?: boolean
 }
 
 export interface ProvisionResult {
@@ -53,7 +46,9 @@ export async function provisionUser(input: ProvisionInput): Promise<ProvisionRes
   const bad = isValidUsername(username)
   if (bad) throw new AuthError(400, bad)
   const fullName = (input.fullName || '').trim() || username
-  if (input.role !== 'superuser' && input.accountIds.length === 0 && !input.allowNoAccounts) {
+  // No exceptions: every RTA / team lead login must have an account to look
+  // at. The roster import relies on this as a backstop for its own rule.
+  if (input.role !== 'superuser' && input.accountIds.length === 0) {
     throw new AuthError(400, `A ${input.role === 'rta' ? 'RTA' : 'team lead'} needs at least one account.`)
   }
   // A superuser sees everything by role; account rows would be dead data.

@@ -275,15 +275,61 @@ export function parseRoster(grid: string[][], accounts: AccountRef[]): ParsedRos
     }
   })
 
-  // Reported once per person, after merging, so a user listed on two rows
-  // isn't warned about twice.
-  for (const u of byUsername.values()) {
-    if (u.role !== 'superuser' && u.accountIds.length === 0) {
-      warn(u.sourceRows[0],
-        `"${u.username}" has no accounts in WFM Live yet. They'll still be created, and will see an empty dashboard ` +
-        `until one is assigned — or import this file again once the account exists and it'll be added automatically.`)
-    }
-  }
+  // People with no matching account at all are NOT warned about here — the
+  // parser doesn't know who already exists. planImport() below decides what
+  // happens to them and lists them in their own "won't be imported" group.
 
   return { users: [...byUsername.values()], issues, ignoredColumns: unknown }
+}
+
+// ── Plan: what the import will actually do ──────────────────────────────────
+export interface ExistingUser { id: string; username: string; role: UserRole; accountIds: string[] }
+
+export interface ImportPlan {
+  /** New people with at least one real WFM Live account (or super users). */
+  willCreate: RosterUser[]
+  /**
+   * New people whose accounts are ALL missing from WFM Live. Shown in the
+   * preview so the operator can see who was left out and why, but never
+   * created: a login with no account to look at is just a blank dashboard.
+   * Importing the same file again after their account exists picks them up.
+   */
+  willSkip: RosterUser[]
+  /** Existing people who'll gain accounts they don't have yet. Additive only. */
+  willAddAccounts: { id: string; username: string; add: string[]; ignoredAccounts: string[] }[]
+  /** Existing people with nothing to change. */
+  upToDate: string[]
+  extraIssues: RosterIssue[]
+}
+
+/**
+ * Decide, per person in the file: create, skip, top up, or leave alone.
+ * `existing` is keyed by LOWERCASE username.
+ *
+ * Pure — no I/O — so the rules can be unit-tested without a database.
+ */
+export function planImport(users: RosterUser[], existing: Map<string, ExistingUser>): ImportPlan {
+  const p: ImportPlan = { willCreate: [], willSkip: [], willAddAccounts: [], upToDate: [], extraIssues: [] }
+  for (const u of users) {
+    const have = existing.get(u.username.toLowerCase())
+
+    if (!have) {
+      // Super users see every account by role, so they never "lack" one.
+      if (u.role !== 'superuser' && u.accountIds.length === 0) p.willSkip.push(u)
+      else p.willCreate.push(u)
+      continue
+    }
+
+    if (have.role !== u.role) {
+      p.extraIssues.push({
+        row: u.sourceRows[0], severity: 'warning',
+        message: `"${have.username}" already exists as ${have.role}; the file says ${u.role}. Their role is left as it is — change it in the Users list if needed.`,
+      })
+    }
+    // A superuser already sees everything; nothing to add.
+    const add = have.role === 'superuser' ? [] : u.accountIds.filter(a => !have.accountIds.includes(a))
+    if (add.length) p.willAddAccounts.push({ id: have.id, username: have.username, add, ignoredAccounts: u.ignoredAccounts })
+    else p.upToDate.push(have.username)
+  }
+  return p
 }
