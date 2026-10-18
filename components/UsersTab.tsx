@@ -117,6 +117,40 @@ export default function UsersTab({ accounts }: Props) {
 
   const accountLabel = (id: string) => accounts.find(a => a.id === id)?.display_name || id
 
+  // ── Column filters ────────────────────────────────────────────────────────
+  // What each column "contains" for filtering. Accounts is multi-valued: a row
+  // passes if ANY of its accounts is ticked (tick "Flex" → everyone on Flex).
+  const cellValues = (u: UserProfile, key: ColKey): string[] => {
+    switch (key) {
+      case 'username': return [u.username]
+      case 'name':     return [u.fullName || NO_NAME]
+      case 'role':     return [ROLE_LABELS[u.role]]
+      case 'accounts': return u.role === 'superuser' ? [ALL_ACCOUNTS]
+                         : u.accountIds.length ? u.accountIds.map(accountLabel) : [NO_ACCOUNTS]
+      case 'status':   return [statusLabel(u)]
+    }
+  }
+  // Across columns it's AND; within a column, OR over the ticked values.
+  // `except` skips one column — used to count options the way Excel does
+  // (each column's counts reflect every OTHER column's filter).
+  const passes = (u: UserProfile, except?: ColKey) =>
+    COLUMNS.every(({ key }) => {
+      const sel = filters[key]
+      return key === except || !sel || cellValues(u, key).some(v => sel.has(v))
+    })
+  const visibleUsers = users.filter(u => passes(u))
+  const anyFilter = COLUMNS.some(({ key }) => filters[key] !== null)
+
+  const optionsFor = (key: ColKey): FilterOption[] => {
+    const counts = new Map<string, number>()
+    for (const u of users) for (const v of cellValues(u, key)) counts.set(v, 0)
+    for (const u of users) {
+      if (!passes(u, key)) continue
+      for (const v of new Set(cellValues(u, key))) counts.set(v, (counts.get(v) ?? 0) + 1)
+    }
+    return [...counts].map(([value, count]) => ({ value, count })).sort((a, b) => orderFor(key, a.value, b.value))
+  }
+
   // Mirrors the server's canAdminister(). Shown as disabled controls rather
   // than hidden rows, so an RTA can still SEE who else is on their accounts.
   const editable = (u: UserProfile): boolean => {
@@ -146,18 +180,57 @@ export default function UsersTab({ accounts }: Props) {
         {can.importUsers(me.role) && <RosterImport onDone={load} accountLabel={accountLabel} />}
       </div>
 
+      {!loading && users.length > 0 && (
+        <div className="sm-desc" style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 8px' }}>
+          <span>
+            {anyFilter
+              ? <>Showing <strong>{visibleUsers.length}</strong> of {users.length} users</>
+              : <>{users.length} user{users.length === 1 ? '' : 's'}</>}
+          </span>
+          {anyFilter && (
+            <button className="sm-btn-cancel" style={{ padding: '3px 10px', fontSize: 12 }}
+                    onClick={() => setFilters(EMPTY_FILTERS)}>
+              <i className="bx bx-x" /> Clear all filters
+            </button>
+          )}
+        </div>
+      )}
+
       {loading ? <p className="sm-desc">Loading…</p> : (
+       // Scrolls sideways on narrow screens instead of cutting off the actions.
+       <div style={{ overflowX: 'auto' }}>
         <table className="sm-table">
           <thead>
             <tr>
-              <th>Username</th><th>Name</th><th>Role</th><th>Accounts</th><th>Status</th><th />
+              {COLUMNS.map(({ key, label }) => (
+                <th key={key} style={{ whiteSpace: 'nowrap' }}>
+                  {label}
+                  {users.length > 0 && (
+                    <ColumnFilter
+                      label={label}
+                      options={optionsFor(key)}
+                      selected={filters[key]}
+                      onApply={next => setFilters(f => ({ ...f, [key]: next }))}
+                    />
+                  )}
+                </th>
+              ))}
+              <th />
             </tr>
           </thead>
           <tbody>
             {users.length === 0 && (
               <tr><td colSpan={6} className="sm-desc">No users yet.</td></tr>
             )}
-            {users.map(u => {
+            {users.length > 0 && visibleUsers.length === 0 && (
+              <tr><td colSpan={6} className="sm-desc">
+                No users match these filters.{' '}
+                <button className="sm-btn-cancel" style={{ padding: '2px 8px', fontSize: 12 }} onClick={() => setFilters(EMPTY_FILTERS)}>
+                  Clear all filters
+                </button>
+              </td></tr>
+            )}
+            {visibleUsers.map(u => {
               const mayEdit = editable(u) && u.id !== me.id
               return (
                 <tr key={u.id}>
@@ -173,22 +246,26 @@ export default function UsersTab({ accounts }: Props) {
                     {u.isActive ? 'Active' : 'Inactive'}
                     {u.mustResetPassword && <span className="sm-metric-sub"> · must set password</span>}
                   </td>
+                  {/* Icon buttons (labels on hover) — the text versions were
+                      wide enough to push this column off the edge of the modal. */}
                   <td style={{ whiteSpace: 'nowrap' }}>
                     <button className="acc-btn acc-btn-cfg" disabled={!mayEdit || busy}
-                            title={mayEdit ? 'Edit' : 'You cannot manage this user'}
+                            title={mayEdit ? 'Edit' : 'You cannot manage this user'} aria-label="Edit"
                             onClick={() => setDraft({ id: u.id, username: u.username, fullName: u.fullName ?? '', role: u.role, accountIds: [...u.accountIds], originalAccountIds: [...u.accountIds] })}>
-                      Edit
+                      <i className="bx bx-edit" />
                     </button>
                     <button className="acc-btn acc-btn-cfg" disabled={!editable(u) || busy}
-                            title="Reset to the default password"
+                            title="Reset to the default password" aria-label="Reset password"
                             onClick={() => resetPw(u)}>
-                      Reset password
+                      <i className="bx bx-key" />
                     </button>
                     <button className="acc-btn acc-btn-cfg" disabled={!mayEdit || busy}
+                            title={u.isActive ? 'Deactivate' : 'Reactivate'} aria-label={u.isActive ? 'Deactivate' : 'Reactivate'}
                             onClick={() => toggleActive(u)}>
-                      {u.isActive ? 'Deactivate' : 'Reactivate'}
+                      <i className={`bx ${u.isActive ? 'bx-user-x' : 'bx-user-check'}`} />
                     </button>
                     <button className="acc-btn acc-btn-cfg" disabled={!mayEdit || busy}
+                            title="Delete" aria-label="Delete"
                             onClick={() => setConfirmDelete(u)}>
                       <i className="bx bx-trash" />
                     </button>
