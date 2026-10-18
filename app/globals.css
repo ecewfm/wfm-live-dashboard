@@ -478,3 +478,44 @@ body {
 .auth-note code { font-size: 12px; }
 .auth-note-err { border-color: var(--danger); color: var(--danger); background: transparent; }
 .auth-note-ok  { border-color: var(--success); color: var(--success); background: transparent; }
+
+/* ── Signed-in user chip + sign out (topbar) ──────────────────────────────── */
+.user-chip {
+  display: flex; align-items: center; gap: 8px;
+  height: 34px; padding: 0 10px 0 4px; margin-left: 4px;
+  border: 1px solid var(--border); border-radius: 8px;
+  max-width: 220px;
+}
+.user-avatar {
+  width: 26px; height: 26px; border-radius: 6px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--primary-light); color: var(--primary);
+  font-size: 12px; font-weight: 700;
+}
+.user-meta { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+.user-name {
+  font-size: 12px; font-weight: 600; color: var(--text-main);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.user-role { font-size: 10px; font-weight: 600; letter-spacing: .02em; color: var(--text-muted); }
+.user-role.role-superuser { color: var(--primary); }
+.user-role.role-rta       { color: var(--info); }
+.user-role.role-team_lead { color: var(--success); }
+
+.btn-signout {
+  display: flex; align-items: center; gap: 6px;
+  height: 34px; padding: 0 12px; border-radius: 8px;
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-muted); cursor: pointer;
+  font-family: inherit; font-size: 12px; font-weight: 600;
+  transition: all 0.15s;
+}
+.btn-signout i { font-size: 16px; }
+.btn-signout:hover { color: var(--danger); border-color: var(--danger); }
+
+/* Narrow screens: keep the controls, drop the text. */
+@media (max-width: 900px) {
+  .user-meta, .btn-signout span { display: none; }
+  .user-chip { padding: 0 4px; }
+  .btn-signout { padding: 0 9px; }
+}

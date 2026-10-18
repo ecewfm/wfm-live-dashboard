@@ -738,12 +738,20 @@ export default function Dashboard() {
             <button className="btn-icon" onClick={() => accounts.forEach(id => fetchAccount(id, dataSources[id]))} title="Refresh">
               <i className="bx bx-refresh" />
             </button>
-            <button
-              className="btn-icon"
-              onClick={doSignOut}
-              title={`Signed in as ${profile.username} (${ROLE_LABELS[profile.role]}) — sign out`}
-            >
+            {/* Who you are + sign out, always visible. Showing the role here
+                matters once there are several kinds of login: it's the
+                quickest way to tell why a Settings button is missing, or to
+                confirm you're testing as the team lead you think you are. */}
+            <div className="user-chip" title={profile.fullName || profile.username}>
+              <span className="user-avatar">{(profile.fullName || profile.username).charAt(0).toUpperCase()}</span>
+              <span className="user-meta">
+                <span className="user-name">{profile.username}</span>
+                <span className={`user-role role-${profile.role}`}>{ROLE_LABELS[profile.role]}</span>
+              </span>
+            </div>
+            <button className="btn-signout" onClick={doSignOut} title="Sign out">
               <i className="bx bx-log-out" />
+              <span>Sign out</span>
             </button>
           </div>
         </div>

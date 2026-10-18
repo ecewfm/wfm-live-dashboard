@@ -49,8 +49,55 @@ export async function signIn(username: string, password: string): Promise<SignIn
   return { ok: true, profile }
 }
 
+/**
+ * Sign out of THIS browser only.
+ *
+ * supabase-js defaults to scope 'global', which revokes every session the
+ * user has — so signing out on one wallboard screen would silently kick the
+ * same login off every other screen and laptop too. 'local' revokes just
+ * this session's refresh token server-side, which is what a person clicking
+ * "Sign out" actually means. (Deactivating a user is how you end all of
+ * their sessions at once — see setActive in lib/userAdmin.ts.)
+ *
+ * Never throws, and ALWAYS leaves this browser signed out — which supabase-js
+ * does NOT guarantee on its own. Read auth-js's _signOut (2.108.2): if the
+ * server revoke fails with anything other than 401/403/404 — a dropped
+ * connection, a 5xx — it returns `{ error }` early and skips _removeSession().
+ * It doesn't throw either. So a plain `await signOut()` on a flaky network
+ * shows the login screen, and the next page refresh silently signs the
+ * person straight back in. clearLocalSession() closes that gap.
+ */
 export async function signOut(): Promise<void> {
-  await supabase.auth.signOut()
+  let failed = false
+  try {
+    const { error } = await supabase.auth.signOut({ scope: 'local' })
+    failed = !!error
+  } catch {
+    failed = true
+  }
+  // In this case the refresh token was NOT revoked server-side; it stays
+  // valid until it expires. Removing it from the browser is the most we can
+  // do offline, and it's what matters for "this screen is now signed out".
+  if (failed) clearLocalSession()
+}
+
+/** Remove the persisted session from storage without a network call. */
+function clearLocalSession(): void {
+  try {
+    // The exact key the client is using. auth-js keeps it on the instance
+    // (GoTrueClient: `this.storageKey = settings.storageKey`); it isn't in
+    // the public typings, hence the cast.
+    const key: string | undefined =
+      (supabase.auth as unknown as { storageKey?: string }).storageKey
+      // supabase-js's own default, if a future version renames the field.
+      ?? `sb-${new URL(process.env.NEXT_PUBLIC_SUPABASE_URL!).hostname.split('.')[0]}-auth-token`
+    // The session itself plus its companions (`<key>-code-verifier`, etc.).
+    Object.keys(window.localStorage)
+      .filter(k => k === key || k.startsWith(`${key}-`))
+      .forEach(k => window.localStorage.removeItem(k))
+  } catch {
+    // localStorage blocked (private mode, policy) — nothing more to do.
+  }
 }
 
 /** The signed-in user's own profile, or null if there is no session. */
