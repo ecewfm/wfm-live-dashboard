@@ -63,9 +63,6 @@ function mulberry32(seed: number) {
   }
 }
 
-/** Must match the `vortex` keyframe in AuthHero.module.css (rotate(120deg)). */
-const VORTEX_DEG = 120
-
 /** Distance from (x, y) along unit vector (ux, uy) to the edge of a w×h box. */
 function distToEdge(x: number, y: number, ux: number, uy: number, w: number, h: number): number {
   const tx = ux > 1e-6 ? (w - x) / ux : ux < -1e-6 ? -x / ux : Infinity
@@ -79,19 +76,16 @@ function distToEdge(x: number, y: number, ux: number, uy: number, w: number, h: 
  * Measured from the card's real position (it sits on the right on desktop,
  * below the hero on mobile), so it's correct at any size:
  *
- *  - The whole swarm starts rotated by VORTEX_DEG and swirls back to 0, so a
- *    file's ON-SCREEN starting direction is its own angle + VORTEX_DEG. Each
- *    file is placed just past the window edge in THAT direction (+ one tile,
- *    + up to 35% extra so they don't all enter at once). So every file is
- *    guaranteed off-screen on the first frame, yet none is parked needlessly
- *    far away — they start streaming in immediately rather than after a
- *    dead pause.
+ *  - Each file is placed just past the window edge in its direction from the
+ *    card (+ one tile, + up to 35% extra so they don't all enter at once),
+ *    then flies in a STRAIGHT line to its slot — no swirl, no tilt. So every
+ *    file is guaranteed off-screen on the first frame, yet none is parked
+ *    needlessly far away: they start streaming in immediately.
  *  - Direction: roughly the side its slot is on, with wide jitter, so files
  *    pour in from all over — top, bottom, left across the hero, and right.
  *  - --d: 0 for the centre slot … 1 for corners — the radial stagger, so the
  *    middle of the card forms first and it grows outward (POLA does the same
  *    with each flower's distance from the bouquet's centre).
- *  - --r: the tilt each little file has before it unfolds flat.
  *
  * Seeded, so the pattern is identical every visit.
  */
@@ -102,7 +96,6 @@ function buildTiles(card: DOMRect, vw: number, vh: number): CSSProperties[] {
   const tw = card.width / COLS
   const th = card.height / ROWS
   const tileDiag = Math.hypot(tw, th)
-  const spin = (VORTEX_DEG * Math.PI) / 180
 
   const out: CSSProperties[] = []
   for (let r = 0; r < ROWS; r++) {
@@ -111,15 +104,11 @@ function buildTiles(card: DOMRect, vw: number, vh: number): CSSProperties[] {
       const sy = (r + 0.5) * th - card.height / 2
       const d = Math.min(1, Math.hypot(sx / (card.width / 2), sy / (card.height / 2)) / Math.SQRT2)
       const angle = Math.atan2(sy, sx) + (rand() - 0.5) * 1.8
-      // Where it actually appears on frame one: rotated by the swirl's start
-      // angle (CSS rotate() is clockwise on screen, i.e. +angle with y down).
-      const screenAngle = angle + spin
-      const edge = distToEdge(cx, cy, Math.cos(screenAngle), Math.sin(screenAngle), vw, vh)
+      const edge = distToEdge(cx, cy, Math.cos(angle), Math.sin(angle), vw, vh)
       const dist = (edge + tileDiag) * (1 + rand() * 0.35)
       out.push({
         '--ox': `${Math.round(Math.cos(angle) * dist - sx)}px`,
         '--oy': `${Math.round(Math.sin(angle) * dist - sy)}px`,
-        '--r':  `${Math.round((rand() - 0.5) * 70)}deg`,
         '--d':  (d * 0.85 + rand() * 0.15).toFixed(3),
       } as CSSProperties)
     }

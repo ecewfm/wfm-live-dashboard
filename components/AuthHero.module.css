@@ -8,15 +8,16 @@
  *   POLA                                   here
  *   ─────────────────────────────────────  ──────────────────────────────────────
  *   pieces converge into the composition   files fly in from OUTSIDE the window,
- *                                            from every side, over the hero text
- *   whole bouquet spins, easeOutQuart      whole swarm swirls 120°, slowing to rest
+ *                                            from every side, over the hero text —
+ *                                            in straight lines, upright (POLA's
+ *                                            spin deliberately left out)
  *   radial stagger (centre first)          centre slots land first, corners last
- *   bud blooms open                        each little file unfolds into a tile as it lands
+ *   bud blooms open                        each little file grows into a tile as it lands
  *   circle backdrop reveal (mask grows)    card face grows out as a circle from centre
  *   one master clock, overlapping windows  same — every delay below is on one clock
  *
  * TIMELINE (full motion)
- *      0 ms  files leave their off-screen starts; swarm starts swirling
+ *      0 ms  files leave their off-screen starts, heading straight for the card
  *  ~1000 ms  first files arrive and start unfolding (centre first)
  *   1300 ms  card face starts growing out from the centre, behind the files
  *  ~2200 ms  every file in its slot; face complete
@@ -37,7 +38,6 @@
 /* ── Page layout ──────────────────────────────────────────────────────────── */
 .root {
   --ease-out: cubic-bezier(.16, .84, .24, 1);
-  --ease-out-quart: cubic-bezier(.25, 1, .5, 1);
   --ease-in-out-quart: cubic-bezier(.76, 0, .24, 1);
   --hero-hi:  #4a6e61;
   --hero-mid: var(--sidebar-bg);      /* #3b5a4f — the dashboard's own green */
@@ -182,9 +182,8 @@
 .card {
   /* One clock. Every delay in this block is measured from mount. */
   --stagger:      500ms;   /* centre tile → corner tile */
-  --converge:     1700ms;  /* each file: from off-screen into its slot */
-  --spin:         2000ms;  /* the whole swarm's swirl, slowing to rest */
-  --bloom-at:     1000ms;  /* files unfold as they arrive (plus stagger) */
+  --converge:     1700ms;  /* each file: straight from off-screen into its slot */
+  --bloom-at:     1000ms;  /* files grow to full size as they arrive (plus stagger) */
   --bloom:        600ms;
   --face-at:      1300ms;  /* card face grows out from the centre */
   --face:         800ms;
@@ -246,10 +245,10 @@
 }
 .assembling .frame { animation: fadeIn 260ms ease-out var(--frame-at) both; }
 
-/* The swarm. The grid sits exactly over the card; the WHOLE grid swirls as
-   one (POLA's bouquet spin), while each file separately travels in from off
-   screen to its slot — together, curved paths converging on the card.
-   Files fly over the hero text on the way in (z-index 1, above it). */
+/* The swarm. The grid sits exactly over the card and never moves itself;
+   each file travels in a straight line from off-screen to its slot, upright
+   the whole way (no swirl, no tilt). Files fly over the hero text on the way
+   in (z-index 1, above it). */
 .tiles {
   position: absolute;
   inset: 0;
@@ -258,10 +257,7 @@
   grid-template-columns: repeat(6, 1fr);
   grid-template-rows: repeat(7, 1fr);
   pointer-events: none;
-  will-change: transform, opacity;
-  animation:
-    vortex var(--spin) var(--ease-out-quart) both,
-    fadeOut 240ms ease-out var(--tiles-out-at) both;
+  animation: fadeOut 240ms ease-out var(--tiles-out-at) both;
 }
 
 /* One file's journey. --ox/--oy (px) put it OUTSIDE the browser window —
@@ -277,7 +273,7 @@
   animation-delay: calc(var(--d) * var(--stagger));
 }
 
-/* The page itself: starts as a small tilted sheet ("bud"), unfolds flat ("bloom"). */
+/* The page itself: flies in as a little file, grows to full tile size as it lands. */
 .paper {
   position: absolute;
   inset: 0;
@@ -340,23 +336,16 @@
 .cardSub { margin: 0 0 22px; font-size: 13px; line-height: 1.5; color: var(--text-muted); }
 
 /* ── Keyframes ────────────────────────────────────────────────────────────── */
-/* Whole swarm: a swirl around the card that decelerates on easeOutQuart, like
-   POLA's bouquet spin. Pure Z-rotation only — it preserves every file's
-   distance from the card, so files that start off-screen stay off-screen
-   until they've actually travelled in. (A 3D tilt would foreshorten that
-   distance and could pop files into view at their start positions.) */
-@keyframes vortex {
-  from { transform: rotate(120deg); }
-  to   { transform: none; }
-}
-/* One file: from its off-screen start straight to its slot. */
+/* One file: from its off-screen start in a straight line to its slot.
+   Translate only — no rotation anywhere in the journey. */
 @keyframes converge {
   from { transform: translate(var(--ox), var(--oy)); }
   to   { transform: none; }
 }
-/* Small tilted sheet → full flat tile (POLA's `bloom` track). */
+/* Little file → full-size tile as it lands (POLA's `bloom` track). Scale
+   only, from the centre, so it stays upright and on its straight path. */
 @keyframes bloom {
-  from { transform: scale(.5) rotate(var(--r)); }
+  from { transform: scale(.5); }
   to   { transform: none; }
 }
 /* Card face circle: grows from nothing (POLA's `bg` track). */
