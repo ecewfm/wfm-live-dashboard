@@ -73,6 +73,10 @@ export default function Dashboard() {
   const [isDark, setIsDark]                 = useState(false)
   const [currentPage, setCurrentPage]       = useState<Page>('overview')
   const [accounts, setAccounts]             = useState<string[]>([])
+  // Distinguishes "still loading" from "loaded, and this person has no
+  // accounts" — a roster import can create someone before their account
+  // exists, and they shouldn't sit on a "Loading..." that never ends.
+  const [accountsReady, setAccountsReady]   = useState(false)
   const [currentAccount, setCurrentAccount] = useState('')
   const [data, setData]                     = useState<Record<string, AccountData>>({})
   const [alertAcked, setAlertAcked]         = useState(false)
@@ -368,6 +372,7 @@ export default function Dashboard() {
       // wfm_user_accounts grants them.
       const ids = visibleAccountsFor(profile, allIds)
       setAccounts(ids)
+      setAccountsReady(true)
 
       // Load per-account settings from Supabase (shared) with localStorage fallback
       const allSettings = await loadAllSettings(ids)
@@ -654,7 +659,11 @@ export default function Dashboard() {
           onSaveCliqGlobal={handleSaveCliqGlobal}
           onAccountsChange={async () => {
             const configs = await loadAccounts()
-            const ids = configs.map(a => a.id)
+            // Same scoping rule as the initial load. Only a superuser can
+            // reach this today (the Accounts tab is superuser-only), but an
+            // unfiltered setAccounts here would hand every account to anyone
+            // who ever could — keep exactly one visibility rule.
+            const ids = visibleAccountsFor(profile, configs.map(a => a.id))
             setAccounts(ids)
             // Refresh display names for EVERY account, not just new ones —
             // covers a rename (Accounts tab's pencil icon) on an existing
@@ -695,7 +704,7 @@ export default function Dashboard() {
         <div className="top-nav-account">
           <i className="bx bx-buildings" title="Active account" />
           <select value={currentAccount} onChange={e => switchAccount(e.target.value)}>
-            {accounts.length === 0 && <option>Loading...</option>}
+            {accounts.length === 0 && <option>{accountsReady ? 'No accounts assigned' : 'Loading...'}</option>}
             {accounts.map(id => <option key={id} value={id}>{displayNames[id] || id}</option>)}
           </select>
         </div>
@@ -757,7 +766,19 @@ export default function Dashboard() {
         </div>
 
         <div className="page-content">
-          {currentPage === 'dashboard' && (
+          {accountsReady && accounts.length === 0 && (
+            <div className="auth-screen" style={{ minHeight: '60vh' }}>
+              <div className="auth-card">
+                <h1 className="auth-title">No accounts assigned yet</h1>
+                <p className="auth-muted">
+                  You're signed in as <strong>{profile.username}</strong>, but no accounts have been
+                  assigned to you. Ask a super user{profile.role === 'team_lead' ? ' or your RTA' : ''} to
+                  add one — it will appear here as soon as it is.
+                </p>
+              </div>
+            </div>
+          )}
+          {currentPage === 'dashboard' && accounts.length > 0 && (
             <div style={{ position: 'relative' }}>
               {stale && (
                 <div className="stale-overlay">
@@ -786,7 +807,7 @@ export default function Dashboard() {
               />
             </div>
           )}
-          {currentPage === 'overview' && (
+          {currentPage === 'overview' && accounts.length > 0 && (
             <OverviewPage
               accounts={accounts}
               data={data}
