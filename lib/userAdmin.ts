@@ -24,6 +24,13 @@ export interface ProvisionInput {
   /** Defaults to DEFAULT_PASSWORD with a forced reset on first sign-in. */
   password?: string
   isActive?: boolean
+  /**
+   * Let an RTA / team lead be created with no accounts. Only the roster
+   * import sets this: its accounts may not exist in WFM Live yet, and the
+   * person should still get a login (they see an empty dashboard until one is
+   * assigned). The single-create form keeps requiring at least one.
+   */
+  allowNoAccounts?: boolean
 }
 
 export interface ProvisionResult {
@@ -46,7 +53,7 @@ export async function provisionUser(input: ProvisionInput): Promise<ProvisionRes
   const bad = isValidUsername(username)
   if (bad) throw new AuthError(400, bad)
   const fullName = (input.fullName || '').trim() || username
-  if (input.role !== 'superuser' && input.accountIds.length === 0) {
+  if (input.role !== 'superuser' && input.accountIds.length === 0 && !input.allowNoAccounts) {
     throw new AuthError(400, `A ${input.role === 'rta' ? 'RTA' : 'team lead'} needs at least one account.`)
   }
   // A superuser sees everything by role; account rows would be dead data.
@@ -158,7 +165,10 @@ export async function updateUser(targetId: string, patch: UpdateInput): Promise<
 
   const role = patch.role ?? target.role
   const accountIds = role === 'superuser' ? [] : (patch.accountIds ?? target.accountIds)
-  if (role !== 'superuser' && accountIds.length === 0) {
+  // Only refuse when the edit itself tries to strip every account. A person
+  // imported before their accounts existed legitimately has none, and must
+  // still be renameable without first being forced to assign something.
+  if (role !== 'superuser' && patch.accountIds !== undefined && accountIds.length === 0) {
     throw new AuthError(400, `A ${role === 'rta' ? 'RTA' : 'team lead'} needs at least one account.`)
   }
 

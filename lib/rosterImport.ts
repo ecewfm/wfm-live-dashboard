@@ -95,22 +95,37 @@ export function parseRole(raw: string): UserRole | null {
 export interface AccountRef { id: string; display_name: string }
 
 /**
- * Roster files carry human account names ("Rocco Ridge"), the database carries
- * ids ("roccoridge"). Try progressively looser matches, but never a fuzzy /
- * closest-guess one: silently attaching a user to the wrong tenant is worse
- * than making the operator fix a cell.
+ * Two-way match: a roster cell may name an account by its DATABASE ID
+ * ("ashley-phones") or by its DISPLAY NAME ("Ashley Voice") — both are tried,
+ * case-insensitively, then again with spaces and punctuation ignored, so
+ * "Rocco Ridge", "rocco-ridge" and "ROCCORIDGE" all land on `roccoridge`.
+ *
+ * Never a fuzzy / closest-guess match, and never a guess between two
+ * candidates: silently attaching someone to the wrong tenant is worse than
+ * leaving the account off and saying so.
  */
 export function resolveAccount(name: string, accounts: AccountRef[]): string | null {
   const n = name.trim()
   if (!n) return null
   const lower = n.toLowerCase()
+
+  // 1. Exact database id.
   const byId = accounts.find(a => a.id.toLowerCase() === lower)
   if (byId) return byId.id
-  const byName = accounts.find(a => (a.display_name || '').toLowerCase() === lower)
-  if (byName) return byName.id
-  const squashed = norm(n)                       // "Rocco Ridge" -> "roccoridge"
-  const loose = accounts.find(a => norm(a.id) === squashed || norm(a.display_name || '') === squashed)
-  return loose ? loose.id : null
+
+  // 2. Exact display name — only if exactly one account carries it.
+  const byName = accounts.filter(a => (a.display_name || '').toLowerCase() === lower)
+  if (byName.length === 1) return byName[0].id
+
+  // 3. Either one, ignoring spaces/punctuation. "Rocco Ridge" -> "roccoridge".
+  const squashed = norm(n)
+  if (!squashed) return null
+  const loose = [...new Set(
+    accounts
+      .filter(a => norm(a.id) === squashed || norm(a.display_name || '') === squashed)
+      .map(a => a.id),
+  )]
+  return loose.length === 1 ? loose[0] : null
 }
 
 export function splitAccountCell(cell: string): string[] {
@@ -126,11 +141,23 @@ export interface RosterUser {
   fullName: string
   role: UserRole
   accountIds: string[]
+  /**
+   * Account names from the file that matched nothing in WFM Live — usually
+   * accounts that simply haven't been created yet. Ignored for now; importing
+   * the same file again after they exist will assign them.
+   */
+  ignoredAccounts: string[]
   isActive: boolean
   /** 1-based spreadsheet rows this user was built from (>1 when merged). */
   sourceRows: number[]
 }
 
+/**
+ * 'error' is reserved for problems with the FILE itself (no username or role
+ * column) — the only thing that stops an import. Anything wrong with an
+ * individual row is a 'warning': that row, or that one account name, is
+ * skipped and everything else still goes in.
+ */
 export interface RosterIssue {
   row: number | null          // null = whole-file issue
   severity: 'error' | 'warning'
@@ -145,6 +172,8 @@ export interface ParsedRoster {
 }
 
 const isInactive = (s: string) => /^(inactive|disabled|no|false|0|terminated|resigned)$/i.test(s.trim())
+
+const ROLE_WORD: Record<UserRole, string> = { superuser: 'a super user', rta: 'an RTA', team_lead: 'a team lead' }
 
 /**
  * Validate a grid into the users that WOULD be created. Never throws: every
@@ -175,38 +204,47 @@ export function parseRoster(grid: string[][], accounts: AccountRef[]): ParsedRos
   // app this roster format came from would have made two logins instead.
   const byUsername = new Map<string, RosterUser>()
 
+  // Everything below is a 'warning'. A row that can't become a user is
+  // skipped and reported; an account name that matches nothing is dropped and
+  // reported. Neither stops the rest of the file from importing.
+  const warn = (row: number, message: string) => issues.push({ row, severity: 'warning', message })
+
   body.forEach((raw, i) => {
     const rowNo = i + 2                        // 1-based, +1 for the header
     if (raw.every(c => (c ?? '').trim() === '')) return   // blank line
 
     const username = normalizeUsername(cell(raw, 'username'))
-    if (!username) { issues.push({ row: rowNo, severity: 'error', message: 'Missing username.' }); return }
+    if (!username) { warn(rowNo, 'Skipped: no username.'); return }
     const badName = isValidUsername(username)
-    if (badName) { issues.push({ row: rowNo, severity: 'error', message: `${badName} (got "${username}")` }); return }
+    if (badName) { warn(rowNo, `Skipped "${username}": ${badName}`); return }
 
     const roleRaw = cell(raw, 'role')
     const role = parseRole(roleRaw)
     if (!role) {
-      issues.push({ row: rowNo, severity: 'error', message: `Unrecognised role "${roleRaw}". Use SuperUser, RTA or Team Lead.` })
+      // Skipped rather than defaulted to a role: guessing would hand someone a
+      // login, with real data access, that nobody actually decided to give.
+      warn(rowNo, `Skipped "${username}": role "${roleRaw || '(blank)'}" isn't SuperUser, RTA or Team Lead.`)
       return
     }
 
     const accountIds: string[] = []
+    const ignoredAccounts: string[] = []
     for (const name of splitAccountCell(cell(raw, 'accounts'))) {
       const id = resolveAccount(name, accounts)
       if (id) { if (!accountIds.includes(id)) accountIds.push(id) }
-      else issues.push({ row: rowNo, severity: 'error', message: `No account matches "${name}".` })
+      else if (!ignoredAccounts.includes(name)) ignoredAccounts.push(name)
     }
 
     // A superuser sees everything by role, so an account list is meaningless
     // for them; say so rather than quietly dropping it.
-    if (role === 'superuser' && accountIds.length) {
-      issues.push({ row: rowNo, severity: 'warning', message: 'Super users already see every account — the listed accounts will be ignored.' })
+    if (role === 'superuser') {
+      if (accountIds.length || ignoredAccounts.length) {
+        warn(rowNo, `"${username}" is a super user and already sees every account — the listed accounts are ignored.`)
+      }
       accountIds.length = 0
-    }
-    if (role !== 'superuser' && accountIds.length === 0) {
-      issues.push({ row: rowNo, severity: 'error', message: `${role === 'rta' ? 'An RTA' : 'A team lead'} needs at least one account.` })
-      return
+      ignoredAccounts.length = 0
+    } else if (ignoredAccounts.length) {
+      warn(rowNo, `"${username}": ${ignoredAccounts.map(n => `"${n}"`).join(', ')} ${ignoredAccounts.length === 1 ? "isn't" : "aren't"} in WFM Live yet — ignored for now.`)
     }
 
     const fullName = cell(raw, 'fullName') || username
@@ -215,29 +253,37 @@ export function parseRoster(grid: string[][], accounts: AccountRef[]): ParsedRos
     const key = username.toLowerCase()
     const existing = byUsername.get(key)
     if (!existing) {
-      byUsername.set(key, { username, fullName, role, accountIds, isActive: active, sourceRows: [rowNo] })
+      byUsername.set(key, { username, fullName, role, accountIds, ignoredAccounts, isActive: active, sourceRows: [rowNo] })
       return
     }
 
-    // Merge a repeated username, and flag anything that genuinely conflicts
-    // rather than letting last-write-win decide silently.
-    const added = accountIds.filter(a => !existing.accountIds.includes(a))
-    existing.accountIds.push(...added)
+    // Merge a repeated username. Accounts are unioned; for single-valued
+    // fields the FIRST row wins, and any disagreement is reported rather than
+    // silently resolved by last-write-wins.
+    for (const a of accountIds) if (!existing.accountIds.includes(a)) existing.accountIds.push(a)
+    for (const n of ignoredAccounts) if (!existing.ignoredAccounts.includes(n)) existing.ignoredAccounts.push(n)
     existing.sourceRows.push(rowNo)
-    issues.push({
-      row: rowNo, severity: 'warning',
-      message: `"${username}" also appears on row ${existing.sourceRows[0]}; treated as one user with the combined accounts (${existing.accountIds.join(', ')}).`,
-    })
+    warn(rowNo, `"${username}" also appears on row ${existing.sourceRows[0]}; treated as one user with the combined accounts${existing.accountIds.length ? ` (${existing.accountIds.join(', ')})` : ''}.`)
     if (existing.role !== role) {
-      issues.push({ row: rowNo, severity: 'error', message: `"${username}" has conflicting roles: ${existing.role} on row ${existing.sourceRows[0]}, ${role} here. Fix the file.` })
+      warn(rowNo, `"${username}" is ${ROLE_WORD[existing.role]} on row ${existing.sourceRows[0]} but ${ROLE_WORD[role]} here; keeping ${ROLE_WORD[existing.role]}.`)
     }
     if (existing.fullName !== fullName && fullName !== username) {
-      issues.push({ row: rowNo, severity: 'warning', message: `"${username}" has two names ("${existing.fullName}" and "${fullName}"); keeping "${existing.fullName}".` })
+      warn(rowNo, `"${username}" has two names ("${existing.fullName}" and "${fullName}"); keeping "${existing.fullName}".`)
     }
     if (existing.isActive !== active) {
-      issues.push({ row: rowNo, severity: 'warning', message: `"${username}" has conflicting status; keeping ${existing.isActive ? 'Active' : 'Inactive'}.` })
+      warn(rowNo, `"${username}" has conflicting status; keeping ${existing.isActive ? 'Active' : 'Inactive'}.`)
     }
   })
+
+  // Reported once per person, after merging, so a user listed on two rows
+  // isn't warned about twice.
+  for (const u of byUsername.values()) {
+    if (u.role !== 'superuser' && u.accountIds.length === 0) {
+      warn(u.sourceRows[0],
+        `"${u.username}" has no accounts in WFM Live yet. They'll still be created, and will see an empty dashboard ` +
+        `until one is assigned — or import this file again once the account exists and it'll be added automatically.`)
+    }
+  }
 
   return { users: [...byUsername.values()], issues, ignoredColumns: unknown }
 }

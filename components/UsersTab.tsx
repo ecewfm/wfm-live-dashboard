@@ -27,9 +27,14 @@ type Draft = {
   fullName: string
   role: UserRole
   accountIds: string[]
+  /** Accounts as loaded, for edits — so we only send accountIds when they changed. */
+  originalAccountIds?: string[]
 }
 
 const blankDraft = (role: UserRole): Draft => ({ username: '', fullName: '', role, accountIds: [] })
+
+const sameSet = (a: string[], b?: string[]) =>
+  !!b && a.length === b.length && a.every(x => b.includes(x))
 
 export default function UsersTab({ accounts }: Props) {
   // Context reaches here even though SettingsModal renders through a portal —
@@ -82,7 +87,12 @@ export default function UsersTab({ accounts }: Props) {
     } else {
       await apiFetch('/api/users', {
         method: 'PATCH',
-        body: JSON.stringify({ id: d.id, fullName: d.fullName, role: d.role, accountIds: d.accountIds }),
+        body: JSON.stringify({
+          id: d.id, fullName: d.fullName, role: d.role,
+          // Omitted when untouched: someone imported before their accounts existed
+          // has none, and a rename must not be forced to assign one.
+          ...(sameSet(d.accountIds, d.originalAccountIds) ? {} : { accountIds: d.accountIds }),
+        }),
       })
       setNotice(`Saved "${d.username}".`)
     }
@@ -133,7 +143,7 @@ export default function UsersTab({ accounts }: Props) {
                 onClick={() => setDraft(blankDraft(assignable[assignable.length - 1]))}>
           <i className="bx bx-plus" /> Add user
         </button>
-        {can.importUsers(me.role) && <RosterImport onDone={load} />}
+        {can.importUsers(me.role) && <RosterImport onDone={load} accountLabel={accountLabel} />}
       </div>
 
       {loading ? <p className="sm-desc">Loading…</p> : (
@@ -166,7 +176,7 @@ export default function UsersTab({ accounts }: Props) {
                   <td style={{ whiteSpace: 'nowrap' }}>
                     <button className="acc-btn acc-btn-cfg" disabled={!mayEdit || busy}
                             title={mayEdit ? 'Edit' : 'You cannot manage this user'}
-                            onClick={() => setDraft({ id: u.id, username: u.username, fullName: u.fullName ?? '', role: u.role, accountIds: [...u.accountIds] })}>
+                            onClick={() => setDraft({ id: u.id, username: u.username, fullName: u.fullName ?? '', role: u.role, accountIds: [...u.accountIds], originalAccountIds: [...u.accountIds] })}>
                       Edit
                     </button>
                     <button className="acc-btn acc-btn-cfg" disabled={!editable(u) || busy}
@@ -277,7 +287,7 @@ function UserForm({ draft, setDraft, assignableRoles, accounts, busy, onSave, on
         </p>
       )}
 
-      <button className="sm-btn-save" disabled={busy || (needsAccounts && draft.accountIds.length === 0)} onClick={onSave}>
+      <button className="sm-btn-save" disabled={busy || (needsAccounts && draft.accountIds.length === 0 && (!draft.id || !sameSet(draft.accountIds, draft.originalAccountIds)))} onClick={onSave}>
         {busy ? 'Saving…' : draft.id ? 'Save changes' : 'Create user'}
       </button>
       <button className="sm-btn-cancel" disabled={busy} onClick={onCancel}>Cancel</button>
@@ -288,7 +298,7 @@ function UserForm({ draft, setDraft, assignableRoles, accounts, busy, onSave, on
 // ── Roster import ───────────────────────────────────────────────────────────
 // Always previews first. Committing a roster that turns out to have a bad row
 // halfway down is far worse than being told before anything is written.
-function RosterImport({ onDone }: { onDone: () => Promise<void> }) {
+function RosterImport({ onDone, accountLabel }: { onDone: () => Promise<void>; accountLabel: (id: string) => string }) {
   const [file, setFile]       = useState<File | null>(null)
   const [preview, setPreview] = useState<any>(null)
   const [result, setResult]   = useState<any>(null)
@@ -337,59 +347,97 @@ function RosterImport({ onDone }: { onDone: () => Promise<void> }) {
             </div>
           )}
 
-          {preview && (
-            <div style={{ marginTop: 8 }}>
-              <p>
-                <strong>{preview.willCreate.length}</strong> user(s) will be created
-                {preview.alreadyExist.length > 0 && <> · <strong>{preview.alreadyExist.length}</strong> already exist and will be skipped</>}
-              </p>
-              {preview.willCreate.length > 0 && (
-                <table className="sm-table">
-                  <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Accounts</th></tr></thead>
-                  <tbody>
-                    {preview.willCreate.map((u: any) => (
-                      <tr key={u.username}>
-                        <td>{u.username}</td><td>{u.fullName}</td>
-                        <td>{ROLE_LABELS[u.role as UserRole]}</td>
-                        <td>{u.accountIds.join(', ') || '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-              {preview.alreadyExist.length > 0 && (
-                <p className="sm-desc">Skipped (already exist): {preview.alreadyExist.join(', ')}</p>
-              )}
-              <IssueList issues={preview.issues} />
-              {preview.ignoredColumns?.length > 0 && (
-                <p className="sm-desc">Columns ignored: {preview.ignoredColumns.join(', ')}</p>
-              )}
-              <button className="sm-btn-save" disabled={busy || !preview.canCommit} onClick={() => send('commit')}>
-                {busy ? 'Importing…' : `Import ${preview.willCreate.length} user(s)`}
-              </button>
-              <button className="sm-btn-cancel" disabled={busy} onClick={reset}>Cancel</button>
-              {!preview.canCommit && (
-                <p className="sm-desc">
-                  {preview.willCreate.length === 0
-                    ? 'Nothing new to import.'
-                    : 'Fix the errors above and re-check the file — nothing has been written.'}
+          {preview && (() => {
+            const nCreate = preview.willCreate.length
+            const nTopUp  = preview.willAddAccounts.length
+            return (
+              <div style={{ marginTop: 8 }}>
+                <p>
+                  <strong>{nCreate}</strong> new user(s)
+                  {nTopUp > 0 && <> · <strong>{nTopUp}</strong> existing user(s) get new accounts</>}
+                  {preview.upToDate.length > 0 && <> · <strong>{preview.upToDate.length}</strong> already up to date</>}
                 </p>
-              )}
-            </div>
-          )}
+
+                {nCreate > 0 && (
+                  <table className="sm-table">
+                    <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Accounts</th><th>Not in WFM Live yet (ignored)</th></tr></thead>
+                    <tbody>
+                      {preview.willCreate.map((u: any) => (
+                        <tr key={u.username}>
+                          <td>{u.username}</td><td>{u.fullName}</td>
+                          <td>{ROLE_LABELS[u.role as UserRole]}</td>
+                          <td>
+                            {u.role === 'superuser'
+                              ? <span className="sm-metric-sub">all accounts</span>
+                              : u.accountIds.map(accountLabel).join(', ') || <span className="sm-metric-sub">none yet</span>}
+                          </td>
+                          <td className="sm-metric-sub">{u.ignoredAccounts.join(', ') || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                {nTopUp > 0 && (
+                  <>
+                    <div className="ds-mini-label" style={{ marginTop: 10 }}>Existing users — accounts that will be added</div>
+                    <table className="sm-table">
+                      <thead><tr><th>Username</th><th>Adding</th><th>Still not in WFM Live (ignored)</th></tr></thead>
+                      <tbody>
+                        {preview.willAddAccounts.map((t: any) => (
+                          <tr key={t.username}>
+                            <td>{t.username}</td>
+                            <td>{t.add.map(accountLabel).join(', ')}</td>
+                            <td className="sm-metric-sub">{t.ignoredAccounts.join(', ') || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                )}
+
+                {preview.upToDate.length > 0 && (
+                  <p className="sm-desc">Already up to date (nothing to change): {preview.upToDate.join(', ')}</p>
+                )}
+                <IssueList issues={preview.issues} />
+                {preview.ignoredColumns?.length > 0 && (
+                  <p className="sm-desc">Columns not used: {preview.ignoredColumns.join(', ')}</p>
+                )}
+
+                <button className="sm-btn-save" disabled={busy || !preview.canCommit} onClick={() => send('commit')}>
+                  {busy ? 'Importing…' : 'Import'}
+                </button>
+                <button className="sm-btn-cancel" disabled={busy} onClick={reset}>Cancel</button>
+                {!preview.canCommit && (
+                  <p className="sm-desc">
+                    {preview.issues.some((i: any) => i.severity === 'error')
+                      ? "This file can't be read — see above. Nothing has been written."
+                      : 'Nothing to do — everyone in this file is already set up.'}
+                  </p>
+                )}
+              </div>
+            )
+          })()}
 
           {result && (
             <div style={{ marginTop: 8 }}>
-              <p><strong>{result.created.length}</strong> created.</p>
+              <p>
+                <strong>{result.created.length}</strong> created
+                {result.accountsAdded?.length > 0 && <> · <strong>{result.accountsAdded.length}</strong> given new accounts</>}
+                {result.failed?.length > 0 && <> · <strong>{result.failed.length}</strong> failed</>}
+              </p>
               {result.created.length > 0 && (
                 <p className="sm-desc">
-                  All start on the default password and must choose their own at first sign-in: {result.created.join(', ')}
+                  New users start on the default password and choose their own at first sign-in: {result.created.join(', ')}
                 </p>
               )}
-              {result.alreadyExist?.length > 0 && <p className="sm-desc">Skipped (already existed): {result.alreadyExist.join(', ')}</p>}
+              {result.accountsAdded?.length > 0 && (
+                <ul className="sm-desc">
+                  {result.accountsAdded.map((t: any) => <li key={t.username}>{t.username}: + {t.added.map(accountLabel).join(', ')}</li>)}
+                </ul>
+              )}
               {result.failed?.length > 0 && (
                 <div className="auth-note-err" style={{ padding: 8 }}>
-                  {result.failed.length} failed:
                   <ul>{result.failed.map((f: any) => <li key={f.username}>{f.username}: {f.error}</li>)}</ul>
                 </div>
               )}
@@ -409,15 +457,20 @@ function IssueList({ issues }: { issues?: { row: number | null; severity: string
   const warns = issues.filter(i => i.severity === 'warning')
   return (
     <>
+      {/* Errors are file-level only now (no username / role column).
+          Everything row-level is a note: that row or account was skipped,
+          the rest still imports. */}
       {errs.length > 0 && (
         <div className="auth-note-err" style={{ padding: 8, marginBottom: 8 }}>
-          <strong>{errs.length} error(s) — nothing will be imported until these are fixed:</strong>
-          <ul>{errs.map((i, n) => <li key={n}>{i.row ? `Row ${i.row}: ` : ''}{i.message}</li>)}</ul>
+          <strong>This file can't be imported:</strong>
+          <ul>{errs.map((i, n) => <li key={n}>{i.message}</li>)}</ul>
         </div>
       )}
       {warns.length > 0 && (
-        <details className="sm-desc">
-          <summary>{warns.length} warning(s)</summary>
+        // Open by default when short — these are the notes that say which
+        // rows and accounts were skipped, so they shouldn't hide.
+        <details className="sm-desc" open={warns.length <= 10}>
+          <summary>{warns.length} note(s) — skipped rows and ignored accounts</summary>
           <ul>{warns.map((i, n) => <li key={n}>{i.row ? `Row ${i.row}: ` : ''}{i.message}</li>)}</ul>
         </details>
       )}
