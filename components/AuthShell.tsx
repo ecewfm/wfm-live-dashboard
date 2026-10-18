@@ -13,7 +13,7 @@
 //   - decides full vs gentle motion,
 //   - runs a few timers (boot labels; removing the tiles once they've landed).
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import styles from './AuthHero.module.css'
 
 /** For the consumer's form: children of this class rise in one by one. */
@@ -27,8 +27,8 @@ const STEPS = ['INIT', 'SYNC', 'VERIFY', 'READY']
 
 /** Timings per mode — must agree with the clocks in AuthHero.module.css. */
 const TIMING = {
-  // tiles removed after --tiles-out-at (2380) + fade (240)
-  full:   { assemblyMs: 2750, stepsAt: [650, 1450, 2300] },
+  // tiles removed after --tiles-out-at (2250) + fade (240)
+  full:   { assemblyMs: 2600, stepsAt: [600, 1300, 2150] },
   // gentle: tiles fade out at 1000 + 200
   gentle: { assemblyMs: 1300, stepsAt: [300, 650, 1000] },
 } as const
@@ -63,41 +63,69 @@ function mulberry32(seed: number) {
   }
 }
 
+/** Must match the `vortex` keyframe in AuthHero.module.css (rotate(120deg)). */
+const VORTEX_DEG = 120
+
+/** Distance from (x, y) along unit vector (ux, uy) to the edge of a w×h box. */
+function distToEdge(x: number, y: number, ux: number, uy: number, w: number, h: number): number {
+  const tx = ux > 1e-6 ? (w - x) / ux : ux < -1e-6 ? -x / ux : Infinity
+  const ty = uy > 1e-6 ? (h - y) / uy : uy < -1e-6 ? -y / uy : Infinity
+  return Math.max(0, Math.min(tx, ty))
+}
+
 /**
- * Each file's starting point in the orbiting cloud.
+ * Each file's starting point: just OUTSIDE the browser window, all around.
  *
- * All units are TILES (one grid cell), because CSS translate % is relative to
- * the element itself — so the cloud scales with the card on any screen size.
- * The card spans ±3 tiles across and ±3.5 down from its centre.
+ * Measured from the card's real position (it sits on the right on desktop,
+ * below the hero on mobile), so it's correct at any size:
  *
- *  - Each file orbits in the direction of its own slot (plus jitter) at
- *    5.5–10 tiles from the centre: a cloud all around the card, reaching well
- *    across the hero on desktop.
- *  - --d is 0 at the centre … 1 at the corners: the radial stagger, so the
+ *  - The whole swarm starts rotated by VORTEX_DEG and swirls back to 0, so a
+ *    file's ON-SCREEN starting direction is its own angle + VORTEX_DEG. Each
+ *    file is placed just past the window edge in THAT direction (+ one tile,
+ *    + up to 35% extra so they don't all enter at once). So every file is
+ *    guaranteed off-screen on the first frame, yet none is parked needlessly
+ *    far away — they start streaming in immediately rather than after a
+ *    dead pause.
+ *  - Direction: roughly the side its slot is on, with wide jitter, so files
+ *    pour in from all over — top, bottom, left across the hero, and right.
+ *  - --d: 0 for the centre slot … 1 for corners — the radial stagger, so the
  *    middle of the card forms first and it grows outward (POLA does the same
  *    with each flower's distance from the bouquet's centre).
- *  - --r is the tilt each file has before it unfolds flat.
+ *  - --r: the tilt each little file has before it unfolds flat.
+ *
+ * Seeded, so the pattern is identical every visit.
  */
-const TILES: CSSProperties[] = (() => {
+function buildTiles(card: DOMRect, vw: number, vh: number): CSSProperties[] {
   const rand = mulberry32(0x77f3)
+  const cx = card.left + card.width / 2
+  const cy = card.top + card.height / 2
+  const tw = card.width / COLS
+  const th = card.height / ROWS
+  const tileDiag = Math.hypot(tw, th)
+  const spin = (VORTEX_DEG * Math.PI) / 180
+
   const out: CSSProperties[] = []
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
-      const sx = c + 0.5 - COLS / 2                     // slot offset from centre, tiles
-      const sy = r + 0.5 - ROWS / 2
-      const d = Math.min(1, Math.hypot(sx / (COLS / 2), sy / (ROWS / 2)) / Math.SQRT2)
-      const angle = Math.atan2(sy, sx) + (rand() - 0.5) * 1.1
-      const radius = 5.5 + rand() * 4.5
+      const sx = (c + 0.5) * tw - card.width / 2      // slot centre, px from card centre
+      const sy = (r + 0.5) * th - card.height / 2
+      const d = Math.min(1, Math.hypot(sx / (card.width / 2), sy / (card.height / 2)) / Math.SQRT2)
+      const angle = Math.atan2(sy, sx) + (rand() - 0.5) * 1.8
+      // Where it actually appears on frame one: rotated by the swirl's start
+      // angle (CSS rotate() is clockwise on screen, i.e. +angle with y down).
+      const screenAngle = angle + spin
+      const edge = distToEdge(cx, cy, Math.cos(screenAngle), Math.sin(screenAngle), vw, vh)
+      const dist = (edge + tileDiag) * (1 + rand() * 0.35)
       out.push({
-        '--ox': (Math.cos(angle) * radius - sx).toFixed(2),
-        '--oy': (Math.sin(angle) * radius - sy).toFixed(2),
+        '--ox': `${Math.round(Math.cos(angle) * dist - sx)}px`,
+        '--oy': `${Math.round(Math.sin(angle) * dist - sy)}px`,
         '--r':  `${Math.round((rand() - 0.5) * 70)}deg`,
         '--d':  (d * 0.85 + rand() * 0.15).toFixed(3),
       } as CSSProperties)
     }
   }
   return out
-})()
+}
 
 // ── Hero layout ──────────────────────────────────────────────────────────────
 export default function AuthShell({ children, intro = true }: {
@@ -169,7 +197,20 @@ export function AssembleCard({ children }: { children: ReactNode }) {
   // Always assembles — the CSS picks full or gentle motion. Only the cleanup
   // timer needs to know which, since the gentle version finishes sooner.
   const [{ motion }] = useState(resolveMotion)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const [tiles, setTiles] = useState<CSSProperties[] | null>(null)
   const [tilesGone, setTilesGone] = useState(false)
+
+  // Measure where the card actually sits, then create the tiles with their
+  // off-screen starts. useLayoutEffect runs after the DOM exists but BEFORE
+  // the browser paints, and its setState re-renders before that paint too —
+  // so the tiles are born already in position and their animations start
+  // from the right place. (Rendering them first and patching the positions
+  // in afterwards would let them flash at their slots for a frame.)
+  useLayoutEffect(() => {
+    const el = cardRef.current
+    if (el) setTiles(buildTiles(el.getBoundingClientRect(), window.innerWidth, window.innerHeight))
+  }, [])
 
   useEffect(() => {
     const t = setTimeout(() => setTilesGone(true), TIMING[motion].assemblyMs)
@@ -177,12 +218,12 @@ export function AssembleCard({ children }: { children: ReactNode }) {
   }, [motion])
 
   return (
-    <div className={`${styles.card} ${styles.assembling}`}>
+    <div ref={cardRef} className={`${styles.card} ${styles.assembling}`}>
       <div className={styles.surface} aria-hidden><span className={styles.fill} /></div>
       <div className={styles.frame} aria-hidden />
-      {!tilesGone && (
+      {tiles && !tilesGone && (
         <div className={styles.tiles} aria-hidden>
-          {TILES.map((style, i) => (
+          {tiles.map((style, i) => (
             <span key={i} className={styles.tile} style={style}><span className={styles.paper} /></span>
           ))}
         </div>
