@@ -20,6 +20,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { UserProfile, DEFAULT_PASSWORD, validateNewPassword, can } from '@/lib/authEmail'
 import { signIn, signOut, loadMyProfile, setMyPassword, onAuthChange } from '@/lib/authClient'
+import AuthShell, { AssembleCard, stackClass, cardTitleClass, cardSubClass } from './AuthShell'
 
 interface AuthCtx {
   profile: UserProfile
@@ -67,13 +68,17 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     return () => { alive = false; off() }
   }, [])
 
-  if (loading) {
-    return (
-      <div className="auth-screen">
-        <div className="auth-card"><p className="auth-muted">Loading…</p></div>
-      </div>
-    )
-  }
+  // The login screen lives outside <Dashboard>, which is what normally applies
+  // the saved theme — so apply it here too, or a dark-mode user gets a light
+  // sign-in page and then a flash to dark once they're in.
+  useEffect(() => {
+    try { document.documentElement.classList.toggle('dark', localStorage.getItem('wfm_theme') === 'dark') } catch {}
+  }, [])
+
+  // Just the page background while the session check runs (usually a few
+  // hundred ms). Deliberately empty: showing the hero here would flash a login
+  // screen at people who are already signed in.
+  if (loading) return <div className="auth-screen" />
 
   if (!profile) return <LoginScreen onSignedIn={refresh} />
   if (profile.mustResetPassword) return <SetPasswordScreen profile={profile} onDone={refresh} />
@@ -130,10 +135,11 @@ function LoginScreen({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
   }
 
   return (
-    <div className="auth-screen">
-      <form className="auth-card" onSubmit={submit}>
-        <h1 className="auth-title">WFM Live</h1>
-        <p className="auth-muted">Sign in to continue</p>
+    <AuthShell>
+     <AssembleCard>
+      <form className={stackClass} onSubmit={submit}>
+        <h2 className={cardTitleClass}>Sign in</h2>
+        <p className={cardSubClass}>Use the username your administrator gave you.</p>
 
         {bootMsg && <div className="auth-note auth-note-ok">{bootMsg}</div>}
 
@@ -168,7 +174,8 @@ function LoginScreen({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
           </div>
         )}
       </form>
-    </div>
+     </AssembleCard>
+    </AuthShell>
   )
 }
 
@@ -193,11 +200,14 @@ function SetPasswordScreen({ profile, onDone }: { profile: UserProfile; onDone: 
     } finally { setBusy(false) }
   }
 
+  // intro={false}: the hero stays put when arriving here from the sign-in
+  // card. Only the card itself re-assembles, into this new form.
   return (
-    <div className="auth-screen">
-      <form className="auth-card" onSubmit={submit}>
-        <h1 className="auth-title">Choose a password</h1>
-        <p className="auth-muted">
+    <AuthShell intro={false}>
+     <AssembleCard>
+      <form className={stackClass} onSubmit={submit}>
+        <h2 className={cardTitleClass}>Choose a password</h2>
+        <p className={cardSubClass}>
           Signed in as <strong>{profile.username}</strong>. You're on the default
           password (<code>{DEFAULT_PASSWORD}</code>) and need to set your own before continuing.
         </p>
@@ -219,6 +229,7 @@ function SetPasswordScreen({ profile, onDone }: { profile: UserProfile; onDone: 
           Sign out
         </button>
       </form>
-    </div>
+     </AssembleCard>
+    </AuthShell>
   )
 }
