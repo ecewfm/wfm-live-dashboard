@@ -2237,6 +2237,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [ds, setDs]     = useState<DataSourceConfig>(JSON.parse(JSON.stringify(dataSource)))
   const [cliqChan, setCliqChan]     = useState(cliqChannel)
   const [cliqGlobal, setCliqGlobal] = useState<CliqGlobalSettings>(JSON.parse(JSON.stringify(cliqGlobalSettings)))
+  // Status Durations search — see statusMatches() below.
+  const [statusFilter, setStatusFilter] = useState('')
+  const [statusConfiguredOnly, setStatusConfiguredOnly] = useState(false)
   const [cliqScanning, setCliqScanning] = useState(false)
   const [cliqScanLog, setCliqScanLog]   = useState<string[] | null>(null)
   const [wfLogsOn, setWfLogsOn]         = useState(wfLogsEnabled)
@@ -2465,7 +2468,16 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
           const res = await fetch(url, { headers: { apikey: statSupaKey, Authorization: `Bearer ${statSupaKey}` } })
           if (!res.ok) return []
           const rows = await res.json()
-          return Array.isArray(rows) ? rows.map((r: any) => String(r[src.statusCol] ?? '').trim()).filter(Boolean) : []
+          // Keep the EMPTY status instead of dropping it (per the user,
+          // 2026-10-17). An agent row whose status column is blank still
+          // renders in the Agent Status table — as the "—" placeholder — and
+          // the exclude lookups key off String(a._status ?? ''), i.e. ''
+          // (components/Dashboard.tsx, lib/breaches.ts). So '' is a
+          // perfectly valid, excludable status; .filter(Boolean) was the
+          // only reason it never appeared here to be ticked, leaving those
+          // rows impossible to hide. Flex hit this: its agent source maps to
+          // unassigned Zendesk tickets, whose status column is literally "".
+          return Array.isArray(rows) ? rows.map((r: any) => String(r[src.statusCol] ?? '').trim()) : []
         } catch { return [] }
       }))
       if (!cancelled) setDiscoveredStatuses(Array.from(new Set(results.flat())).sort((a, b) => a.localeCompare(b)))
@@ -2495,6 +2507,28 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   // Kept for "Reset to Defaults" (resets every row currently shown, in
   // either section) — not rendered directly.
   const statusRows = Array.from(new Set([...currentStatusRows, ...pastStatusRows]))
+
+  // ── Status search / filter ────────────────────────────────────────────────
+  // Per the user (2026-10-17): some accounts accumulate hundreds of statuses
+  // — Flex's agent "status" column is carrying Zendesk ticket SUBJECTS
+  // ("Conversation with Adam Hill", "Adding Progressive", ...) — so the one
+  // status you actually want to configure is unreachable by scrolling.
+  // `isConfigured` is what makes this genuinely useful on an account like
+  // that: it collapses hundreds of rows down to the handful someone has
+  // deliberately set up.
+  const isConfigured = (k: string) => {
+    const t = stat[k]
+    if (!t) return false
+    return (t.warn < 999) || (t.crit < 999) || !!t.breachText || !!t.excluded || !!t.sendToCliq
+  }
+  const statusMatches = (k: string) => {
+    if (statusConfiguredOnly && !isConfigured(k)) return false
+    const q = statusFilter.trim().toLowerCase()
+    return !q || k.toLowerCase().includes(q)
+  }
+  const currentShown = currentStatusRows.filter(statusMatches)
+  const pastShown    = pastStatusRows.filter(statusMatches)
+  const statusFiltering = !!statusFilter.trim() || statusConfiguredOnly
 
   const updateKpi = (key: keyof Thresholds, field: string, rawVal: string) => {
     const value = field === 'direction' ? rawVal : (parseFloat(rawVal) || 0)
@@ -2862,7 +2896,19 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     const cliqDisabled = !(cliqGlobal.enabled && cliqChan)
                     return (
                       <tr key={key}>
-                        <td><div className="sm-metric">{key}</div></td>
+                        <td>
+                          {/* The empty status is a real, excludable status
+                              (agents whose status column is blank render as
+                              "—" in the Agent Status table). Labelled, not
+                              shown as an empty cell, so it doesn't look like
+                              a glitch. */}
+                          <div className="sm-metric" style={key === '' ? { fontStyle: 'italic', color: 'var(--text-muted)' } : undefined}>
+                            {key === '' ? '(blank — no status value)' : key}
+                          </div>
+                          {key === '' && (
+                            <div className="sm-metric-sub">Agents whose status column is empty — shown as “—” on the dashboard</div>
+                          )}
+                        </td>
                         {(['warn','crit'] as const).map(f => (
                           <td key={f}>
                             <div className="sm-input-cell">
@@ -2917,17 +2963,46 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   )
                   return (
                     <>
+                      {/* Search — some accounts carry hundreds of statuses
+                          (Flex's status column holds Zendesk ticket subjects),
+                          making the one you want unreachable by scrolling. */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', margin: '4px 0 10px' }}>
+                        <div style={{ position: 'relative', flex: '1 1 260px', minWidth: 200 }}>
+                          <i className="bx bx-search" style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontSize: 14 }} />
+                          <input type="text" className="sm-input" style={{ width: '100%', paddingLeft: 28 }}
+                            placeholder={`Search ${statusRows.length} status${statusRows.length === 1 ? '' : 'es'}...`}
+                            value={statusFilter} onChange={e => setStatusFilter(e.target.value)} />
+                          {statusFilter && (
+                            <i className="bx bx-x" title="Clear search"
+                              style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', cursor: 'pointer', color: 'var(--text-muted)' }}
+                              onClick={() => setStatusFilter('')} />
+                          )}
+                        </div>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                          title="Show only statuses with a threshold, text trigger, Exclude or Send to Cliq already set — the fastest way to find what you configured among hundreds of auto-discovered ones">
+                          <input type="checkbox" checked={statusConfiguredOnly} onChange={() => setStatusConfiguredOnly(v => !v)} />
+                          Configured only
+                        </label>
+                        {statusFiltering && (
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                            {currentShown.length + pastShown.length} of {statusRows.length} shown
+                          </span>
+                        )}
+                      </div>
+
                       <div className="sm-section-title">CURRENTLY ACTIVE STATUSES</div>
                       <div style={{ overflowX: 'auto' }}>
                       <table className="sm-table">
                         {statusTableHead}
                         <tbody>
-                          {currentStatusRows.length === 0 ? (
+                          {currentShown.length === 0 ? (
                             <tr><td colSpan={7} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-                              No agent statuses currently live — set up an Agent Data Source on the Data Sources tab first
-                              (or check back once the scraper has written some data).
+                              {currentStatusRows.length > 0
+                                ? <>No live status matches the filter ({currentStatusRows.length} hidden).</>
+                                : <>No agent statuses currently live — set up an Agent Data Source on the Data Sources tab first
+                                   (or check back once the scraper has written some data).</>}
                             </td></tr>
-                          ) : currentStatusRows.map(renderStatusRow)}
+                          ) : currentShown.map(renderStatusRow)}
                         </tbody>
                       </table>
                       </div>
@@ -2941,11 +3016,13 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                       <table className="sm-table">
                         {statusTableHead}
                         <tbody>
-                          {pastStatusRows.length === 0 ? (
+                          {pastShown.length === 0 ? (
                             <tr><td colSpan={7} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-                              Nothing here yet — every status ever seen for this account is currently active above.
+                              {pastStatusRows.length > 0
+                                ? <>No previously-seen status matches the filter ({pastStatusRows.length} hidden).</>
+                                : <>Nothing here yet — every status ever seen for this account is currently active above.</>}
                             </td></tr>
-                          ) : pastStatusRows.map(renderStatusRow)}
+                          ) : pastShown.map(renderStatusRow)}
                         </tbody>
                       </table>
                       </div>
