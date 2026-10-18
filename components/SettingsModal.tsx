@@ -2580,6 +2580,27 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       }
     }))
   }
+  // Text-based breach trigger for statuses whose Duration is WORDING rather
+  // than a clock ("No value", "—", "just now") — see StatusThresholds in
+  // lib/utils.ts. Blank clears it back to minutes-only.
+  const updateStatBreachText = (statusKey: string, text: string) => {
+    setStat(prev => ({
+      ...prev,
+      [statusKey]: {
+        ...(prev[statusKey] ?? { warn: 999, crit: 999 }),
+        breachText: text,
+      }
+    }))
+  }
+  const toggleStatBreachSeverity = (statusKey: string) => {
+    setStat(prev => ({
+      ...prev,
+      [statusKey]: {
+        ...(prev[statusKey] ?? { warn: 999, crit: 999 }),
+        breachSeverity: (prev[statusKey]?.breachSeverity || 'critical') === 'critical' ? 'warning' : 'critical',
+      }
+    }))
+  }
 
   const handleReset = () => {
     if (tab === 'kpi')    setKpi(JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)))
@@ -2852,6 +2873,25 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                             </div>
                           </td>
                         ))}
+                        {/* Text trigger — for statuses whose Duration is
+                            wording rather than a clock. Works alongside the
+                            minute thresholds (leave those blank/N/A to match
+                            on text alone). */}
+                        <td>
+                          <input type="text" className="sm-input" style={{ minWidth: 110 }} disabled={excluded}
+                            placeholder="(none)" value={th.breachText ?? ''}
+                            title={'Breach when this status\'s Duration CONTAINS this text (case-insensitive) — e.g. "No value". For durations reported as wording instead of a clock, which parse to 0 minutes and can never cross a minute threshold. Leave the minute boxes blank to match on text only.'}
+                            onChange={e => updateStatBreachText(key, e.target.value)} />
+                        </td>
+                        <td style={{ textAlign: 'center' }}>
+                          <button type="button" className={`sm-dir-btn${(th.breachSeverity || 'critical') === 'critical' ? ' asc' : ' desc'}`}
+                            disabled={excluded || !th.breachText}
+                            style={{ opacity: th.breachText ? 1 : 0.4 }}
+                            title="Severity for the text trigger"
+                            onClick={() => toggleStatBreachSeverity(key)}>
+                            <span>{(th.breachSeverity || 'critical') === 'critical' ? 'Critical' : 'Warning'}</span>
+                          </button>
+                        </td>
                         <td style={{ textAlign: 'center' }}>
                           <input type="checkbox" checked={excluded} onChange={() => toggleExcluded(key)} />
                         </td>
@@ -2868,7 +2908,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   const statusTableHead = (
                     <thead>
                       <tr>
-                        <th style={{ width: '28%' }}>Status</th><th>Warning (min)</th><th>Critical (min)</th><th>Exclude</th>
+                        <th style={{ width: '22%' }}>Status</th><th>Warning (min)</th><th>Critical (min)</th>
+                        <th title="Breach when this status's Duration CONTAINS this text (case-insensitive) — for durations reported as wording (&quot;No value&quot;, &quot;—&quot;, &quot;just now&quot;) that parse to 0 minutes and can never cross a minute threshold">Breach if text</th>
+                        <th>Text severity</th><th>Exclude</th>
                         <th title="Whether a breach on THIS status is included in the Zoho Cliq channel message (independent of Workforce Logs/RTA Logs, which have their own scope settings)">Send to Cliq</th>
                       </tr>
                     </thead>
@@ -2881,7 +2923,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                         {statusTableHead}
                         <tbody>
                           {currentStatusRows.length === 0 ? (
-                            <tr><td colSpan={5} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                            <tr><td colSpan={7} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
                               No agent statuses currently live — set up an Agent Data Source on the Data Sources tab first
                               (or check back once the scraper has written some data).
                             </td></tr>
@@ -2900,7 +2942,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                         {statusTableHead}
                         <tbody>
                           {pastStatusRows.length === 0 ? (
-                            <tr><td colSpan={5} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                            <tr><td colSpan={7} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
                               Nothing here yet — every status ever seen for this account is currently active above.
                             </td></tr>
                           ) : pastStatusRows.map(renderStatusRow)}

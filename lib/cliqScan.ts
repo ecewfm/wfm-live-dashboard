@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
@@ -189,6 +189,7 @@ interface AccountSettingsRow {
   rta_account_name: string | null
   rta_ai_categorization_enabled: boolean | null
   rta_logs_state: RtaLogsState | null
+  agent_freeze_state: AgentFreezeState | null
   rta_report_kpi: boolean | null
   rta_report_agent_status: boolean | null
 }
@@ -229,7 +230,7 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
       wf_logs_enabled, wf_logs_last_sent_at,
       rta_logs_enabled, rta_logs_last_sent_at, rta_sites, rta_account_name,
       rta_ai_categorization_enabled, rta_logs_state,
-      rta_report_kpi, rta_report_agent_status,
+      rta_report_kpi, rta_report_agent_status, agent_freeze_state,
       zoho_account_name, zoho_account_id,
       zoho_category_text, zoho_category_id,
       zoho_subcategory_text, zoho_subcategory_id,
@@ -237,8 +238,18 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
   `
   const ACCOUNTS_SELECT_TIERS = [
     ACCOUNTS_SELECT,
-    ACCOUNTS_SELECT.replace(/,?\s*rta_report_kpi,\s*rta_report_agent_status/, ''),
+    // Drop ONLY agent_freeze_state — sql/agent_freeze_detection.sql may not
+    // have been run yet. Isolated in its own tier so an unmigrated column
+    // costs just this feature, never the whole scan.
+    ACCOUNTS_SELECT.replace(/,?\s*agent_freeze_state/, ''),
+    // Every tier BELOW this point must also drop it — a later tier exists
+    // because an EARLIER column was missing, and re-requesting the newest one
+    // there would just fail again for a different reason.
     ACCOUNTS_SELECT
+      .replace(/,?\s*agent_freeze_state/, '')
+      .replace(/,?\s*rta_report_kpi,\s*rta_report_agent_status/, ''),
+    ACCOUNTS_SELECT
+      .replace(/,?\s*agent_freeze_state/, '')
       .replace(/,?\s*rta_report_kpi,\s*rta_report_agent_status/, '')
       .replace(/,?\s*rta_logs_state/, ''),
   ]
@@ -514,6 +525,29 @@ async function processAccount(
     return didAnything
   }
 
+  // ── Frozen-scraper detection (agent status) ──────────────────────────────
+  // Runs EVERY scan, independent of whether anything is sent, so the streak
+  // reflects the scrape cadence rather than the Cliq cooldown.
+  //
+  // Skipped entirely when this account's Duration column isn't elapsed time
+  // (DataSourceConfig.agentDurationStatic — e.g. a ticket count): an
+  // unchanging value there is normal, and treating it as frozen would
+  // permanently silence a perfectly healthy account.
+  let agentFrozen = false
+  if (!ds.agentDurationStatic) {
+    const freeze = computeAgentFreeze(breaches, acc.agent_freeze_state)
+    agentFrozen = freeze.frozen
+    // Persist only on CHANGE — avoids an upsert every single minute for
+    // every account just to rewrite an identical row.
+    const prev = acc.agent_freeze_state
+    if (JSON.stringify(prev ?? null) !== JSON.stringify(freeze.next)) {
+      updates.agent_freeze_state = freeze.next
+    }
+    if (agentFrozen) {
+      l(`${accountId}: agent data UNCHANGED for ${AGENT_FREEZE_THRESHOLD}+ consecutive scans (sig ${freeze.sig.slice(0, 40)}...) — scraper page likely frozen; suppressing agent-status Cliq alerts until it moves.`)
+    }
+  }
+
   // ── Zoho Cliq channel alert ──────────────────────────────────────────────
   if (globalSettings.enabled && acc.cliq_channel) {
     // Per the user (2026-10-15): not every breach should go to Cliq — each
@@ -527,11 +561,20 @@ async function processAccount(
     // status duration breaches and KPI breaches. This is Cliq-ONLY —
     // Workforce Logs/RTA Logs keep using the full/unfiltered `breaches` as
     // before.
-    const cliqBreaches = breaches.filter(b =>
-      b.kind === 'agent' ? (!b.status || statusTh[b.status]?.sendToCliq) : !!b.sendToCliq
-    )
+    const cliqBreaches = breaches.filter(b => {
+      if (b.kind !== 'agent') return !!b.sendToCliq
+      // Frozen scraper (per the user, 2026-10-17): the agent table's clock
+      // hasn't moved for AGENT_FREEZE_THRESHOLD consecutive scans, so these
+      // "breaches" are a stuck page re-reporting itself, not live durations.
+      // Drop agent-status breaches ONLY — KPI tiles usually come from a
+      // different table and scraper and may well still be live, so a frozen
+      // agent roster must not silence an SLA alert. Nothing is posted about
+      // the freeze itself; both were the user's explicit choices.
+      if (agentFrozen) return false
+      return !b.status || statusTh[b.status]?.sendToCliq
+    })
     if (cliqBreaches.length === 0) {
-      l(`${accountId}: Cliq — no breach has "Send to Cliq" on — skipping.`)
+      l(`${accountId}: Cliq — ${agentFrozen ? 'agent data frozen and no other breach qualifies' : 'no breach has "Send to Cliq" on'} — skipping.`)
     } else {
       const lastSent = acc.cliq_last_sent_at ? new Date(acc.cliq_last_sent_at).getTime() : 0
       if (forceSend || Date.now() - lastSent >= cooldownMs) {

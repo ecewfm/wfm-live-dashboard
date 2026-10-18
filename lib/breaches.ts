@@ -371,6 +371,73 @@ export function freshestAcrossSources(
   return stamps.reduce((oldest, s) => (new Date(s).getTime() < new Date(oldest).getTime() ? s : oldest))
 }
 
+// ── Frozen-scraper detection for agent-status breaches ───────────────────────
+// Per the user (2026-10-17). When a scraped CRM page crashes or freezes, the
+// scraper keeps writing the SAME agent rows every cycle. The existing
+// staleness gate cannot see this: isDataStale() reads updated_at, which keeps
+// bumping because the scraper IS still writing — only the CONTENT is stuck.
+// Cliq then re-sends the same agent-status breach every cooldown window off a
+// duration that isn't actually advancing.
+//
+// The signal is that an in-status duration is a CLOCK: while a breach
+// persists it must tick. An identical (agent, metric, value) fingerprint
+// across several consecutive scans therefore means the page is stuck.
+//
+// Deliberately narrow, because a false positive silences real alerts:
+//   - Only 'agent'-kind breaches are fingerprinted.
+//   - Only ones whose value looks like a CLOCK (h:mm / m:ss / "55s" / "3m").
+//     A text-trigger breach ("Out of adherence") or a static count can sit
+//     unchanged for perfectly good reasons, so it can't distinguish frozen
+//     from genuinely-constant and is excluded rather than guessed at.
+//   - An account with agentDurationStatic (the mapped column is a ticket
+//     count, not elapsed time) is skipped entirely by the caller.
+// With nothing clock-like breaching, detection is simply inactive.
+export interface AgentFreezeState { sig: string; count: number }
+
+/** How many consecutive identical scans before the data is called frozen.
+ *  The scan cron runs every minute and durations tick every scrape, so 3 in a
+ *  row (~3 min of a perfectly unchanging clock) is well past coincidence
+ *  while still tolerating a single hiccup. */
+export const AGENT_FREEZE_THRESHOLD = 3
+
+// Matches the duration formats these scrapers actually produce:
+//   "5:00", "1:13:25"      (colon forms — Five9/NICE/Talkdesk grids)
+//   "18m 17s", "1h 2m 3s"  (compound — Talkdesk agent tables)
+//   "55s", "20 s", "3m"    (single unit)
+// and deliberately NOT: "Out of adherence" (text trigger), "51/100"
+// (occupancy), "4" (a bare count), "2 units". Those can sit unchanged for
+// legitimate reasons, so treating them as a frozen clock would silence real
+// alerts. An earlier version anchored the single-unit form with ^...$ and
+// therefore missed "18m 17s" entirely — i.e. detection silently never fired
+// for the very accounts that prompted this. Caught by the unit test; keep
+// the test if you touch this.
+const CLOCKLIKE = /\d+\s*:\s*\d{2}|\d+\s*[smhd]\b/i
+
+/** Fingerprint of the clock-like agent-status breaches. Empty string = not
+ *  enough signal to judge (no clock-like agent breach this scan). */
+export function agentBreachSignature(breaches: BreachRow[]): string {
+  const parts = breaches
+    .filter(b => b.kind === 'agent' && CLOCKLIKE.test(String(b.value ?? '')))
+    .map(b => `${b.entity}|${b.metric}|${b.value}`)
+    .sort()
+  return parts.length ? parts.join('~') : ''
+}
+
+/** Advance the freeze tracker for one scan. Pure — the caller persists
+ *  `next` and acts on `frozen`. */
+export function computeAgentFreeze(
+  breaches: BreachRow[], stored: AgentFreezeState | null | undefined
+): { frozen: boolean; next: AgentFreezeState | null; sig: string } {
+  const sig = agentBreachSignature(breaches)
+
+  // Nothing clock-like breaching — can't judge, and must not carry a stale
+  // count forward (that would let an old streak silence the NEXT real breach).
+  if (!sig) return { frozen: false, next: null, sig }
+
+  const count = stored && stored.sig === sig ? stored.count + 1 : 1
+  return { frozen: count >= AGENT_FREEZE_THRESHOLD, next: { sig, count }, sig }
+}
+
 // ── Build breaches for one account ────────────────────────────────────────────
 // agentTimers: live in-memory ticking timers, keyed `${accountId}:${agentName}`
 // — a browser-UI-only feature (Dashboard.tsx ticks these every second between
@@ -470,6 +537,33 @@ export function buildBreaches(
       const dur  = formatSeconds(secs)
       if (mins >= thSt.crit)      rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical', kind: 'agent', status })
       else if (mins >= thSt.warn) rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning',  kind: 'agent', status })
+    }
+
+    // TEXT-based Duration (per the user, 2026-10-17): some sources report
+    // "how long" as WORDING — "No value", "—", "just now", "a few seconds" —
+    // which parses to 0 minutes and therefore can never cross a minute
+    // threshold no matter how it's configured. (Note "in 3 hours"/"in 5
+    // hours" DO parse, to 180/300 min, and are handled by the block above —
+    // this is only for values with no number in them at all.)
+    //
+    // Deliberately OUTSIDE the `thSt.crit < 999` gate above, so this works
+    // on a status whose minute thresholds are left at N/A — that is the
+    // "match on text instead of duration" case. Matched against the RAW
+    // scraped text, not the formatted `dur`, because formatSeconds() would
+    // have already turned "No value" into "0:00" and thrown the wording away.
+    //
+    // Also runs in static mode: the trigger is the literal text, which is
+    // just as meaningful when the column isn't elapsed time.
+    if (thSt?.breachText) {
+      const raw = String(a._duration ?? '')
+      if (raw.toLowerCase().includes(thSt.breachText.toLowerCase())) {
+        rows.push({
+          entity: name, metric: `${status} Duration`, value: raw,
+          threshold: thSt.breachText,
+          severity: thSt.breachSeverity || 'critical',
+          kind: 'agent', status,
+        })
+      }
     }
 
     // Static-mode Duration: a plain NUMERIC threshold on the value itself

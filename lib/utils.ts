@@ -12,7 +12,22 @@ import type { Thresholds, DataSourceConfig, KpiGroup, CellBinding, ExtraTile, Gr
 // defaults to preserving old behavior — this was an explicit choice by the
 // user, so every account's Cliq channel goes quiet on status-duration
 // breaches until someone turns the relevant ones back on.
-export type StatusThresholds = Record<string, { warn: number; crit: number; excluded?: boolean; sendToCliq?: boolean }>
+// breachText/breachSeverity (2026-10-17): some sources report "how long" as
+// WORDING rather than a clock — "No value", "—", "just now", "a few seconds"
+// — which parses to 0 minutes and so can never cross a minute threshold.
+// When breachText is set, an agent in this status whose Duration CONTAINS
+// that text (case-insensitive) breaches regardless of the parsed minutes.
+// Same shape and semantics as AgentExtraColumn.breachText (lib/types.ts), so
+// there is one text-trigger convention in this codebase rather than two.
+//
+// It is an ADDITIONAL trigger, not a replacement: leave warn/crit at N/A
+// (999, what the Settings inputs write when blank) to run on text alone, or
+// set both to get "breach after 60 min OR if it says 'No value'".
+export type StatusThresholds = Record<string, {
+  warn: number; crit: number; excluded?: boolean; sendToCliq?: boolean
+  breachText?: string
+  breachSeverity?: 'warning' | 'critical'   // only meaningful with breachText; defaults to 'critical'
+}>
 
 // ── Default KPI thresholds ────────────────────────────────────────────────────
 export const DEFAULT_THRESHOLDS: Thresholds = {

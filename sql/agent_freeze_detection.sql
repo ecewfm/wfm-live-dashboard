@@ -1,0 +1,35 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Frozen-scraper detection for agent-status Cliq alerts
+-- Run once in: Supabase Dashboard → SQL Editor → New Query
+--
+-- Per the user (2026-10-17): when a scraped CRM page crashes or freezes, the
+-- scraper keeps writing the SAME agent rows every cycle — same agent, same
+-- status, same duration. Two things follow:
+--
+--   1. The existing staleness gate CANNOT catch it. isDataStale() compares
+--      updated_at, and the scraper is still writing every 30s, so updated_at
+--      keeps bumping and the account looks perfectly live. Only the CONTENT
+--      is frozen.
+--   2. Cliq then gets the same agent-status breach re-sent on every cooldown
+--      window, forever, off a duration that is not actually advancing.
+--
+-- An agent's in-status duration is a clock: while a breach persists it MUST
+-- tick. A fingerprint of (agent, metric, value) that is byte-identical across
+-- several consecutive scans therefore means the source page is stuck, not
+-- that the situation is genuinely unchanged.
+--
+-- agent_freeze_state holds that fingerprint plus how many consecutive scans
+-- have matched it:
+--     { "sig": "<hash of the agent-status breach rows>", "count": 3 }
+-- Once count reaches the threshold in lib/cliqScan.ts, agent-status breaches
+-- are dropped from the Cliq message for that account until the fingerprint
+-- changes. KPI breaches are unaffected (they typically come from a different
+-- table and scraper), and nothing is posted about the freeze itself — both
+-- per the user's explicit choice.
+--
+-- Nullable with no default: an account that has never scanned, or a project
+-- where this migration hasn't run, simply skips the check (lib/cliqScan.ts's
+-- tiered select drops the column rather than failing the whole scan).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE wfm_settings ADD COLUMN IF NOT EXISTS agent_freeze_state jsonb;
