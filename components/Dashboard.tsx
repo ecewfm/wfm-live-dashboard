@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
+import { useAuth } from './AuthGate'
+import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
 import { buildBreaches, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
@@ -63,6 +65,11 @@ async function fetchAgentSource(src: AgentSource, accId: string): Promise<any[]>
 
 // ── Main Dashboard component ──────────────────────────────────────────────────
 export default function Dashboard() {
+  // Provided by <AuthGate>, which never renders this component without a
+  // signed-in, active profile.
+  const { profile, signOut: doSignOut } = useAuth()
+  const canOpenSettings = can.openSettings(profile.role)
+
   const [isDark, setIsDark]                 = useState(false)
   const [currentPage, setCurrentPage]       = useState<Page>('overview')
   const [accounts, setAccounts]             = useState<string[]>([])
@@ -327,14 +334,17 @@ export default function Dashboard() {
     async function init() {
       // Load accounts from wfm_accounts table (user-managed)
       const accountConfigs = await loadAccounts()
-      const ids = accountConfigs.map(a => a.id)
+      const allIds = accountConfigs.map(a => a.id)
       // Store display names for use in UI
       const nameMap: Record<string, string> = {}
       accountConfigs.forEach(a => { nameMap[a.id] = a.display_name || a.id })
       setDisplayNames(nameMap)
 
-      // Seed wfm_accounts if it's empty (first run — auto-populate from existing data)
-      if (accountConfigs.length === 0) {
+      // Seed wfm_accounts if it's empty (first run — auto-populate from existing data).
+      // Superuser only: this writes the account registry, and it's also the
+      // only role that would see an empty list as "needs seeding" rather than
+      // "I'm not assigned to anything yet".
+      if (accountConfigs.length === 0 && profile.role === 'superuser') {
         const [r1, r2] = await Promise.all([
           supabase.from('wfm_kpi_snapshots').select('account_id'),
           supabase.from('talkdesk_lob_kpis').select('account_id'),
@@ -345,10 +355,18 @@ export default function Dashboard() {
         if (discovered.size > 0) {
           await seedAccountsIfEmpty([...discovered])
           const seeded = await loadAccounts()
-          ids.push(...seeded.map(a => a.id))
+          allIds.push(...seeded.map(a => a.id))
+          seeded.forEach(a => { nameMap[a.id] = a.display_name || a.id })
+          setDisplayNames({ ...nameMap })
         }
       }
 
+      // THE account scoping point. Everything downstream — KPI fetches,
+      // settings loads, the Overview grid, breach alarms — is driven off this
+      // list, so narrowing it here scopes the whole dashboard. A superuser
+      // gets every account by role; everyone else gets only what
+      // wfm_user_accounts grants them.
+      const ids = visibleAccountsFor(profile, allIds)
       setAccounts(ids)
 
       // Load per-account settings from Supabase (shared) with localStorage fallback
@@ -364,7 +382,10 @@ export default function Dashboard() {
       await Promise.all(ids.map(id => fetchAccount(id, allSettings[id].ds)))
     }
     init()
-  }, [fetchAccount, applySettingsMap])
+    // `profile` is in the deps because the visible account list is derived
+    // from it — if the signed-in user changes, everything downstream must be
+    // rebuilt rather than keeping the previous user's accounts on screen.
+  }, [fetchAccount, applySettingsMap, profile])
 
   // ── Realtime — TEMPORARILY DISABLED (band-aid) ──────────────────────────────
   // Supabase bills Realtime messages per-recipient (1 change × N listening
@@ -703,14 +724,26 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="topbar-right">
-            <button className="btn-icon" onClick={() => setSettingsOpen(true)} title="Settings">
-              <i className="bx bx-cog" />
-            </button>
+            {/* Team leads get the dashboard and nothing else — no settings
+                entry point at all. The Settings modal itself is also gated,
+                so this is presentation, not the only check. */}
+            {canOpenSettings && (
+              <button className="btn-icon" onClick={() => setSettingsOpen(true)} title="Settings">
+                <i className="bx bx-cog" />
+              </button>
+            )}
             <button className="btn-icon" onClick={toggleTheme} title="Toggle theme">
               <i className={`bx ${isDark ? 'bx-sun' : 'bx-moon'}`} />
             </button>
             <button className="btn-icon" onClick={() => accounts.forEach(id => fetchAccount(id, dataSources[id]))} title="Refresh">
               <i className="bx bx-refresh" />
+            </button>
+            <button
+              className="btn-icon"
+              onClick={doSignOut}
+              title={`Signed in as ${profile.username} (${ROLE_LABELS[profile.role]}) — sign out`}
+            >
+              <i className="bx bx-log-out" />
             </button>
           </div>
         </div>

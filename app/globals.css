@@ -434,3 +434,47 @@ body {
 .stale-stamp-icon { font-size: 26px; color: #fff; line-height: 1; }
 .stale-stamp-title { font-size: 14px; font-weight: 800; color: #fff; text-transform: uppercase; letter-spacing: 1.5px; white-space: nowrap; }
 .stale-stamp-sub   { font-size: 9px; font-weight: 600; color: rgba(255,255,255,0.88); letter-spacing: 0.3px; }
+/* ── Auth screens (login / forced password change) ───────────────────────── */
+.auth-screen {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-body); padding: 24px;
+}
+.auth-card {
+  width: 100%; max-width: 380px;
+  display: flex; flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 32px;
+}
+.auth-title { margin: 0 0 4px; font-size: 22px; font-weight: 600; color: var(--text-main); }
+.auth-muted { margin: 0 0 20px; font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+.auth-label { font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }
+.auth-input {
+  padding: 10px 12px; margin-bottom: 16px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-body); color: var(--text-main);
+  font-family: inherit; font-size: 14px;
+}
+.auth-input:focus { outline: 2px solid var(--primary); outline-offset: -1px; }
+.auth-btn {
+  padding: 11px 16px; border: none; border-radius: 6px;
+  background: var(--primary); color: #fff;
+  font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.auth-btn:disabled { opacity: .55; cursor: not-allowed; }
+.auth-btn-ghost {
+  margin-top: 8px; background: transparent;
+  color: var(--text-muted); border: 1px solid var(--border);
+}
+.auth-note {
+  margin: 0 0 16px; padding: 12px;
+  border-radius: 6px; font-size: 13px; line-height: 1.5;
+  background: var(--bg-body); border: 1px solid var(--border); color: var(--text-main);
+}
+.auth-note p { margin: 6px 0 10px; }
+.auth-note code { font-size: 12px; }
+.auth-note-err { border-color: var(--danger); color: var(--danger); background: transparent; }
+.auth-note-ok  { border-color: var(--success); color: var(--success); background: transparent; }

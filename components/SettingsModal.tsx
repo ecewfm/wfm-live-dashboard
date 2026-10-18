@@ -19,8 +19,11 @@ import { addAccount, removeAccount, renameAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS,
 import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
 import type { GeminiKeyMasked } from '@/lib/geminiKeys'
 import { loadGeminiModels, saveGeminiModels } from '@/lib/geminiModels'
+import UsersTab from './UsersTab'
+import { useAuth } from './AuthGate'
+import { can } from '@/lib/authEmail'
 
-type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq'
+type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq' | 'users'
 
 // ── A free-typed mm:ss input that only reformats/commits on blur — a plain
 // controlled input reformatting on every keystroke would fight the user
@@ -2231,7 +2234,12 @@ function RtaReportFlagsCell({ heartbeat, breachChange, disabled, onToggleHeartbe
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
 function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, rtaReportKpi, rtaReportAgentStatus, zohoLookups, alarmSound, knownStatuses, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
-  const [tab, setTab]   = useState<Tab>('accounts')
+  const { profile: me } = useAuth()
+  const canManageAccounts = can.manageAccounts(me.role)
+  const canManageUsers    = can.manageUsers(me.role)
+
+  // An RTA has no Accounts tab, so opening on it would show a blank body.
+  const [tab, setTab]   = useState<Tab>(canManageAccounts ? 'accounts' : 'datasource')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
   const [ds, setDs]     = useState<DataSourceConfig>(JSON.parse(JSON.stringify(dataSource)))
@@ -2667,9 +2675,13 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
 
           {/* Tabs */}
           <div className="sm-tabs">
-            <button className={`sm-tab${tab === 'accounts' ? ' active' : ''}`} onClick={() => setTab('accounts')}>
-              <i className="bx bx-buildings" /> Accounts
-            </button>
+            {/* Creating/removing accounts is global, so it stays with the
+                super user. An RTA configures the accounts they already have. */}
+            {canManageAccounts && (
+              <button className={`sm-tab${tab === 'accounts' ? ' active' : ''}`} onClick={() => setTab('accounts')}>
+                <i className="bx bx-buildings" /> Accounts
+              </button>
+            )}
             <button className={`sm-tab${tab === 'datasource' ? ' active' : ''}`} onClick={() => setTab('datasource')}>
               <i className="bx bx-data" /> Data Sources
             </button>
@@ -2682,17 +2694,26 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             <button className={`sm-tab${tab === 'cliq' ? ' active' : ''}`} onClick={() => setTab('cliq')}>
               <i className="bx bx-bell" /> Zoho Integrations
             </button>
+            {canManageUsers && (
+              <button className={`sm-tab${tab === 'users' ? ' active' : ''}`} onClick={() => setTab('users')}>
+                <i className="bx bx-user" /> Users
+              </button>
+            )}
           </div>
 
           {/* Body */}
           <div className="sm-body">
 
-            {tab === 'accounts' && (
+            {tab === 'accounts' && canManageAccounts && (
               <AccountsTab
                 accounts={accounts}
                 onConfigure={id => { onConfigureAccount(id); setTab('datasource') }}
                 onRefresh={onAccountsChange}
               />
+            )}
+
+            {tab === 'users' && canManageUsers && (
+              <UsersTab accounts={accounts.map(a => ({ id: a.id, display_name: a.display_name || a.id }))} />
             )}
 
             {tab === 'datasource' && (
