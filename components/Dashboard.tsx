@@ -17,6 +17,10 @@ import {
 } from '@/lib/globalAlarm'
 import AlarmPrompt from './AlarmPrompt'
 import {
+  keyBreaches, reconcileCalledOut, toKeySets, loadCalledOut, saveCalledOut,
+  type CalledOutAll,
+} from '@/lib/calledOut'
+import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
   loadCliqSettings, saveCliqSettings, appendKnownStatuses, DEFAULT_CLIQ_GLOBAL_SETTINGS,
   type AccountConfig, type AccountSettings
@@ -586,6 +590,69 @@ export default function Dashboard() {
     return map
   }, [accounts, data, agentTimers, kpiThresholds, statusThresholds, dataSources])
 
+  // Is this account's data real and complete enough to judge anything from?
+  // Anything that treats "a breach isn't in the list" as news (the alarm, the
+  // called-out checks) must wait for this, or the first thing it sees is a
+  // half-loaded page:
+  //   - before the first fetch returns, data[id] is an EMPTY placeholder
+  //     (fetchAccount), which isn't "stale" — it has no timestamp at all.
+  //     `loaded` is checked on the data itself: a separate "loaded" ref was
+  //     tried first and could run AHEAD of the rendered data (an effect runs
+  //     after a render, while the fetch had already marked the ref).
+  //   - until the account's own settings arrive, buildBreaches() falls back to
+  //     DEFAULT thresholds, which produce a different list of breaches.
+  const accountDataReady = (id: string) =>
+    !!(data[id]?.loaded && dataSources[id] && kpiThresholds[id] && statusThresholds[id])
+
+  // ── "Called out" checks on the Breach / Anomalies tables ───────────────────
+  // See lib/calledOut.ts for the rule: a check lasts exactly as long as its
+  // breach stays in the table. The marks live in a ref (the lastSeen times tick
+  // every second and must not re-render anything); only the SET of checked keys
+  // is React state, because that is all the tables draw from.
+  const calledOutRef = useRef<CalledOutAll>({})
+  const calledOutSavedAt = useRef(0)
+  const [calledOut, setCalledOut] = useState<Record<string, Set<string>>>({})
+
+  useEffect(() => {
+    const saved = loadCalledOut()
+    calledOutRef.current = saved
+    setCalledOut(toKeySets(saved))
+  }, [])
+
+  useEffect(() => {
+    const all = calledOutRef.current
+    const now = Date.now()
+    let cleared = false
+    for (const id of accounts) {
+      const marked = all[id]
+      if (!marked || Object.keys(marked).length === 0) continue
+      // Not ready -> we can't tell "the breach ended" from "nothing has loaded
+      // yet", and guessing wrong would wipe every check on every page load.
+      if (!accountDataReady(id)) continue
+      const present = new Set(keyBreaches(allBreaches[id] ?? []).map(k => k.key))
+      const { next, dropped } = reconcileCalledOut(marked, present, now)
+      all[id] = next
+      if (dropped.length) cleared = true
+    }
+    if (cleared) {
+      setCalledOut(toKeySets(all)); saveCalledOut(all); calledOutSavedAt.current = now
+    } else if (now - calledOutSavedAt.current > 20_000) {
+      // Keep the stored last-seen times fresh, so a long-closed tab reopens
+      // knowing how long a breach has really been gone.
+      saveCalledOut(all); calledOutSavedAt.current = now
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allBreaches])
+
+  const toggleCalledOut = useCallback((accountId: string, key: string) => {
+    const all = calledOutRef.current
+    const marked = { ...(all[accountId] ?? {}) }
+    if (key in marked) delete marked[key]; else marked[key] = Date.now()
+    all[accountId] = marked
+    setCalledOut(toKeySets(all))
+    saveCalledOut(all); calledOutSavedAt.current = Date.now()
+  }, [])
+
   // ── Global breach alarm (Settings → Alarm, super users) ────────────────────
   // One sound for every account, played here — at the top of the dashboard —
   // so it works on any page, not only while the Overview cards are on
@@ -651,21 +718,12 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    // Only accounts with real data AND their own settings loaded, and never
-    // stale data. Either gap would make the first baseline wrong, and the
-    // real thing arriving a moment later would look like a wave of new
-    // breaches — ringing on page load for everything already on screen:
-    //   - before the first fetch returns, data[id] is an EMPTY placeholder
-    //     (fetchAccount), which isn't "stale" — it has no timestamp at all.
-    //     `loaded` is checked on the data itself: a separate "loaded" ref was
-    //     tried first and could run AHEAD of the rendered data (this effect
-    //     runs after a render, while the fetch had already marked the ref).
-    //   - default thresholds instead of the account's own.
-    const eligible = accounts.filter(id => {
-      const d = data[id], ds = dataSources[id]
-      return d?.loaded && ds && kpiThresholds[id] && statusThresholds[id]
-        && !isDataStale(freshestAcrossSources(ds, d))
-    })
+    // Only accounts whose data is ready (see accountDataReady) and never stale
+    // data. A wrong first baseline would make the real thing, arriving a moment
+    // later, look like a wave of new breaches — ringing on page load for
+    // everything already on screen.
+    const eligible = accounts.filter(id =>
+      accountDataReady(id) && !isDataStale(freshestAcrossSources(dataSources[id], data[id])))
     const s = alarmRef.current
     const { events, next } = evaluateAlarm(alarmBaselines.current, allBreaches, eligible, s.severity, Date.now())
     // The baseline advances even while the alarm is off, so switching it on
@@ -990,6 +1048,8 @@ export default function Dashboard() {
                 accountId={currentAccount}
                 accountData={currentData}
                 breaches={breaches}
+                calledOut={calledOut[currentAccount] ?? NO_KEYS}
+                onToggleCalledOut={key => toggleCalledOut(currentAccount, key)}
                 alertAcked={alertAcked}
                 onAck={() => setAlertAcked(true)}
                 agentTimers={agentTimers}
@@ -1010,6 +1070,8 @@ export default function Dashboard() {
               data={data}
               agentTimers={agentTimers}
               allBreaches={allBreaches}
+              calledOut={calledOut}
+              onToggleCalledOut={toggleCalledOut}
               kpiThresholds={kpiThresholds}
               dataSources={dataSources}
               displayNames={displayNames}
@@ -1237,6 +1299,25 @@ function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, ico
   )
 }
 
+// The checked-keys set a table gets when nothing is checked (one shared instance,
+// so a prop that never changes doesn't look changed).
+const NO_KEYS: Set<string> = new Set()
+
+// ── The "called out" checkbox in a Breach / Anomalies row ─────────────────────
+// Shared by the Dashboard page and the Overview cards. See lib/calledOut.ts for
+// when a check clears.
+function CalledOutBox({ checked, onToggle, who }: { checked: boolean; onToggle: () => void; who: string }) {
+  return (
+    <input
+      type="checkbox" className="called-out-box" checked={checked} onChange={onToggle}
+      aria-label={`Called out: ${who}`}
+      title={checked
+        ? 'Called out — stays checked while this breach continues, and clears when it goes away'
+        : 'Tick once you have called this out'}
+    />
+  )
+}
+
 // ── A group's header row in the Dashboard page's tables ───────────────────────
 // Shared by Agent Status and Breach / Anomalies so the two sectioned tables
 // beside each other look identical.
@@ -1253,8 +1334,9 @@ function GroupHeaderRow({ label, colSpan }: { label: string; colSpan: number }) 
 }
 
 // ── Dashboard Page ─────────────────────────────────────────────────────────────
-function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, agentTimers, kpiTh, statusTh, ds, layout, onLayoutChange }: {
+function DashboardPage({ accountId, accountData, breaches, calledOut, onToggleCalledOut, alertAcked, onAck, agentTimers, kpiTh, statusTh, ds, layout, onLayoutChange }: {
   accountId: string; accountData: AccountData | undefined; breaches: BreachRow[]
+  calledOut: Set<string>; onToggleCalledOut: (key: string) => void
   alertAcked: boolean; onAck: () => void; agentTimers: Record<string, number>
   kpiTh: Thresholds; statusTh: StatusThresholds; ds: DataSourceConfig
   layout: DashboardLayout; onLayoutChange: (layout: DashboardLayout) => void
@@ -1366,6 +1448,9 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
   const breachSections = useMemo(
     () => sectionBreaches(sortedBreaches, Array.from(agentGroups.keys()), showAgentGroupHeaders),
     [sortedBreaches, agentGroups, showAgentGroupHeaders])
+  // Each row's "called out" key — computed from the UNSORTED list so a row keeps
+  // its key (including any duplicate suffix) whatever the sort order is.
+  const keyOf = useMemo(() => new Map(keyBreaches(breaches).map(k => [k.row, k.key])), [breaches])
 
   return (
     <>
@@ -1402,6 +1487,9 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
           <table className="dash-table">
             <thead>
               <tr>
+                <th className="called-out-th" title="Called out — tick a row once you have called it out. It clears by itself when the breach goes away.">
+                  <i className="bx bx-check-circle" />
+                </th>
                 <SortableTh label="Queue / Agent" active={breachSort?.col === 'entity'}    dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('entity')} />
                 <SortableTh label="Metric"        active={breachSort?.col === 'metric'}    dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('metric')} />
                 <SortableTh label="Value"         active={breachSort?.col === 'value'}     dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('value')} />
@@ -1410,10 +1498,14 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
             </thead>
             <tbody>
               {sortedBreaches.length === 0
-                ? <tr><td colSpan={4} className="no-data">No breaches detected</td></tr>
+                ? <tr><td colSpan={5} className="no-data">No breaches detected</td></tr>
                 : breachSections.flatMap(section => {
                   const rows = section.rows.map((b, i) => (
                     <tr key={`${section.group}-${i}`}>
+                      <td className="called-out-td">
+                        <CalledOutBox checked={calledOut.has(keyOf.get(b) ?? '')} who={`${b.entity} — ${b.metric}`}
+                          onToggle={() => { const k = keyOf.get(b); if (k) onToggleCalledOut(k) }} />
+                      </td>
                       <td style={{ fontWeight: 600 }}>{b.entity}</td>
                       <td>{b.metric}</td>
                       <td><span className={b.severity === 'critical' ? 'badge-crit' : 'badge-warn'}>{b.value}</span></td>
@@ -1421,7 +1513,7 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
                     </tr>
                   ))
                   return section.group
-                    ? [<GroupHeaderRow key={`${section.group}-hdr`} label={section.group} colSpan={4} />, ...rows]
+                    ? [<GroupHeaderRow key={`${section.group}-hdr`} label={section.group} colSpan={5} />, ...rows]
                     : rows
                 })
               }
@@ -1708,9 +1800,10 @@ function AccountFilterDropdown({ accounts, displayNames, selected, onApply }: {
 }
 
 // ── Overview Page ──────────────────────────────────────────────────────────────
-function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
+function OverviewPage({ accounts, data, agentTimers, allBreaches, calledOut, onToggleCalledOut, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
+  calledOut: Record<string, Set<string>>; onToggleCalledOut: (accId: string, key: string) => void
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
   headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
@@ -1741,7 +1834,8 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
       </div>
       <OverviewMasonry
         accounts={visibleAccounts} data={data} agentTimers={agentTimers}
-        allBreaches={allBreaches} kpiThresholds={kpiThresholds} dataSources={dataSources}
+        allBreaches={allBreaches} calledOut={calledOut} onToggleCalledOut={onToggleCalledOut}
+        kpiThresholds={kpiThresholds} dataSources={dataSources}
         displayNames={displayNames} headerColors={headerColors} alarmSounds={alarmSounds}
         onHeaderColorsChange={onHeaderColorsChange}
         rtaLogsEnabledMap={rtaLogsEnabledMap}
@@ -1750,9 +1844,10 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
   )
 }
 
-function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
+function OverviewMasonry({ accounts, data, agentTimers, allBreaches, calledOut, onToggleCalledOut, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
+  calledOut: Record<string, Set<string>>; onToggleCalledOut: (accId: string, key: string) => void
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
   headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
@@ -1804,6 +1899,8 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
             accountData={data[accId]}
             agentTimers={agentTimers}
             breaches={allBreaches[accId] ?? []}
+            calledOut={calledOut[accId] ?? NO_KEYS}
+            onToggleCalledOut={key => onToggleCalledOut(accId, key)}
             kpiTh={kpiThresholds[accId] ?? DEFAULT_THRESHOLDS}
             ds={dataSources[accId] ?? DEFAULT_DATA_SOURCE}
             colors={headerColors[accId] ?? DEFAULT_HEADER_COLORS}
@@ -1818,9 +1915,10 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
 }
 
 // ── Overview Card ─────────────────────────────────────────────────────────────
-function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds, colors, alarmSound, onColorsChange, rtaLogsEnabled }: {
+function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, calledOut, onToggleCalledOut, kpiTh, ds, colors, alarmSound, onColorsChange, rtaLogsEnabled }: {
   accId: string; displayName: string; accountData: AccountData | undefined
   agentTimers: Record<string, number>; breaches: BreachRow[]
+  calledOut: Set<string>; onToggleCalledOut: (key: string) => void
   kpiTh: Thresholds; ds: DataSourceConfig
   colors: HeaderColors; alarmSound: string
   onColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
@@ -1974,17 +2072,20 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
       <div className="ov-breach-section">
         <div className="ov-breach-header"><i className="bx bx-error-circle" /> Breach / Anomalies</div>
         <table className="ov-breach-table">
-          <thead><tr><th>Queue/Agent</th><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr></thead>
+          <thead><tr><th className="called-out-th" title="Called out — tick a row once you have called it out. It clears by itself when the breach goes away."><i className="bx bx-check-circle" /></th><th>Queue/Agent</th><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr></thead>
           <tbody>
             {breaches.length === 0 ? (
               <tr>
-                <td colSpan={5} style={{ textAlign: 'center', color: 'var(--success)', fontSize: 12, padding: 14 }}>
+                <td colSpan={6} style={{ textAlign: 'center', color: 'var(--success)', fontSize: 12, padding: 14 }}>
                   <i className="bx bx-check-circle" style={{ marginRight: 5, verticalAlign: 'middle' }} />
                   No breaches detected
                 </td>
               </tr>
-            ) : breaches.map((b, i) => (
+            ) : keyBreaches(breaches).map(({ row: b, key }, i) => (
               <tr key={i}>
+                <td className="called-out-td">
+                  <CalledOutBox checked={calledOut.has(key)} who={`${b.entity} — ${b.metric}`} onToggle={() => onToggleCalledOut(key)} />
+                </td>
                 <td style={{ fontWeight: 500 }}>{b.entity}</td>
                 <td>{b.metric}</td>
                 <td><span className={`ov-breach-value ${b.severity}`}>{b.value}</span></td>
