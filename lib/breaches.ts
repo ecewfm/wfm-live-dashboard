@@ -280,6 +280,13 @@ export interface BreachRow {
   // an agent breach is new only when a NAME not seen before joins that
   // breach type, not on every duration tick for an already-known agent.
   kind: 'kpi' | 'agent'
+  // Only on 'kind:agent' rows: the agent's own group — the `_agentGroup` that
+  // normalizeAgentRow() set from its AgentSource (the source's label, e.g.
+  // "Licensed Agents", or the value of its groupByCol). The Dashboard page uses
+  // it to section the Breach / Anomalies table the same way the Agent Status
+  // table is sectioned (see sectionBreaches below). Absent on KPI rows, and on
+  // agents whose source has no group.
+  group?: string
   // Only set for a 'kind:agent' row that came from the named-status duration
   // check below (StatusThresholds-driven, e.g. "On Call" / "Not Ready
   // (Break)") — absent for the OTHER two agent-breach paths (the static-
@@ -516,6 +523,8 @@ export function buildBreaches(
   accountData.agents.forEach(a => {
     const status = String(a._status ?? '')
     const name   = String(a._name ?? '')
+    // Carried on every row this agent produces (see BreachRow.group).
+    const group  = String(a._agentGroup ?? '') || undefined
 
     // Excluded statuses (e.g. "Logged Out"/"Offline") never breach AT ALL —
     // not just duration, but ALSO the text-based custom-column check below.
@@ -535,8 +544,8 @@ export function buildBreaches(
       const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
       const mins = secs / 60
       const dur  = formatSeconds(secs)
-      if (mins >= thSt.crit)      rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical', kind: 'agent', status })
-      else if (mins >= thSt.warn) rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning',  kind: 'agent', status })
+      if (mins >= thSt.crit)      rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical', kind: 'agent', status, group })
+      else if (mins >= thSt.warn) rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.warn}m`, severity: 'warning',  kind: 'agent', status, group })
     }
 
     // TEXT-based Duration (per the user, 2026-10-17): some sources report
@@ -561,7 +570,7 @@ export function buildBreaches(
           entity: name, metric: `${status} Duration`, value: raw,
           threshold: thSt.breachText,
           severity: thSt.breachSeverity || 'critical',
-          kind: 'agent', status,
+          kind: 'agent', status, group,
         })
       }
     }
@@ -580,8 +589,8 @@ export function buildBreaches(
         const isWarn = th.direction === 'desc' ? num <= th.warn : num >= th.warn
         const label  = ds.agentDurationLabel || 'Duration'
         const cmp    = th.direction === 'desc' ? '≤' : '≥'
-        if (isCrit)      rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.crit}`, severity: 'critical', kind: 'agent' })
-        else if (isWarn) rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.warn}`, severity: 'warning',  kind: 'agent' })
+        if (isCrit)      rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.crit}`, severity: 'critical', kind: 'agent', group })
+        else if (isWarn) rows.push({ entity: name, metric: label, value: raw, threshold: `${cmp}${th.warn}`, severity: 'warning',  kind: 'agent', group })
       }
     }
 
@@ -620,10 +629,51 @@ export function buildBreaches(
         // reads "Junnel | Away | 4m 26s | Out of adherence" instead of
         // "Junnel | Adherence | Out of adherence | Out of adherence".
         const metricVal = String(a[`_extraMetric_${col.key}`] ?? '').trim()
-        rows.push({ entity: name, metric: metricVal || col.label, value: durationVal || raw, threshold: trigger, severity: col.breachSeverity || 'critical', kind: 'agent' })
+        rows.push({ entity: name, metric: metricVal || col.label, value: durationVal || raw, threshold: trigger, severity: col.breachSeverity || 'critical', kind: 'agent', group })
       }
     })
   })
 
   return rows
+}
+
+// ── Section the Breach / Anomalies table by agent group ──────────────────────
+// Used by the Dashboard page, so the breach table is organised the same way the
+// Agent Status table beside it is: one header per group, rows underneath.
+// PURE (no React, no I/O) so the rule can be tested directly.
+//
+//   - Rows with no group — every KPI/queue-level breach, plus agents whose
+//     source has no group — come FIRST, with no header (an unlabelled section).
+//   - Then one section per agent group that actually has a breach, in
+//     `groupOrder` (the order the Agent Status table lists its groups). A group
+//     with no breaches gets no header: it only appears when something in it
+//     is breached.
+//   - A group not named in `groupOrder` can't normally happen (the rows came
+//     from the same agents), but is kept — after the known ones, first-seen
+//     order — rather than silently dropped.
+//   - Rows keep the order they were given, section by section, so a column sort
+//     applied before this call sorts within each section.
+//   - `byGroup` false → one unlabelled section holding everything. The caller
+//     passes false when the account has a single agent group, for the same
+//     reason Agent Status shows no header then: one header over everything
+//     says nothing.
+export interface BreachSection { group: string; rows: BreachRow[] }
+
+export function sectionBreaches(rows: BreachRow[], groupOrder: string[], byGroup: boolean): BreachSection[] {
+  if (!byGroup) return rows.length ? [{ group: '', rows }] : []
+
+  const ungrouped: BreachRow[] = []
+  const grouped = new Map<string, BreachRow[]>()
+  for (const r of rows) {
+    if (!r.group) { ungrouped.push(r); continue }
+    const list = grouped.get(r.group)
+    if (list) list.push(r); else grouped.set(r.group, [r])
+  }
+
+  const sections: BreachSection[] = []
+  if (ungrouped.length) sections.push({ group: '', rows: ungrouped })
+  const known = groupOrder.filter(g => grouped.has(g))
+  const extra = [...grouped.keys()].filter(g => !groupOrder.includes(g))
+  for (const g of [...known, ...extra]) sections.push({ group: g, rows: grouped.get(g)! })
+  return sections
 }

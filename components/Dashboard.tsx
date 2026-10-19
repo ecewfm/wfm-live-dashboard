@@ -7,7 +7,7 @@ import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, sectionBreaches, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
@@ -1237,6 +1237,21 @@ function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, ico
   )
 }
 
+// ── A group's header row in the Dashboard page's tables ───────────────────────
+// Shared by Agent Status and Breach / Anomalies so the two sectioned tables
+// beside each other look identical.
+function GroupHeaderRow({ label, colSpan }: { label: string; colSpan: number }) {
+  return (
+    <tr>
+      <td colSpan={colSpan} style={{
+        background: 'var(--bg-secondary, rgba(127,127,127,.08))', fontWeight: 700,
+        fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px',
+        color: 'var(--text-muted)', padding: '6px 12px',
+      }}>{label}</td>
+    </tr>
+  )
+}
+
 // ── Dashboard Page ─────────────────────────────────────────────────────────────
 function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, agentTimers, kpiTh, statusTh, ds, layout, onLayoutChange }: {
   accountId: string; accountData: AccountData | undefined; breaches: BreachRow[]
@@ -1344,6 +1359,14 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
     })
   }, [breaches, breachSort])
 
+  // The table below is sectioned by agent group exactly when Agent Status is
+  // (showAgentGroupHeaders), in that table's group order — so the two panels
+  // beside each other read the same way. Sorting happens first, so a header
+  // click sorts within each section. See sectionBreaches() in lib/breaches.ts.
+  const breachSections = useMemo(
+    () => sectionBreaches(sortedBreaches, Array.from(agentGroups.keys()), showAgentGroupHeaders),
+    [sortedBreaches, agentGroups, showAgentGroupHeaders])
+
   return (
     <>
       {breaches.length > 0 && !alertAcked && (
@@ -1388,14 +1411,19 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
             <tbody>
               {sortedBreaches.length === 0
                 ? <tr><td colSpan={4} className="no-data">No breaches detected</td></tr>
-                : sortedBreaches.map((b, i) => (
-                  <tr key={i}>
-                    <td style={{ fontWeight: 600 }}>{b.entity}</td>
-                    <td>{b.metric}</td>
-                    <td><span className={b.severity === 'critical' ? 'badge-crit' : 'badge-warn'}>{b.value}</span></td>
-                    <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{b.threshold}</td>
-                  </tr>
-                ))
+                : breachSections.flatMap(section => {
+                  const rows = section.rows.map((b, i) => (
+                    <tr key={`${section.group}-${i}`}>
+                      <td style={{ fontWeight: 600 }}>{b.entity}</td>
+                      <td>{b.metric}</td>
+                      <td><span className={b.severity === 'critical' ? 'badge-crit' : 'badge-warn'}>{b.value}</span></td>
+                      <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{b.threshold}</td>
+                    </tr>
+                  ))
+                  return section.group
+                    ? [<GroupHeaderRow key={`${section.group}-hdr`} label={section.group} colSpan={4} />, ...rows]
+                    : rows
+                })
               }
             </tbody>
           </table>
@@ -1457,16 +1485,7 @@ function DashboardPage({ accountId, accountData, breaches, alertAcked, onAck, ag
                     )
                   })
                   if (!showAgentGroupHeaders || !groupName) return rows
-                  return [
-                    <tr key={`${groupName}-hdr`}>
-                      <td colSpan={colCount} style={{
-                        background: 'var(--bg-secondary, rgba(127,127,127,.08))', fontWeight: 700,
-                        fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px',
-                        color: 'var(--text-muted)', padding: '6px 12px',
-                      }}>{groupName}</td>
-                    </tr>,
-                    ...rows,
-                  ]
+                  return [<GroupHeaderRow key={`${groupName}-hdr`} label={groupName} colSpan={colCount} />, ...rows]
                 })
                 return body.length > 0 ? body : <tr><td colSpan={colCount} className="no-data">No agents match the current filter</td></tr>
               })()}
