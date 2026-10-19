@@ -1,7 +1,8 @@
 // lib/calledOut.ts
-// "Called out" check marks on the Breach / Anomalies tables (Dashboard page and
-// Overview cards). An RTA ticks a row once they've called that agent / raised
-// that breach, so nobody has to remember — or do it twice.
+// "Called out" check marks on the Breach / Anomalies table of the Dashboard page
+// (not the Overview cards — those stay a compact at-a-glance view). An RTA ticks
+// a row once they've called that agent / raised that breach, so nobody has to
+// remember — or do it twice.
 //
 // THE RULE (as the users asked for it): a check lives exactly as long as its
 // breach does. The moment the row leaves the table — the agent changed aux,

@@ -207,13 +207,11 @@ body {
 .dark .dash-table tbody tr:hover { background: rgba(255,255,255,0.025); }
 .no-data { padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px; }
 
-/* ── "Called out" checkbox column — Breach / Anomalies on the Dashboard page and
-      the Overview cards. Narrow, centred; the header cell is just the icon. ── */
-.dash-table thead th.called-out-th,
-.ov-breach-table thead th.called-out-th { width: 34px; padding-left: 8px; padding-right: 4px; text-align: center; font-size: 13px; }
+/* ── "Called out" checkbox column — Breach / Anomalies on the Dashboard page.
+      Narrow, centred; the header cell is just the icon. ── */
+.dash-table thead th.called-out-th { width: 34px; padding-left: 8px; padding-right: 4px; text-align: center; font-size: 13px; }
 .called-out-th i { vertical-align: middle; }
-.dash-table tbody td.called-out-td,
-.ov-breach-table tbody td.called-out-td { width: 34px; padding-left: 8px; padding-right: 4px; text-align: center; }
+.dash-table tbody td.called-out-td { width: 34px; padding-left: 8px; padding-right: 4px; text-align: center; }
 .called-out-box { width: 15px; height: 15px; margin: 0; cursor: pointer; vertical-align: middle; accent-color: var(--success, #2e8b57); }
 .called-out-box:focus-visible { outline: 2px solid var(--primary, #d97a35); outline-offset: 2px; }
 

@@ -1070,8 +1070,6 @@ export default function Dashboard() {
               data={data}
               agentTimers={agentTimers}
               allBreaches={allBreaches}
-              calledOut={calledOut}
-              onToggleCalledOut={toggleCalledOut}
               kpiThresholds={kpiThresholds}
               dataSources={dataSources}
               displayNames={displayNames}
@@ -1304,8 +1302,9 @@ function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, ico
 const NO_KEYS: Set<string> = new Set()
 
 // ── The "called out" checkbox in a Breach / Anomalies row ─────────────────────
-// Shared by the Dashboard page and the Overview cards. See lib/calledOut.ts for
-// when a check clears.
+// Dashboard page only — the Overview cards are the compact at-a-glance view and
+// deliberately have no checkbox (per the users, 2026-10-19). See
+// lib/calledOut.ts for when a check clears.
 function CalledOutBox({ checked, onToggle, who }: { checked: boolean; onToggle: () => void; who: string }) {
   return (
     <input
@@ -1800,10 +1799,9 @@ function AccountFilterDropdown({ accounts, displayNames, selected, onApply }: {
 }
 
 // ── Overview Page ──────────────────────────────────────────────────────────────
-function OverviewPage({ accounts, data, agentTimers, allBreaches, calledOut, onToggleCalledOut, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
+function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
-  calledOut: Record<string, Set<string>>; onToggleCalledOut: (accId: string, key: string) => void
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
   headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
@@ -1834,8 +1832,7 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, calledOut, onT
       </div>
       <OverviewMasonry
         accounts={visibleAccounts} data={data} agentTimers={agentTimers}
-        allBreaches={allBreaches} calledOut={calledOut} onToggleCalledOut={onToggleCalledOut}
-        kpiThresholds={kpiThresholds} dataSources={dataSources}
+        allBreaches={allBreaches} kpiThresholds={kpiThresholds} dataSources={dataSources}
         displayNames={displayNames} headerColors={headerColors} alarmSounds={alarmSounds}
         onHeaderColorsChange={onHeaderColorsChange}
         rtaLogsEnabledMap={rtaLogsEnabledMap}
@@ -1844,10 +1841,9 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, calledOut, onT
   )
 }
 
-function OverviewMasonry({ accounts, data, agentTimers, allBreaches, calledOut, onToggleCalledOut, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
+function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
-  calledOut: Record<string, Set<string>>; onToggleCalledOut: (accId: string, key: string) => void
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
   displayNames: Record<string, string>
   headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
@@ -1899,8 +1895,6 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, calledOut, 
             accountData={data[accId]}
             agentTimers={agentTimers}
             breaches={allBreaches[accId] ?? []}
-            calledOut={calledOut[accId] ?? NO_KEYS}
-            onToggleCalledOut={key => onToggleCalledOut(accId, key)}
             kpiTh={kpiThresholds[accId] ?? DEFAULT_THRESHOLDS}
             ds={dataSources[accId] ?? DEFAULT_DATA_SOURCE}
             colors={headerColors[accId] ?? DEFAULT_HEADER_COLORS}
@@ -1915,10 +1909,9 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, calledOut, 
 }
 
 // ── Overview Card ─────────────────────────────────────────────────────────────
-function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, calledOut, onToggleCalledOut, kpiTh, ds, colors, alarmSound, onColorsChange, rtaLogsEnabled }: {
+function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds, colors, alarmSound, onColorsChange, rtaLogsEnabled }: {
   accId: string; displayName: string; accountData: AccountData | undefined
   agentTimers: Record<string, number>; breaches: BreachRow[]
-  calledOut: Set<string>; onToggleCalledOut: (key: string) => void
   kpiTh: Thresholds; ds: DataSourceConfig
   colors: HeaderColors; alarmSound: string
   onColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
@@ -2072,20 +2065,17 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
       <div className="ov-breach-section">
         <div className="ov-breach-header"><i className="bx bx-error-circle" /> Breach / Anomalies</div>
         <table className="ov-breach-table">
-          <thead><tr><th className="called-out-th" title="Called out — tick a row once you have called it out. It clears by itself when the breach goes away."><i className="bx bx-check-circle" /></th><th>Queue/Agent</th><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr></thead>
+          <thead><tr><th>Queue/Agent</th><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr></thead>
           <tbody>
             {breaches.length === 0 ? (
               <tr>
-                <td colSpan={6} style={{ textAlign: 'center', color: 'var(--success)', fontSize: 12, padding: 14 }}>
+                <td colSpan={5} style={{ textAlign: 'center', color: 'var(--success)', fontSize: 12, padding: 14 }}>
                   <i className="bx bx-check-circle" style={{ marginRight: 5, verticalAlign: 'middle' }} />
                   No breaches detected
                 </td>
               </tr>
-            ) : keyBreaches(breaches).map(({ row: b, key }, i) => (
+            ) : breaches.map((b, i) => (
               <tr key={i}>
-                <td className="called-out-td">
-                  <CalledOutBox checked={calledOut.has(key)} who={`${b.entity} — ${b.metric}`} onToggle={() => onToggleCalledOut(key)} />
-                </td>
                 <td style={{ fontWeight: 500 }}>{b.entity}</td>
                 <td>{b.metric}</td>
                 <td><span className={`ov-breach-value ${b.severity}`}>{b.value}</span></td>
