@@ -58,12 +58,40 @@ export interface RtaLogsChangeResult {
 }
 
 export function computeRtaLogsChangeSignal(breaches: BreachRow[], stored: RtaLogsState | null | undefined): RtaLogsChangeResult {
+  const { changes, currentSnapshot } = explainBreachChanges(breaches, stored)
+  return { shouldSend: changes.length > 0, currentSnapshot }
+}
+
+/** One thing that's new since the stored snapshot. */
+export type BreachChange =
+  | { kind: 'kpi'; entity: string; metric: string; value: string; previous: string | null }
+  | { kind: 'agent'; metric: string; agent: string }
+
+/**
+ * THE change rule, shared by Workforce RTA Logs (computeRtaLogsChangeSignal
+ * above, server side) and the global breach alarm (lib/globalAlarm.ts,
+ * browser side) — one implementation so the two can never disagree about
+ * what counts as "something changed":
+ *   - a KPI breach whose VALUE differs from the snapshot (or is new),
+ *   - an agent name that wasn't in the snapshot for that breach type. A
+ *     brand-new breach type (a new aux/status starting to breach) counts too,
+ *     since every agent under it is new.
+ * A breach that merely clears, or an agent whose duration keeps climbing,
+ * is not a change.
+ */
+export function explainBreachChanges(
+  breaches: BreachRow[],
+  stored: RtaLogsState | null | undefined,
+): { changes: BreachChange[]; currentSnapshot: RtaLogsState } {
   const currentKpi: Record<string, string> = {}
   const currentAgent: Record<string, string[]> = {}
+  const kpiRow: Record<string, BreachRow> = {}
 
   for (const b of breaches) {
     if (b.kind === 'kpi') {
-      currentKpi[`${b.entity}|${b.metric}`] = b.value
+      const key = `${b.entity}|${b.metric}`
+      currentKpi[key] = b.value
+      kpiRow[key] = b
     } else {
       const names = currentAgent[b.metric] ?? (currentAgent[b.metric] = [])
       if (!names.includes(b.entity)) names.push(b.entity)
@@ -72,20 +100,22 @@ export function computeRtaLogsChangeSignal(breaches: BreachRow[], stored: RtaLog
 
   const prevKpi   = stored?.kpi   ?? {}
   const prevAgent = stored?.agent ?? {}
-
-  let shouldSend = false
+  const changes: BreachChange[] = []
 
   for (const key of Object.keys(currentKpi)) {
-    if (prevKpi[key] !== currentKpi[key]) { shouldSend = true; break }
+    if (prevKpi[key] !== currentKpi[key]) {
+      const r = kpiRow[key]
+      changes.push({ kind: 'kpi', entity: r.entity, metric: r.metric, value: r.value, previous: prevKpi[key] ?? null })
+    }
   }
-  if (!shouldSend) {
-    for (const key of Object.keys(currentAgent)) {
-      const prevNames = prevAgent[key] ?? []
-      if (currentAgent[key].some(name => !prevNames.includes(name))) { shouldSend = true; break }
+  for (const metric of Object.keys(currentAgent)) {
+    const prevNames = prevAgent[metric] ?? []
+    for (const agent of currentAgent[metric]) {
+      if (!prevNames.includes(agent)) changes.push({ kind: 'agent', metric, agent })
     }
   }
 
-  return { shouldSend, currentSnapshot: { kpi: currentKpi, agent: currentAgent } }
+  return { changes, currentSnapshot: { kpi: currentKpi, agent: currentAgent } }
 }
 
 const HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000

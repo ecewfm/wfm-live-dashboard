@@ -116,17 +116,34 @@ function buildTiles(card: DOMRect, vw: number, vh: number): CSSProperties[] {
   return out
 }
 
+
+// ── Once-per-page-load entrances ─────────────────────────────────────────────
+// The file assembly and the hero's entrance play on the FIRST visit and after a
+// reload — never again within the same page lifetime (signing out, moving from
+// sign-in to choose-a-password, etc. use the card-replace transition instead).
+// Module-level, so a full reload resets them and nothing else does.
+//
+// Read in a useState initializer, SET in an effect. That split matters in
+// development: React StrictMode deliberately runs initializers twice, so a
+// "claim it on first read" flag would be claimed by the throwaway first run
+// and the real one would skip the animation. Effects run after the real
+// render, and StrictMode's simulated remount keeps state, so this is safe.
+let assemblyPlayedThisLoad = false
+let heroIntroPlayedThisLoad = false
+
+/** Card replace timings — must match .cardOut / .cardIn in AuthHero.module.css. */
+const SWAP_OUT_MS = 260
+
 // ── Hero layout ──────────────────────────────────────────────────────────────
-export default function AuthShell({ children, intro = true }: {
-  children: ReactNode
-  /** false = render settled (no entrance), e.g. moving from sign-in to set-password. */
-  intro?: boolean
-}) {
+export default function AuthShell({ children }: { children: ReactNode }) {
   const [{ motion, forced }] = useState(resolveMotion)
+  // Entrance only the first time this page load shows the hero.
+  const [intro] = useState(() => !heroIntroPlayedThisLoad)
   const [step, setStep] = useState(intro ? 0 : STEPS.length - 1)
 
   useEffect(() => {
-    if (!intro) { setStep(STEPS.length - 1); return }
+    heroIntroPlayedThisLoad = true
+    if (!intro) return
     const timers = TIMING[motion].stepsAt.map((ms, i) => setTimeout(() => setStep(i + 1), ms))
     return () => timers.forEach(clearTimeout)
   }, [intro, motion])
@@ -181,36 +198,92 @@ export default function AuthShell({ children, intro = true }: {
   )
 }
 
-// ── The self-assembling card ─────────────────────────────────────────────────
-export function AssembleCard({ children }: { children: ReactNode }) {
-  // Always assembles — the CSS picks full or gentle motion. Only the cleanup
-  // timer needs to know which, since the gentle version finishes sooner.
+// ── Card swap: replace one card with another ────────────────────────────────
+/**
+ * Holds whichever card is on screen (sign-in or choose-a-password). When
+ * `view` changes, the current card slides out to the left and fades, THEN the
+ * new one slides in from the right — a page-replace, not a re-assembly.
+ *
+ * Sequential (out, then in) rather than overlapping on purpose: the two cards
+ * are different heights, and the panel centres its contents, so overlapping
+ * them would make the outgoing card jump as the layout re-centred. Swapping
+ * while neither is visible hides that completely.
+ *
+ * The very first card of the page load is the one that assembles from files.
+ */
+export function CardSwap({ view, children }: { view: string; children: ReactNode }) {
+  const [current, setCurrent] = useState(view)
+  // The first card this page load assembles; every later one is a replace.
+  const [entrance, setEntrance] = useState<'assemble' | 'replace'>(() => (assemblyPlayedThisLoad ? 'replace' : 'assemble'))
+
+  // While the old card is leaving, keep rendering the element it was last
+  // rendered with: same component, same key → React keeps that instance, so
+  // the outgoing form doesn't flash empty as it slides away.
+  const lastChildren = useRef<ReactNode>(children)
+  if (view === current) lastChildren.current = children
+
+  useEffect(() => {
+    if (view === current) return
+    const t = setTimeout(() => {
+      setCurrent(view)
+      setEntrance('replace')
+    }, resolveMotion().motion === 'gentle' ? 0 : SWAP_OUT_MS)
+    return () => clearTimeout(t)
+  }, [view, current])
+
+  const leaving = view !== current
+  // swapArea reserves the taller card's height, so swapping cards doesn't
+  // make the vertically-centred panel re-centre — which made the brand above
+  // the card jump ~47px at the moment of the swap.
+  return (
+    <div className={styles.swapArea}>
+      <AssembleCard key={current} entrance={entrance} leaving={leaving}>
+        {leaving ? lastChildren.current : children}
+      </AssembleCard>
+    </div>
+  )
+}
+
+// ── The card ─────────────────────────────────────────────────────────────────
+function AssembleCard({ children, entrance, leaving }: {
+  children: ReactNode
+  /** 'assemble' = built from flying files (first card per page load); 'replace' = slides in. */
+  entrance: 'assemble' | 'replace'
+  /** True while this card is sliding out to make way for the next one. */
+  leaving: boolean
+}) {
   const [{ motion }] = useState(resolveMotion)
   const cardRef = useRef<HTMLDivElement>(null)
   const [tiles, setTiles] = useState<CSSProperties[] | null>(null)
-  const [tilesGone, setTilesGone] = useState(false)
+  const [tilesGone, setTilesGone] = useState(entrance !== 'assemble')
 
-  // Measure where the card actually sits, then create the tiles with their
-  // off-screen starts. useLayoutEffect runs after the DOM exists but BEFORE
-  // the browser paints, and its setState re-renders before that paint too —
-  // so the tiles are born already in position and their animations start
-  // from the right place. (Rendering them first and patching the positions
-  // in afterwards would let them flash at their slots for a frame.)
+  // Assembly only: measure where the card sits, then create the tiles with
+  // their off-screen starts. useLayoutEffect runs after the DOM exists but
+  // BEFORE paint, and its setState re-renders before that paint too — so the
+  // tiles are born already in position. (Rendering first and patching the
+  // positions afterwards would flash them at their slots for a frame.)
   useLayoutEffect(() => {
+    if (entrance !== 'assemble') return
     const el = cardRef.current
     if (el) setTiles(buildTiles(el.getBoundingClientRect(), window.innerWidth, window.innerHeight))
-  }, [])
+  }, [entrance])
 
   useEffect(() => {
+    // Mark it played once this card is genuinely on screen (see the note on
+    // the flags above for why this isn't done during render).
+    if (entrance === 'assemble') assemblyPlayedThisLoad = true
+    if (entrance !== 'assemble') return
     const t = setTimeout(() => setTilesGone(true), TIMING[motion].assemblyMs)
     return () => clearTimeout(t)
-  }, [motion])
+  }, [entrance, motion])
+
+  const phase = leaving ? styles.leaving : entrance === 'assemble' ? styles.assembling : styles.replacing
 
   return (
-    <div ref={cardRef} className={`${styles.card} ${styles.assembling}`}>
+    <div ref={cardRef} className={`${styles.card} ${phase}`} aria-hidden={leaving || undefined}>
       <div className={styles.surface} aria-hidden><span className={styles.fill} /></div>
       <div className={styles.frame} aria-hidden />
-      {tiles && !tilesGone && (
+      {entrance === 'assemble' && tiles && !tilesGone && (
         <div className={styles.tiles} aria-hidden>
           {tiles.map((style, i) => (
             <span key={i} className={styles.tile} style={style}><span className={styles.paper} /></span>

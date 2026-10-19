@@ -306,6 +306,30 @@
 
 .content { position: relative; z-index: 2; }
 
+/* ── Card replace (sign-in ⇄ choose-a-password, and any card after the first) ─
+   Not a re-assembly: the outgoing card slides left and fades, then the new
+   one slides in from the right, like turning to the next page. The file
+   assembly above is reserved for the first card of each page load.
+   Durations must match SWAP_OUT_MS in AuthShell.tsx. */
+/* Holds whichever card is showing. min-height ≈ the taller (choose-a-password)
+   card, so the panel — which centres its contents vertically — keeps the same
+   height across a swap and the brand above the card stays put. */
+.swapArea {
+  width: min(400px, 100%);
+  min-height: 430px;
+}
+.leaving {
+  animation: cardOut 260ms cubic-bezier(.4, 0, 1, 1) forwards;
+  pointer-events: none;
+}
+.replacing {
+  animation: cardIn 420ms var(--ease-out) both;
+}
+.replacing .stack > * {
+  animation: rise 320ms var(--ease-out) both;
+  animation-delay: calc(140ms + var(--i, 0) * 35ms);
+}
+
 /* Form fields rise in once the card is whole. The form is interactive the
    whole time — opacity doesn't block focus or typing. */
 .assembling .stack > * {
@@ -351,6 +375,8 @@
 /* Card face circle: grows from nothing (POLA's `bg` track). */
 @keyframes faceGrow { from { transform: scale(0); } to { transform: none; } }
 
+@keyframes cardOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(-36px) scale(.98); } }
+@keyframes cardIn  { from { opacity: 0; transform: translateX(36px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes rise    { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 @keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
 @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
@@ -388,6 +414,10 @@
   .root:not(.forceMotion) .assembling .fill  { animation: fadeIn 260ms ease-out 700ms both; }
   .root:not(.forceMotion) .assembling .frame { animation: fadeIn 200ms ease-out 1100ms both; }
   .root:not(.forceMotion) .assembling .stack > * { animation: fadeIn 240ms ease-out 1000ms both; }
+  /* Card replace: a plain cross-fade, no sliding (the swap itself is instant). */
+  .root:not(.forceMotion) .replacing,
+  .root:not(.forceMotion) .replacing .stack > * { animation: fadeIn 200ms ease-out both; }
+  .root:not(.forceMotion) .leaving { animation: none; opacity: 0; }
   .root:not(.forceMotion).intro .reveal,
   .root:not(.forceMotion).intro .brand { animation: fadeIn 240ms ease-out both; }
   .root:not(.forceMotion) .liveDot { animation: none; }

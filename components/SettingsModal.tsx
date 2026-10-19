@@ -20,10 +20,11 @@ import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
 import type { GeminiKeyMasked } from '@/lib/geminiKeys'
 import { loadGeminiModels, saveGeminiModels } from '@/lib/geminiModels'
 import UsersTab from './UsersTab'
+import AlarmTab from './AlarmTab'
 import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
 
-type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq' | 'users'
+type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq' | 'users' | 'alarm'
 
 // ── A free-typed mm:ss input that only reformats/commits on blur — a plain
 // controlled input reformatting on every keystroke would fight the user
@@ -171,15 +172,18 @@ const MODAL_STYLES = `
     transition: background 0.15s; line-height: 1;
   }
   .sm-close:hover { background: rgba(255,255,255,0.22); }
+  /* A super user has 7 tabs — sized to fit the modal; on a narrower screen
+     the row scrolls sideways instead of clipping the last tabs. */
   .sm-tabs {
     display: flex; border-bottom: 1px solid var(--border, #e1e6e4);
     padding: 0 24px; flex-shrink: 0;
     background: var(--bg-body, #f0f2f1);
+    overflow-x: auto; scrollbar-width: thin;
   }
   .dark .sm-tabs { background: #111; border-bottom-color: #2e2e2e; }
   .sm-tab {
-    display: flex; align-items: center; gap: 7px;
-    padding: 12px 16px; font-size: 13px; font-weight: 500;
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 10px; font-size: 13px; font-weight: 500;
     color: var(--text-muted, #687d75);
     background: transparent; border: none;
     border-bottom: 2px solid transparent;
@@ -2233,13 +2237,11 @@ function RtaReportFlagsCell({ heartbeat, breachChange, disabled, onToggleHeartbe
 }
 
 // ── Main Settings Content ─────────────────────────────────────────────────────
-function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, rtaReportKpi, rtaReportAgentStatus, zohoLookups, alarmSound, knownStatuses, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose }: Props) {
+function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds, dataSource, cliqChannel, cliqGlobalSettings, wfLogsEnabled, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, rtaReportKpi, rtaReportAgentStatus, zohoLookups, alarmSound, knownStatuses, onSave, onSaveCliqGlobal, onAccountsChange, onConfigureAccount, onClose, tab, setTab }: Props & OpenTab) {
   const { profile: me } = useAuth()
   const canManageAccounts = can.manageAccounts(me.role)
   const canManageUsers    = can.manageUsers(me.role)
 
-  // An RTA has no Accounts tab, so opening on it would show a blank body.
-  const [tab, setTab]   = useState<Tab>(canManageAccounts ? 'accounts' : 'datasource')
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
   const [ds, setDs]     = useState<DataSourceConfig>(JSON.parse(JSON.stringify(dataSource)))
@@ -2699,6 +2701,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 <i className="bx bx-user" /> Users
               </button>
             )}
+            {/* One alarm for every account — global, so super users only. */}
+            {canManageAccounts && (
+              <button className={`sm-tab${tab === 'alarm' ? ' active' : ''}`} onClick={() => setTab('alarm')}>
+                <i className="bx bx-alarm" /> Alarm
+              </button>
+            )}
           </div>
 
           {/* Body */}
@@ -2711,6 +2719,8 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 onRefresh={onAccountsChange}
               />
             )}
+
+            {tab === 'alarm' && canManageAccounts && <AlarmTab />}
 
             {tab === 'users' && canManageUsers && (
               <UsersTab accounts={accounts.map(a => ({ id: a.id, display_name: a.display_name || a.id }))} />
@@ -3586,7 +3596,18 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
 }
 
 // ── Portal wrapper ────────────────────────────────────────────────────────────
+/** Which tab is open. Kept OUTSIDE the keyed SettingsContent (see below). */
+interface OpenTab { tab: Tab; setTab: (t: Tab) => void }
+
 export default function SettingsModal(props: Props) {
+  // The open tab lives here, not in SettingsContent: the key below remounts
+  // SettingsContent whenever the account changes — including once on its own
+  // right after page load, when the account list arrives — and a remount
+  // would throw the user back to the first tab mid-click. That also covers
+  // Accounts → "Configure", which switches account and opens Data Sources.
+  // An RTA has no Accounts tab, so opening on it would show a blank body.
+  const { profile } = useAuth()
+  const [tab, setTab] = useState<Tab>(can.manageAccounts(profile.role) ? 'accounts' : 'datasource')
   if (typeof document === 'undefined') return null
   // Portal renders outside #layout-wrapper — wrap with dark class so all
   // .dark .sm-* selectors inside MODAL_STYLES resolve correctly
@@ -3605,7 +3626,7 @@ export default function SettingsModal(props: Props) {
           SLA"/"Email SLA" KPI mapping got overwritten with wyze's). The key
           forces a full remount — and fresh useState(props.*) — every time
           the account being configured changes. */}
-      <SettingsContent key={props.accountId} {...props} />
+      <SettingsContent key={props.accountId} {...props} tab={tab} setTab={setTab} />
     </div>,
     document.body
   )

@@ -28,6 +28,11 @@ function getCtx(): AudioContext | null {
   return ctx
 }
 
+// Master volume for the sound currently being played (0–1). The per-sound
+// gains below were tuned at 1; this scales them for the global alarm's
+// volume setting.
+let vol = 1
+
 function tone(c: AudioContext, freq: number, startOffset: number, dur: number, type: OscillatorType = 'sine', gain = 0.15) {
   const osc = c.createOscillator()
   const g   = c.createGain()
@@ -35,7 +40,7 @@ function tone(c: AudioContext, freq: number, startOffset: number, dur: number, t
   const startAt = c.currentTime + startOffset
   osc.frequency.setValueAtTime(freq, startAt)
   g.gain.setValueAtTime(0, startAt)
-  g.gain.linearRampToValueAtTime(gain, startAt + 0.02)
+  g.gain.linearRampToValueAtTime(Math.max(0.0002, gain * vol), startAt + 0.02)
   g.gain.exponentialRampToValueAtTime(0.0001, startAt + dur)
   osc.connect(g)
   g.connect(c.destination)
@@ -43,9 +48,54 @@ function tone(c: AudioContext, freq: number, startOffset: number, dur: number, t
   osc.stop(startAt + dur + 0.05)
 }
 
-export function playAlarm(key: string | undefined | null) {
+/**
+ * Will the browser actually play sound right now?
+ *
+ * Asks the audio engine itself rather than guessing from "has the user
+ * clicked yet" (navigator.userActivation) — the two genuinely disagree:
+ * Chrome can block audio on a page that has had activation, and allow it on
+ * one that hasn't (media-engagement score, policy flags). An AudioContext is
+ * created 'suspended' when sound is blocked and 'running' when it isn't, so
+ * its state is the real answer.
+ */
+export function audioAllowed(): boolean {
   const c = getCtx()
-  if (!c || !key || key === 'none') return
+  return !!c && c.state === 'running'
+}
+
+/** Call from a click/keypress handler: that gesture is what unblocks audio. */
+export function unlockAudio(): void {
+  getCtx()?.resume().catch(() => {})
+}
+
+/** Run `cb` whenever audio becomes blocked/unblocked. Returns an unsubscribe. */
+export function onAudioStateChange(cb: () => void): () => void {
+  const c = getCtx()
+  if (!c) return () => {}
+  c.addEventListener('statechange', cb)
+  return () => c.removeEventListener('statechange', cb)
+}
+
+/**
+ * Play a built-in sound. Returns false when the browser is still blocking
+ * audio (no click/keypress on the page yet) — the sound is silently dropped
+ * in that case, so callers can surface "click to enable sound" instead of
+ * assuming it rang.
+ */
+export function playAlarm(key: string | undefined | null, volume = 1): boolean {
+  if (!key || key === 'none') return true
+  const c = getCtx()
+  if (!c) return false
+  if (c.state !== 'running') {
+    // Inside a click/keypress (a "Test sound" button) the context can still be
+    // mid-resume — schedule anyway: the tones wait on its frozen clock and
+    // play the moment it starts. Outside a gesture it's genuinely blocked, so
+    // drop the sound rather than queue it — otherwise every alarm missed while
+    // blocked would blare at once on the next click.
+    if (!(navigator as any).userActivation?.isActive) return false
+    c.resume().catch(() => {})
+  }
+  vol = Math.min(1, Math.max(0, volume))
 
   switch (key) {
     case 'beep':
@@ -58,11 +108,11 @@ export function playAlarm(key: string | undefined | null) {
       const g   = c.createGain()
       osc.type = 'sawtooth'
       const now = c.currentTime
-      g.gain.setValueAtTime(0.12, now)
+      g.gain.setValueAtTime(Math.max(0.0002, 0.12 * vol), now)
       osc.frequency.setValueAtTime(440, now)
       osc.frequency.linearRampToValueAtTime(880, now + 0.4)
       osc.frequency.linearRampToValueAtTime(440, now + 0.8)
-      g.gain.setValueAtTime(0.12, now + 0.8)
+      g.gain.setValueAtTime(Math.max(0.0002, 0.12 * vol), now + 0.8)
       g.gain.linearRampToValueAtTime(0.0001, now + 0.95)
       osc.connect(g)
       g.connect(c.destination)
@@ -91,4 +141,5 @@ export function playAlarm(key: string | undefined | null) {
     default:
       tone(c, 880, 0, 0.15)
   }
+  return true
 }

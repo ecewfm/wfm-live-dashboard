@@ -480,6 +480,7 @@ body {
 .auth-note-ok  { border-color: var(--success); color: var(--success); background: transparent; }
 
 /* ── Signed-in user chip + sign out (topbar) ──────────────────────────────── */
+/* Name and role stack in two lines (.user-meta is a column). */
 .user-chip {
   display: flex; align-items: center; gap: 8px;
   height: 34px; padding: 0 10px 0 4px; margin-left: 4px;
@@ -512,6 +513,29 @@ body {
 }
 .btn-signout i { font-size: 16px; }
 .btn-signout:hover { color: var(--danger); border-color: var(--danger); }
+
+/* ── Global breach alarm bell (topbar) ─────────────────────────────────────── */
+.alarm-bell.muted   { opacity: .5; }
+/* Browser is still blocking audio: amber, gently pulsing, until clicked. */
+.alarm-bell.blocked {
+  color: var(--warning); border-color: var(--warning);
+  animation: alarmNudge 1.6s ease-in-out infinite;
+}
+.alarm-bell.ringing { color: var(--danger); border-color: var(--danger); }
+.alarm-bell.ringing i { animation: alarmRing .9s ease-in-out 2; transform-origin: 50% 10%; }
+@keyframes alarmRing {
+  0%, 100% { transform: rotate(0); }
+  15% { transform: rotate(16deg); }  30% { transform: rotate(-14deg); }
+  45% { transform: rotate(10deg); }  60% { transform: rotate(-8deg); }
+  75% { transform: rotate(4deg); }
+}
+@keyframes alarmNudge {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(217, 158, 53, 0); }
+  50%      { box-shadow: 0 0 0 4px rgba(217, 158, 53, .28); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .alarm-bell.blocked, .alarm-bell.ringing i { animation: none; }
+}
 
 /* Narrow screens: keep the controls, drop the text. */
 @media (max-width: 900px) {

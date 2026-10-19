@@ -10,6 +10,11 @@ import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
 import { buildBreaches, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
+  loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, playGlobalAlarm,
+  isMutedHere, setMutedHere, audioAllowed, unlockAudio, onAudioStateChange, DEFAULT_ALARM_SETTINGS,
+  type GlobalAlarmSettings, type AlarmBaseline,
+} from '@/lib/globalAlarm'
+import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
   loadCliqSettings, saveCliqSettings, appendKnownStatuses, DEFAULT_CLIQ_GLOBAL_SETTINGS,
   type AccountConfig, type AccountSettings
@@ -578,6 +583,82 @@ export default function Dashboard() {
     return map
   }, [accounts, data, agentTimers, kpiThresholds, statusThresholds, dataSources])
 
+  // ── Global breach alarm (Settings → Alarm, super users) ────────────────────
+  // One sound for every account, played here — at the top of the dashboard —
+  // so it works on any page, not only while the Overview cards are on
+  // screen. The rule (only CHANGES ring) is lib/globalAlarm.ts's
+  // evaluateAlarm(), built on the same change detection as RTA Logs.
+  const [alarmSettings, setAlarmSettings] = useState<GlobalAlarmSettings>(DEFAULT_ALARM_SETTINGS)
+  const [alarmMuted, setAlarmMuted]       = useState(false)   // this screen only
+  const [alarmBlocked, setAlarmBlocked]   = useState(false)   // browser wants a click first
+  const [alarmRinging, setAlarmRinging]   = useState(false)
+  const [lastAlarm, setLastAlarm]         = useState<{ text: string; at: number } | null>(null)
+  const alarmBaselines = useRef(new Map<string, AlarmBaseline>())
+  const lastAlarmAt    = useRef(0)
+  // Read inside the evaluation effect without re-running it: that effect must
+  // fire on breach changes only — re-running it on a settings change would
+  // re-evaluate against a half-updated view and could ring spuriously.
+  const alarmRef = useRef(alarmSettings); alarmRef.current = alarmSettings
+  const mutedRef = useRef(alarmMuted);    mutedRef.current = alarmMuted
+
+  useEffect(() => { setAlarmMuted(isMutedHere()) }, [])
+
+  // Load now, every 60s (same cadence as the settings poll above), and again
+  // the moment this screen's Settings modal closes — so a super user's change
+  // reaches every open dashboard within a minute, and their own immediately.
+  useEffect(() => {
+    if (settingsOpen) return
+    let alive = true
+    const load = () => loadAlarmSettings().then(s => { if (alive) { setAlarmSettings(s); preloadAlarm(s) } })
+    load()
+    const t = setInterval(load, 60_000)
+    return () => { alive = false; clearInterval(t) }
+  }, [settingsOpen])
+
+  // Browsers block audio until the page has had a click or keypress. After a
+  // reload with a saved session there hasn't been one, so say so up front
+  // (the bell turns amber) instead of discovering it when an alarm is missed.
+  // The bell reflects the audio engine's real state (see audioAllowed), and
+  // any click or keypress on the page is used to resume it.
+  useEffect(() => {
+    if (!alarmSettings.enabled) { setAlarmBlocked(false); return }
+    const recheck = () => setAlarmBlocked(!audioAllowed())
+    recheck()
+    const offState = onAudioStateChange(recheck)   // resume() settles async — follow the engine itself
+    window.addEventListener('pointerdown', unlockAudio)
+    window.addEventListener('keydown', unlockAudio)
+    return () => { offState(); window.removeEventListener('pointerdown', unlockAudio); window.removeEventListener('keydown', unlockAudio) }
+  }, [alarmSettings.enabled])
+
+  useEffect(() => {
+    // Only accounts with real data AND their own settings loaded (otherwise
+    // the first baseline would be built from default thresholds, and the real
+    // ones arriving a moment later would look like a wave of new breaches),
+    // and never stale data.
+    const eligible = accounts.filter(id => {
+      const d = data[id], ds = dataSources[id]
+      return d && ds && kpiThresholds[id] && statusThresholds[id] && !isDataStale(freshestAcrossSources(ds, d))
+    })
+    const s = alarmRef.current
+    const { events, next } = evaluateAlarm(alarmBaselines.current, allBreaches, eligible, s.severity, Date.now())
+    // The baseline advances even while the alarm is off, so switching it on
+    // later doesn't ring for everything that changed in the meantime.
+    alarmBaselines.current = next
+    if (!s.enabled || events.length === 0) return
+
+    setLastAlarm({ text: events.map(e => describeEvent(e, id => displayNames[id] || id)).join('\n'), at: Date.now() })
+    if (mutedRef.current) return
+    const now = Date.now()
+    if (now - lastAlarmAt.current < s.minGapSeconds * 1000) return
+    lastAlarmAt.current = now
+    playGlobalAlarm(s).then(r => {
+      if (r === 'blocked') { setAlarmBlocked(true); return }
+      setAlarmRinging(true)
+      setTimeout(() => setAlarmRinging(false), 2500)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allBreaches])
+
   // ── Save settings — writes to Supabase so all browsers sync ────────────────
   const handleSaveSettings = async (
     kpi: Thresholds, status: StatusThresholds, ds: DataSourceConfig, cliqChannel: string,
@@ -741,6 +822,31 @@ export default function Dashboard() {
                 <i className="bx bx-cog" />
               </button>
             )}
+            {/* Global breach alarm — shown to everyone while it's switched on.
+                Click: allow sound (if the browser is still blocking it), else
+                mute / unmute THIS screen only. */}
+            {alarmSettings.enabled && (
+              <button
+                className={`btn-icon alarm-bell${alarmRinging ? ' ringing' : ''}${alarmBlocked ? ' blocked' : ''}${alarmMuted && !alarmBlocked ? ' muted' : ''}`}
+                onClick={() => {
+                  // While blocked, this click IS the gesture that unlocks audio
+                  // (the page-wide listener resumes it and re-checks) — so it
+                  // must not also toggle mute.
+                  if (alarmBlocked) { unlockAudio(); return }
+                  const m = !alarmMuted
+                  setAlarmMuted(m); setMutedHere(m)
+                }}
+                title={
+                  (alarmBlocked ? 'Breach alarm can\'t play yet — click to allow sound on this screen'
+                    : alarmMuted ? 'Breach alarm muted on this screen — click to unmute'
+                    : 'Breach alarm on — click to mute this screen')
+                  + (lastAlarm ? `\n\nLast alarm ${new Date(lastAlarm.at).toLocaleTimeString()}:\n${lastAlarm.text}` : '')
+                }
+                aria-label="Breach alarm"
+              >
+                <i className={`bx ${alarmBlocked ? 'bx-volume-mute' : alarmMuted ? 'bx-bell-off' : 'bx-bell'}`} />
+              </button>
+            )}
             <button className="btn-icon" onClick={toggleTheme} title="Toggle theme">
               <i className={`bx ${isDark ? 'bx-sun' : 'bx-moon'}`} />
             </button>
@@ -817,7 +923,9 @@ export default function Dashboard() {
               dataSources={dataSources}
               displayNames={displayNames}
               headerColors={headerColors}
-              alarmSounds={alarmSounds}
+              // While the global alarm is on it's the only alarm — the old
+              // per-card sounds are silenced so nothing ever rings twice.
+              alarmSounds={alarmSettings.enabled ? {} : alarmSounds}
               onHeaderColorsChange={updateHeaderColors}
               rtaLogsEnabledMap={rtaLogsEnabledMap}
             />

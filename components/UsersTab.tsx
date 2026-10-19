@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '@/lib/authClient'
 import { useAuth } from './AuthGate'
+import ColumnFilter, { type FilterOption } from './ColumnFilter'
 import { UserProfile, UserRole, ROLE_LABELS, can, isValidUsername } from '@/lib/authEmail'
 
 interface AccountOpt { id: string; display_name: string }
@@ -33,6 +34,39 @@ type Draft = {
 
 const blankDraft = (role: UserRole): Draft => ({ username: '', fullName: '', role, accountIds: [] })
 
+// ── Column filter setup ─────────────────────────────────────────────────────
+type ColKey = 'username' | 'name' | 'role' | 'accounts' | 'status'
+const COLUMNS: { key: ColKey; label: string }[] = [
+  { key: 'username', label: 'Username' },
+  { key: 'name',     label: 'Name' },
+  { key: 'role',     label: 'Role' },
+  { key: 'accounts', label: 'Accounts' },
+  { key: 'status',   label: 'Status' },
+]
+const EMPTY_FILTERS: Record<ColKey, Set<string> | null> = { username: null, name: null, role: null, accounts: null, status: null }
+
+// Pseudo-values for rows that don't have a real one, so they're filterable too.
+const ALL_ACCOUNTS = 'All accounts (super user)'
+const NO_ACCOUNTS  = '(no accounts)'
+const NO_NAME      = '(no name)'
+
+/** Status is one value per row, so "Active" vs "Active · must set password" never overlap. */
+const statusLabel = (u: UserProfile) =>
+  `${u.isActive ? 'Active' : 'Inactive'}${u.mustResetPassword ? ' · must set password' : ''}`
+
+const ROLE_ORDER = [ROLE_LABELS.superuser, ROLE_LABELS.rta, ROLE_LABELS.team_lead]
+const STATUS_ORDER = ['Active', 'Active · must set password', 'Inactive', 'Inactive · must set password']
+
+/** Option order in each dropdown: logical for role/status, alphabetical otherwise. */
+function orderFor(key: ColKey, a: string, b: string): number {
+  const rank = (list: string[], v: string) => { const i = list.indexOf(v); return i < 0 ? list.length : i }
+  if (key === 'role') return rank(ROLE_ORDER, a) - rank(ROLE_ORDER, b)
+  if (key === 'status') return rank(STATUS_ORDER, a) - rank(STATUS_ORDER, b)
+  // Pseudo-values pinned: "all accounts" first, the "(none)" ones last.
+  const pin = (v: string) => (v === ALL_ACCOUNTS ? -1 : v === NO_ACCOUNTS || v === NO_NAME ? 1 : 0)
+  return pin(a) - pin(b) || a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true })
+}
+
 const sameSet = (a: string[], b?: string[]) =>
   !!b && a.length === b.length && a.every(x => b.includes(x))
 
@@ -48,6 +82,9 @@ export default function UsersTab({ accounts }: Props) {
   const [draft, setDraft]   = useState<Draft | null>(null)
   const [busy, setBusy]     = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<UserProfile | null>(null)
+  // One entry per column; null = no filter. Kept across reloads of the list,
+  // so creating or editing someone doesn't wipe the view you'd set up.
+  const [filters, setFilters] = useState<Record<ColKey, Set<string> | null>>(EMPTY_FILTERS)
 
   const assignable = can.assignableRoles(me.role)
   // An RTA can only ever hand out their own accounts, so don't offer more.
@@ -275,6 +312,7 @@ export default function UsersTab({ accounts }: Props) {
             })}
           </tbody>
         </table>
+       </div>
       )}
 
       {draft && (

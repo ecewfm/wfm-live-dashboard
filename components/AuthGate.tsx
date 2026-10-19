@@ -20,7 +20,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { UserProfile, DEFAULT_PASSWORD, validateNewPassword, can } from '@/lib/authEmail'
 import { signIn, signOut, loadMyProfile, setMyPassword, onAuthChange } from '@/lib/authClient'
-import AuthShell, { AssembleCard, stackClass, cardTitleClass, cardSubClass } from './AuthShell'
+import AuthShell, { CardSwap, stackClass, cardTitleClass, cardSubClass } from './AuthShell'
 
 interface AuthCtx {
   profile: UserProfile
@@ -80,8 +80,23 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   // screen at people who are already signed in.
   if (loading) return <div className="auth-screen" />
 
-  if (!profile) return <LoginScreen onSignedIn={refresh} />
-  if (profile.mustResetPassword) return <SetPasswordScreen profile={profile} onDone={refresh} />
+  // Sign-in and choose-a-password share ONE layout. Because <AuthShell> and
+  // <CardSwap> sit at the same place in the tree for both, React keeps them
+  // mounted when the view changes — the hero stays still and only the card is
+  // replaced (slides out, new one slides in). Rendering them as two separate
+  // screens, as before, tore the whole layout down and re-ran the file
+  // assembly every time someone signed in on the default password.
+  if (!profile || profile.mustResetPassword) {
+    return (
+      <AuthShell>
+        <CardSwap view={profile ? 'set-password' : 'login'}>
+          {profile
+            ? <SetPasswordForm profile={profile} onDone={refresh} />
+            : <LoginForm onSignedIn={refresh} />}
+        </CardSwap>
+      </AuthShell>
+    )
+  }
 
   return (
     <Ctx.Provider value={{ profile, refresh, signOut: async () => { await signOut(); setProfile(null) } }}>
@@ -90,8 +105,8 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   )
 }
 
-// ── Sign in ─────────────────────────────────────────────────────────────────
-function LoginScreen({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
+// ── Sign in (card contents only — the card itself comes from <CardSwap>) ────
+function LoginForm({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -135,8 +150,6 @@ function LoginScreen({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
   }
 
   return (
-    <AuthShell>
-     <AssembleCard>
       <form className={stackClass} onSubmit={submit}>
         <h2 className={cardTitleClass}>Sign in</h2>
         <p className={cardSubClass}>Use the username your administrator gave you.</p>
@@ -174,13 +187,11 @@ function LoginScreen({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
           </div>
         )}
       </form>
-     </AssembleCard>
-    </AuthShell>
   )
 }
 
-// ── Forced first-login password change ──────────────────────────────────────
-function SetPasswordScreen({ profile, onDone }: { profile: UserProfile; onDone: () => Promise<void> }) {
+// ── Forced first-login password change (card contents only) ────────────────
+function SetPasswordForm({ profile, onDone }: { profile: UserProfile; onDone: () => Promise<void> }) {
   const [pw, setPw] = useState('')
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -200,11 +211,7 @@ function SetPasswordScreen({ profile, onDone }: { profile: UserProfile; onDone: 
     } finally { setBusy(false) }
   }
 
-  // intro={false}: the hero stays put when arriving here from the sign-in
-  // card. Only the card itself re-assembles, into this new form.
   return (
-    <AuthShell intro={false}>
-     <AssembleCard>
       <form className={stackClass} onSubmit={submit}>
         <h2 className={cardTitleClass}>Choose a password</h2>
         <p className={cardSubClass}>
@@ -229,7 +236,5 @@ function SetPasswordScreen({ profile, onDone }: { profile: UserProfile; onDone: 
           Sign out
         </button>
       </form>
-     </AssembleCard>
-    </AuthShell>
   )
 }
