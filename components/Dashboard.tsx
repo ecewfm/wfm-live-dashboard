@@ -10,10 +10,12 @@ import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
 import { buildBreaches, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
-  loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, playGlobalAlarm,
+  loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
   isMutedHere, setMutedHere, audioAllowed, unlockAudio, onAudioStateChange, DEFAULT_ALARM_SETTINGS,
-  type GlobalAlarmSettings, type AlarmBaseline,
+  ALARM_PREVIEW_EVENT, PREVIEW_ACCOUNT,
+  type GlobalAlarmSettings, type AlarmBaseline, type PendingAlarm,
 } from '@/lib/globalAlarm'
+import AlarmPrompt from './AlarmPrompt'
 import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
   loadCliqSettings, saveCliqSettings, appendKnownStatuses, DEFAULT_CLIQ_GLOBAL_SETTINGS,
@@ -204,7 +206,8 @@ export default function Dashboard() {
           agents:  agents,
           status:  null,
           calls:   [],
-          syncing: false
+          syncing: false,
+          loaded:  true,
         }
       }))
 
@@ -591,10 +594,18 @@ export default function Dashboard() {
   const [alarmSettings, setAlarmSettings] = useState<GlobalAlarmSettings>(DEFAULT_ALARM_SETTINGS)
   const [alarmMuted, setAlarmMuted]       = useState(false)   // this screen only
   const [alarmBlocked, setAlarmBlocked]   = useState(false)   // browser wants a click first
-  const [alarmRinging, setAlarmRinging]   = useState(false)
   const [lastAlarm, setLastAlarm]         = useState<{ text: string; at: number } | null>(null)
+  // Changes nobody has acknowledged yet. While this is non-empty the prompt
+  // is up and (unless muted / in the quiet time) the alarm keeps ringing.
+  const [alarmPending, setAlarmPending]   = useState<PendingAlarm[]>([])
+  const [alarmPhase, setAlarmPhase]       = useState<'idle' | 'quiet' | 'ringing'>('idle')
+  // 'once' mode only: the bell shakes for a moment after each ring.
+  const [alarmFlash, setAlarmFlash]       = useState(false)
   const alarmBaselines = useRef(new Map<string, AlarmBaseline>())
-  const lastAlarmAt    = useRef(0)
+  // 'until_ack' mode: after an acknowledgement, stay quiet until this time.
+  const alarmQuietUntil = useRef(0)
+  // 'once' mode: when it last rang (min gap between rings).
+  const lastOnceAt = useRef(0)
   // Read inside the evaluation effect without re-running it: that effect must
   // fire on breach changes only — re-running it on a settings change would
   // re-evaluate against a half-updated view and could ring spuriously.
@@ -630,14 +641,30 @@ export default function Dashboard() {
     return () => { offState(); window.removeEventListener('pointerdown', unlockAudio); window.removeEventListener('keydown', unlockAudio) }
   }, [alarmSettings.enabled])
 
+  // One ring, with the bell shaking for a moment (ringMode 'once').
+  const flashAndRing = useCallback((s: GlobalAlarmSettings) => {
+    ringOnce(s).then(r => {
+      if (r === 'blocked') { setAlarmBlocked(true); return }
+      setAlarmFlash(true)
+      setTimeout(() => setAlarmFlash(false), 2500)
+    })
+  }, [])
+
   useEffect(() => {
-    // Only accounts with real data AND their own settings loaded (otherwise
-    // the first baseline would be built from default thresholds, and the real
-    // ones arriving a moment later would look like a wave of new breaches),
-    // and never stale data.
+    // Only accounts with real data AND their own settings loaded, and never
+    // stale data. Either gap would make the first baseline wrong, and the
+    // real thing arriving a moment later would look like a wave of new
+    // breaches — ringing on page load for everything already on screen:
+    //   - before the first fetch returns, data[id] is an EMPTY placeholder
+    //     (fetchAccount), which isn't "stale" — it has no timestamp at all.
+    //     `loaded` is checked on the data itself: a separate "loaded" ref was
+    //     tried first and could run AHEAD of the rendered data (this effect
+    //     runs after a render, while the fetch had already marked the ref).
+    //   - default thresholds instead of the account's own.
     const eligible = accounts.filter(id => {
       const d = data[id], ds = dataSources[id]
-      return d && ds && kpiThresholds[id] && statusThresholds[id] && !isDataStale(freshestAcrossSources(ds, d))
+      return d?.loaded && ds && kpiThresholds[id] && statusThresholds[id]
+        && !isDataStale(freshestAcrossSources(ds, d))
     })
     const s = alarmRef.current
     const { events, next } = evaluateAlarm(alarmBaselines.current, allBreaches, eligible, s.severity, Date.now())
@@ -648,16 +675,67 @@ export default function Dashboard() {
 
     setLastAlarm({ text: events.map(e => describeEvent(e, id => displayNames[id] || id)).join('\n'), at: Date.now() })
     if (mutedRef.current) return
-    const now = Date.now()
-    if (now - lastAlarmAt.current < s.minGapSeconds * 1000) return
-    lastAlarmAt.current = now
-    playGlobalAlarm(s).then(r => {
-      if (r === 'blocked') { setAlarmBlocked(true); return }
-      setAlarmRinging(true)
-      setTimeout(() => setAlarmRinging(false), 2500)
-    })
+
+    if (s.ringMode === 'once') {
+      // One ring per change, never more often than the minimum gap.
+      const now = Date.now()
+      if (now - lastOnceAt.current < s.minGapSeconds * 1000) return
+      lastOnceAt.current = now
+      flashAndRing(s)
+      return
+    }
+    // 'until_ack': onto the prompt; the loop effect below does the ringing.
+    setAlarmPending(p => mergePending(p, events, Date.now()))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allBreaches])
+
+  // Ring for as long as something is unacknowledged ('until_ack' mode). Restarts
+  // if a super user saves a different sound mid-alarm; the 60s settings poll
+  // returns equal values, which leave `soundSig` unchanged and the loop alone.
+  const wantAlarmSound = alarmSettings.enabled && alarmSettings.ringMode === 'until_ack' && !alarmMuted && alarmPending.length > 0
+  const soundSig = `${alarmSettings.soundKind}|${alarmSettings.builtinKey}|${alarmSettings.soundUrl}|${alarmSettings.volume}`
+  useEffect(() => {
+    if (!wantAlarmSound) { stopAlarmLoop(); setAlarmPhase('idle'); return }
+    const start = () => {
+      setAlarmPhase('ringing')
+      startAlarmLoop(alarmRef.current, r => setAlarmBlocked(r === 'blocked'))
+    }
+    const wait = alarmQuietUntil.current - Date.now()
+    let t: ReturnType<typeof setTimeout> | undefined
+    if (wait > 0) { setAlarmPhase('quiet'); t = setTimeout(start, wait) } else start()
+    return () => { if (t) clearTimeout(t); stopAlarmLoop() }
+  }, [wantAlarmSound, soundSig])
+
+  // Muting this screen, switching the alarm off, or switching to 'once' mode
+  // drops what's pending — unmuting / switching back later shouldn't ring for
+  // old news, and 'once' mode has nothing to acknowledge.
+  useEffect(() => {
+    if (alarmMuted || !alarmSettings.enabled || alarmSettings.ringMode !== 'until_ack') setAlarmPending([])
+  }, [alarmMuted, alarmSettings.enabled, alarmSettings.ringMode])
+
+  const acknowledgeAlarm = useCallback(() => {
+    stopAlarmLoop()
+    alarmQuietUntil.current = Date.now() + alarmRef.current.minGapSeconds * 1000
+    setAlarmPending([])
+  }, [])
+
+  // Settings → Alarm → "Preview on this screen", with the settings the super
+  // user just saved (this screen only reloads them once the Settings modal
+  // closes). 'until_ack': a sample prompt, ringing straight away (no quiet
+  // time). 'once': one ring — there's no prompt in that mode.
+  useEffect(() => {
+    const onPreview = (e: Event) => {
+      const s = (e as CustomEvent<GlobalAlarmSettings>).detail ?? alarmRef.current
+      setAlarmSettings(s); preloadAlarm(s)
+      if (s.ringMode === 'once') { flashAndRing(s); return }
+      alarmQuietUntil.current = 0
+      setAlarmPending(p => mergePending(p, [{ accountId: PREVIEW_ACCOUNT, changes: [
+        { kind: 'kpi', entity: 'Global', metric: 'SLA %', value: '74%', previous: '85%' },
+      ] }], Date.now()))
+    }
+    window.addEventListener(ALARM_PREVIEW_EVENT, onPreview)
+    return () => window.removeEventListener(ALARM_PREVIEW_EVENT, onPreview)
+  }, [flashAndRing])
 
   // ── Save settings — writes to Supabase so all browsers sync ────────────────
   const handleSaveSettings = async (
@@ -715,6 +793,16 @@ export default function Dashboard() {
 
   return (
     <div id="layout-wrapper" className={isDark ? 'dark' : ''}>
+
+      {mounted && alarmPending.length > 0 && (
+        <AlarmPrompt
+          items={alarmPending}
+          status={alarmMuted ? 'muted' : alarmBlocked ? 'blocked' : alarmPhase === 'quiet' ? 'quiet' : 'ringing'}
+          isDark={isDark}
+          name={id => id === PREVIEW_ACCOUNT ? 'Test alarm' : displayNames[id] || id}
+          onAcknowledge={acknowledgeAlarm}
+        />
+      )}
 
       {settingsOpen && mounted && (
         <SettingsModal
@@ -823,12 +911,14 @@ export default function Dashboard() {
               </button>
             )}
             {/* Global breach alarm — shown to everyone while it's switched on.
-                Click: allow sound (if the browser is still blocking it), else
-                mute / unmute THIS screen only. */}
+                Click: acknowledge (while an alarm is up), else allow sound (if
+                the browser is still blocking it), else mute / unmute THIS
+                screen only. */}
             {alarmSettings.enabled && (
               <button
-                className={`btn-icon alarm-bell${alarmRinging ? ' ringing' : ''}${alarmBlocked ? ' blocked' : ''}${alarmMuted && !alarmBlocked ? ' muted' : ''}`}
+                className={`btn-icon alarm-bell${(alarmPhase === 'ringing' || alarmFlash) && !alarmBlocked ? ' ringing' : ''}${alarmBlocked ? ' blocked' : ''}${alarmMuted && !alarmBlocked ? ' muted' : ''}`}
                 onClick={() => {
+                  if (alarmPending.length) { acknowledgeAlarm(); return }
                   // While blocked, this click IS the gesture that unlocks audio
                   // (the page-wide listener resumes it and re-checks) — so it
                   // must not also toggle mute.
@@ -837,7 +927,8 @@ export default function Dashboard() {
                   setAlarmMuted(m); setMutedHere(m)
                 }}
                 title={
-                  (alarmBlocked ? 'Breach alarm can\'t play yet — click to allow sound on this screen'
+                  (alarmPending.length ? 'Breach alarm — click to acknowledge'
+                    : alarmBlocked ? 'Breach alarm can\'t play yet — click to allow sound on this screen'
                     : alarmMuted ? 'Breach alarm muted on this screen — click to unmute'
                     : 'Breach alarm on — click to mute this screen')
                   + (lastAlarm ? `\n\nLast alarm ${new Date(lastAlarm.at).toLocaleTimeString()}:\n${lastAlarm.text}` : '')

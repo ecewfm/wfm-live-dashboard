@@ -522,7 +522,7 @@ body {
   animation: alarmNudge 1.6s ease-in-out infinite;
 }
 .alarm-bell.ringing { color: var(--danger); border-color: var(--danger); }
-.alarm-bell.ringing i { animation: alarmRing .9s ease-in-out 2; transform-origin: 50% 10%; }
+.alarm-bell.ringing i { animation: alarmRing .9s ease-in-out infinite; transform-origin: 50% 10%; }
 @keyframes alarmRing {
   0%, 100% { transform: rotate(0); }
   15% { transform: rotate(16deg); }  30% { transform: rotate(-14deg); }
@@ -533,8 +533,67 @@ body {
   0%, 100% { box-shadow: 0 0 0 0 rgba(217, 158, 53, 0); }
   50%      { box-shadow: 0 0 0 4px rgba(217, 158, 53, .28); }
 }
+/* ── Global breach alarm: the Acknowledge prompt (components/AlarmPrompt) ──── */
+.alarm-prompt {
+  position: fixed; top: 72px; left: 50%; z-index: 100001;   /* above the Settings modal */
+  transform: translateX(-50%);
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 96px);
+  display: flex; flex-direction: column;
+  background: var(--bg-card); color: var(--text-main);
+  border: 2px solid var(--danger); border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.28);
+  font-family: inherit;
+  animation: alarmPromptIn .22s ease-out;
+}
+.alarm-prompt.ringing { animation: alarmPromptIn .22s ease-out, alarmPromptPulse 1.2s ease-in-out .22s infinite; }
+.alarm-prompt.blocked { border-color: var(--warning); }
+.alarm-prompt.quiet, .alarm-prompt.muted { border-color: var(--border); }
+.alarm-prompt-head { display: flex; gap: 12px; align-items: flex-start; padding: 16px 18px 10px; }
+.alarm-prompt-head > i { font-size: 26px; color: var(--danger); line-height: 1; }
+.alarm-prompt.ringing .alarm-prompt-head > i { animation: alarmRing .9s ease-in-out infinite; transform-origin: 50% 10%; }
+.alarm-prompt.blocked .alarm-prompt-head > i { color: var(--warning); }
+.alarm-prompt.quiet .alarm-prompt-head > i, .alarm-prompt.muted .alarm-prompt-head > i { color: var(--text-muted); }
+.alarm-prompt-title { font-size: 15px; font-weight: 700; }
+.alarm-prompt-sub   { font-size: 12px; color: var(--text-muted); margin-top: 2px; line-height: 1.5; }
+.alarm-prompt-list {
+  list-style: none; margin: 0; padding: 0 18px;
+  overflow-y: auto; min-height: 0;
+  border-top: 1px solid var(--border);
+}
+.alarm-prompt-list li {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: baseline;
+  padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.alarm-prompt-list li:last-child { border-bottom: none; }
+.alarm-prompt-acct { font-weight: 700; white-space: nowrap; }
+.alarm-prompt-what { min-width: 0; overflow-wrap: anywhere; }
+.alarm-prompt-list time { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.alarm-prompt-ack {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  margin: 12px 18px 16px; padding: 11px 16px; border: none; border-radius: 8px;
+  background: var(--danger); color: #fff; cursor: pointer;
+  font-family: inherit; font-size: 14px; font-weight: 700;
+}
+.alarm-prompt-ack i { font-size: 18px; }
+.alarm-prompt-ack:hover { filter: brightness(1.08); }
+.alarm-prompt-ack:focus-visible { outline: 3px solid var(--primary-light); outline-offset: 2px; }
+.alarm-prompt.blocked .alarm-prompt-ack { background: var(--warning); color: #2c3b36; }
+.alarm-prompt.quiet .alarm-prompt-ack, .alarm-prompt.muted .alarm-prompt-ack { background: var(--text-muted); }
+@keyframes alarmPromptIn { from { opacity: 0; transform: translate(-50%, -10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes alarmPromptPulse {
+  0%, 100% { box-shadow: 0 12px 40px rgba(0,0,0,.28), 0 0 0 0 rgba(201, 92, 92, .0); }
+  50%      { box-shadow: 0 12px 40px rgba(0,0,0,.28), 0 0 0 7px rgba(201, 92, 92, .3); }
+}
+@media (max-width: 600px) {
+  .alarm-prompt { top: 12px; }
+  .alarm-prompt-list li { grid-template-columns: 1fr auto; }
+  .alarm-prompt-what { grid-column: 1 / -1; grid-row: 2; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .alarm-bell.blocked, .alarm-bell.ringing i { animation: none; }
+  .alarm-bell.blocked, .alarm-bell.ringing i,
+  .alarm-prompt, .alarm-prompt.ringing, .alarm-prompt.ringing .alarm-prompt-head > i { animation: none; }
 }
 
 /* Narrow screens: keep the controls, drop the text. */

@@ -21,12 +21,24 @@ create table if not exists wfm_alarm_settings (
   volume          real not null default 0.8 check (volume between 0 and 1),
   -- 'all' = warning + critical breaches; 'critical' = critical only.
   severity        text not null default 'all' check (severity in ('all', 'critical')),
-  -- Never ring more often than this, however many accounts change at once.
+  -- 'once'      = one ring per change, then silence (min_gap_seconds apart);
+  -- 'until_ack' = rings over and over, with a prompt, until someone on that
+  --               screen presses Acknowledge.
+  ring_mode       text not null default 'until_ack' check (ring_mode in ('once', 'until_ack')),
+  -- 'once':      never ring more often than this, however many accounts change.
+  -- 'until_ack': after an acknowledgement, that screen stays quiet this long
+  --              (new changes show on the prompt and ring once it's over).
   min_gap_seconds integer not null default 30 check (min_gap_seconds between 0 and 3600),
   updated_at      timestamptz not null default now(),
   updated_by      text
 );
 insert into wfm_alarm_settings (id) values ('global') on conflict (id) do nothing;
+
+-- Upgrade for a table created before ring_mode existed. Safe to re-run: it
+-- does nothing when the column is already there.
+alter table wfm_alarm_settings
+  add column if not exists ring_mode text not null default 'until_ack'
+  check (ring_mode in ('once', 'until_ack'));
 
 -- Every dashboard reads this (that's how each screen learns the sound), so
 -- reads are open. Writes are NOT: no write policy exists, and the grants are

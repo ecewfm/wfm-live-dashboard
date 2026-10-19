@@ -11,6 +11,16 @@
 // itself is explainBreachChanges() in lib/rtaLogsChangeDetection.ts — the SAME
 // function Workforce RTA Logs uses, so the two can never disagree.
 //
+// HOW it rings is a setting (`ringMode`, Settings → Alarm):
+//   - 'once'      one ring per change (playGlobalAlarm), never more often than
+//                 `minGapSeconds`. No prompt, nothing to acknowledge.
+//   - 'until_ack' keeps ringing (startAlarmLoop) until someone presses
+//                 Acknowledge on that screen. Changes that arrive meanwhile join
+//                 the same prompt (mergePending) rather than starting a second
+//                 alarm. After an acknowledgement the screen stays quiet for
+//                 `minGapSeconds`; changes in that window still show on the
+//                 prompt, and the sound starts when it ends.
+//
 // Also:
 //   - Opening the page is silent: the first data seen for an account becomes
 //     the baseline. Otherwise every reload would ring for breaches that were
@@ -24,7 +34,7 @@
 import { supabase } from './supabase'
 import type { BreachRow } from './breaches'
 import { explainBreachChanges, type BreachChange, type RtaLogsState } from './rtaLogsChangeDetection'
-import { playAlarm, audioAllowed, unlockAudio, onAudioStateChange } from './alarmSounds'
+import { playAlarm, stopAllSounds, audioAllowed, unlockAudio, onAudioStateChange } from './alarmSounds'
 
 export interface GlobalAlarmSettings {
   enabled: boolean
@@ -34,12 +44,17 @@ export interface GlobalAlarmSettings {
   soundName: string | null
   volume: number
   severity: 'all' | 'critical'
+  /** 'once' = one ring per change; 'until_ack' = keeps ringing until acknowledged. */
+  ringMode: RingMode
+  /** 'once': minimum gap between rings. 'until_ack': quiet time after acknowledging. */
   minGapSeconds: number
 }
 
+export type RingMode = 'once' | 'until_ack'
+
 export const DEFAULT_ALARM_SETTINGS: GlobalAlarmSettings = {
   enabled: false, soundKind: 'builtin', builtinKey: 'siren', soundUrl: null, soundName: null,
-  volume: 0.8, severity: 'all', minGapSeconds: 30,
+  volume: 0.8, severity: 'all', ringMode: 'until_ack', minGapSeconds: 30,
 }
 
 /** Read the one global row. Falls back to "off" if the table isn't migrated yet. */
@@ -55,6 +70,8 @@ export async function loadAlarmSettings(): Promise<GlobalAlarmSettings> {
       soundName: data.sound_name ?? null,
       volume: typeof data.volume === 'number' ? data.volume : 0.8,
       severity: data.severity === 'critical' ? 'critical' : 'all',
+      // Missing column (SQL not upgraded yet) or an unknown value → the default.
+      ringMode: data.ring_mode === 'once' ? 'once' : 'until_ack',
       minGapSeconds: Number.isFinite(data.min_gap_seconds) ? data.min_gap_seconds : 30,
     }
   } catch {
@@ -143,14 +160,58 @@ export function evaluateAlarm(
   return { events, next }
 }
 
+/** One change in words, e.g. "SLA (Team A) 85% → 74%" or "Jane breaching Lunch". */
+export function describeChange(c: BreachChange): string {
+  return c.kind === 'kpi'
+    ? `${c.metric}${c.entity && c.entity !== 'Global' ? ` (${c.entity})` : ''} ${c.previous ? `${c.previous} → ` : ''}${c.value}`
+    : `${c.agent} breaching ${c.metric}`
+}
+
 /** Short human summary for the bell's tooltip, e.g. "Flex — SLA 85% → 74%". */
 export function describeEvent(e: AlarmEvent, name: (id: string) => string): string {
-  const first = e.changes[0]
   const more = e.changes.length > 1 ? ` (+${e.changes.length - 1} more)` : ''
-  const what = first.kind === 'kpi'
-    ? `${first.metric}${first.entity && first.entity !== 'Global' ? ` (${first.entity})` : ''} ${first.previous ? `${first.previous} → ` : ''}${first.value}`
-    : `${first.agent} breaching ${first.metric}`
-  return `${name(e.accountId)} — ${what}${more}`
+  return `${name(e.accountId)} — ${describeChange(e.changes[0])}${more}`
+}
+
+// ── Waiting for an acknowledgement ──────────────────────────────────────────
+/** Settings → Alarm's "Preview on this screen" fires this (detail: saved settings). */
+export const ALARM_PREVIEW_EVENT = 'wfm-alarm-preview'
+/** Account id used for the preview's sample line. */
+export const PREVIEW_ACCOUNT = '__alarm_preview__'
+
+/** One line on the Acknowledge prompt: one breach, however often it changed. */
+export interface PendingAlarm {
+  key: string
+  accountId: string
+  /** The latest change. For a KPI, `previous` is the value from BEFORE the
+   *  first change, so the line reads "85% → 70%" across several updates. */
+  change: BreachChange
+  firstAt: number
+  lastAt: number
+}
+
+/**
+ * Add new events to the unacknowledged list. PURE (pass `now`). A breach
+ * that's already listed is updated in place — an SLA sliding 74 → 72 → 70
+ * while nobody's looked is one line, not three.
+ */
+export function mergePending(pending: PendingAlarm[], events: AlarmEvent[], now: number): PendingAlarm[] {
+  const out = pending.slice()
+  for (const e of events) {
+    for (const c of e.changes) {
+      const key = c.kind === 'kpi'
+        ? `${e.accountId}|kpi|${c.entity}|${c.metric}`
+        : `${e.accountId}|agent|${c.metric}|${c.agent}`
+      const i = out.findIndex(p => p.key === key)
+      if (i < 0) { out.push({ key, accountId: e.accountId, change: c, firstAt: now, lastAt: now }); continue }
+      const was = out[i].change
+      const change: BreachChange = c.kind === 'kpi' && was.kind === 'kpi'
+        ? { ...c, previous: was.previous ?? was.value }
+        : c
+      out[i] = { ...out[i], change, lastAt: now }
+    }
+  }
+  return out
 }
 
 // ── Playing it ───────────────────────────────────────────────────────────────
@@ -167,21 +228,94 @@ export function preloadAlarm(s: GlobalAlarmSettings): void {
   uploadedSrc = s.soundUrl
 }
 
-/** 'played' | 'blocked' (browser needs a click/keypress on the page first). */
-export async function playGlobalAlarm(s: GlobalAlarmSettings): Promise<'played' | 'blocked'> {
+/**
+ * 'blocked' = the browser wants a click/keypress on the page first.
+ * 'broken'  = the uploaded file itself won't play (missing, unsupported…).
+ */
+export type PlayResult = 'played' | 'blocked' | 'broken'
+
+async function playUploaded(s: GlobalAlarmSettings): Promise<PlayResult> {
+  preloadAlarm(s)
+  const a = uploaded!
+  try {
+    a.volume = Math.min(1, Math.max(0, s.volume))
+    a.currentTime = 0
+    await a.play()
+    return 'played'
+  } catch (e) {
+    return (e as DOMException)?.name === 'NotAllowedError' ? 'blocked' : 'broken'
+  }
+}
+
+/** Play the alarm ONCE (Settings → Alarm's "Test sound"). */
+export async function playGlobalAlarm(s: GlobalAlarmSettings): Promise<PlayResult> {
+  if (s.soundKind === 'upload' && s.soundUrl) return playUploaded(s)
+  return playAlarm(s.builtinKey, s.volume) ? 'played' : 'blocked'
+}
+
+/**
+ * Ring ONCE for a real alarm (ringMode 'once'). Unlike playGlobalAlarm (which
+ * "Test sound" uses to tell you a file is broken), a broken uploaded file falls
+ * back to the built-in sound here — a real alarm must never be silent.
+ */
+export async function ringOnce(s: GlobalAlarmSettings): Promise<'played' | 'blocked'> {
   if (s.soundKind === 'upload' && s.soundUrl) {
-    preloadAlarm(s)
-    const a = uploaded!
-    try {
-      a.volume = Math.min(1, Math.max(0, s.volume))
-      a.currentTime = 0
-      await a.play()
-      return 'played'
-    } catch {
-      return 'blocked'
-    }
+    const r = await playUploaded(s)
+    if (r !== 'broken') return r
   }
   return playAlarm(s.builtinKey, s.volume) ? 'played' : 'blocked'
+}
+
+// ── Looping until acknowledged ──────────────────────────────────────────────
+/** Built-in sounds are 0.4–1s long; replay on this beat. */
+const BUILTIN_REPEAT_MS = 1800
+/** Pause between plays of an uploaded file. */
+const UPLOAD_PAUSE_MS = 600
+/** While the browser blocks audio, retry this often — the first click on the page lets it through. */
+const BLOCKED_RETRY_MS = 1000
+
+// Each loop gets its own id; `current` is the one allowed to keep going. A
+// plain on/off flag isn't enough: a restart (new sound saved mid-alarm) while
+// the old loop is still awaiting play() would leave BOTH running.
+let loopSeq = 0
+let current = 0
+let loopTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Ring over and over until stopAlarmLoop(). If the uploaded file can't play,
+ * falls back to the built-in sound: a broken upload must never mean silence.
+ * `onResult` reports each attempt, so the page can show "sound is blocked".
+ */
+export function startAlarmLoop(s: GlobalAlarmSettings, onResult?: (r: PlayResult) => void): void {
+  stopAlarmLoop()
+  const id = current = ++loopSeq
+  const alive = () => current === id
+  const again = (ms: number) => { if (alive()) loopTimer = setTimeout(tick, ms) }
+  const tick = async () => {
+    if (!alive()) return
+    let r: PlayResult = 'broken'
+    if (s.soundKind === 'upload' && s.soundUrl) r = await playUploaded(s)
+    if (!alive()) { if (current === 0) stopAlarmLoop(); return }   // acknowledged while play() was starting
+    if (r === 'played') {
+      // Next play once this one finishes.
+      uploaded!.onended = () => again(UPLOAD_PAUSE_MS)
+    } else if (r === 'blocked') {
+      again(BLOCKED_RETRY_MS)
+    } else {
+      r = playAlarm(s.builtinKey, s.volume) ? 'played' : 'blocked'
+      again(r === 'played' ? BUILTIN_REPEAT_MS : BLOCKED_RETRY_MS)
+    }
+    onResult?.(r)
+  }
+  tick()
+}
+
+/** Stop ringing immediately, mid-sound included. */
+export function stopAlarmLoop(): void {
+  current = 0
+  if (loopTimer) { clearTimeout(loopTimer); loopTimer = null }
+  if (uploaded) { uploaded.onended = null; uploaded.pause(); try { uploaded.currentTime = 0 } catch {} }
+  stopAllSounds()
 }
 
 export { audioAllowed, unlockAudio, onAudioStateChange }

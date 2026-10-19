@@ -62,6 +62,10 @@ export interface AccountData {
   status:  Record<string, any> | null
   calls:   Record<string, any>[]
   syncing?: boolean
+  // True once a fetch has actually come back (false/absent on the empty
+  // placeholder shown while the very first fetch is in flight). Lives IN the
+  // data, not beside it, so anything reading `data` sees a matching pair.
+  loaded?: boolean
   // Rows fetched from every ALTERNATE KPI table this account's config points
   // at — keyed by the SOURCE's own identity, `${table}::${accountCol}` (see
   // kpiSourceKey() in lib/breaches.ts), NOT by group id.

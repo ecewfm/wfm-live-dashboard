@@ -33,6 +33,20 @@ function getCtx(): AudioContext | null {
 // volume setting.
 let vol = 1
 
+// Every oscillator still sounding, so stopAllSounds() can cut them off — an
+// acknowledged alarm should go quiet at once, not finish its last ring.
+const active = new Set<OscillatorNode>()
+function track(osc: OscillatorNode) {
+  active.add(osc)
+  osc.onended = () => active.delete(osc)
+}
+
+/** Silence anything currently playing (built-in sounds only). */
+export function stopAllSounds(): void {
+  for (const o of active) { try { o.stop() } catch {} }
+  active.clear()
+}
+
 function tone(c: AudioContext, freq: number, startOffset: number, dur: number, type: OscillatorType = 'sine', gain = 0.15) {
   const osc = c.createOscillator()
   const g   = c.createGain()
@@ -44,6 +58,7 @@ function tone(c: AudioContext, freq: number, startOffset: number, dur: number, t
   g.gain.exponentialRampToValueAtTime(0.0001, startAt + dur)
   osc.connect(g)
   g.connect(c.destination)
+  track(osc)
   osc.start(startAt)
   osc.stop(startAt + dur + 0.05)
 }
@@ -116,6 +131,7 @@ export function playAlarm(key: string | undefined | null, volume = 1): boolean {
       g.gain.linearRampToValueAtTime(0.0001, now + 0.95)
       osc.connect(g)
       g.connect(c.destination)
+      track(osc)
       osc.start(now)
       osc.stop(now + 1)
       break
