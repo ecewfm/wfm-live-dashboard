@@ -16,10 +16,8 @@ import {
   type GlobalAlarmSettings, type AlarmBaseline, type PendingAlarm,
 } from '@/lib/globalAlarm'
 import AlarmPrompt from './AlarmPrompt'
-import {
-  keyBreaches, reconcileCalledOut, toKeySets, loadCalledOut, saveCalledOut,
-  type CalledOutAll,
-} from '@/lib/calledOut'
+import { keyBreaches, type CalledOutMark } from '@/lib/calledOut'
+import { useCalledOut, type CalledOutMode } from '@/lib/useCalledOut'
 import {
   loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
   loadCliqSettings, saveCliqSettings, appendKnownStatuses, DEFAULT_CLIQ_GLOBAL_SETTINGS,
@@ -604,54 +602,16 @@ export default function Dashboard() {
   const accountDataReady = (id: string) =>
     !!(data[id]?.loaded && dataSources[id] && kpiThresholds[id] && statusThresholds[id])
 
-  // ── "Called out" checks on the Breach / Anomalies tables ───────────────────
-  // See lib/calledOut.ts for the rule: a check lasts exactly as long as its
-  // breach stays in the table. The marks live in a ref (the lastSeen times tick
-  // every second and must not re-render anything); only the SET of checked keys
-  // is React state, because that is all the tables draw from.
-  const calledOutRef = useRef<CalledOutAll>({})
-  const calledOutSavedAt = useRef(0)
-  const [calledOut, setCalledOut] = useState<Record<string, Set<string>>>({})
-
-  useEffect(() => {
-    const saved = loadCalledOut()
-    calledOutRef.current = saved
-    setCalledOut(toKeySets(saved))
-  }, [])
-
-  useEffect(() => {
-    const all = calledOutRef.current
-    const now = Date.now()
-    let cleared = false
-    for (const id of accounts) {
-      const marked = all[id]
-      if (!marked || Object.keys(marked).length === 0) continue
-      // Not ready -> we can't tell "the breach ended" from "nothing has loaded
-      // yet", and guessing wrong would wipe every check on every page load.
-      if (!accountDataReady(id)) continue
-      const present = new Set(keyBreaches(allBreaches[id] ?? []).map(k => k.key))
-      const { next, dropped } = reconcileCalledOut(marked, present, now)
-      all[id] = next
-      if (dropped.length) cleared = true
-    }
-    if (cleared) {
-      setCalledOut(toKeySets(all)); saveCalledOut(all); calledOutSavedAt.current = now
-    } else if (now - calledOutSavedAt.current > 20_000) {
-      // Keep the stored last-seen times fresh, so a long-closed tab reopens
-      // knowing how long a breach has really been gone.
-      saveCalledOut(all); calledOutSavedAt.current = now
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allBreaches])
-
-  const toggleCalledOut = useCallback((accountId: string, key: string) => {
-    const all = calledOutRef.current
-    const marked = { ...(all[accountId] ?? {}) }
-    if (key in marked) delete marked[key]; else marked[key] = Date.now()
-    all[accountId] = marked
-    setCalledOut(toKeySets(all))
-    saveCalledOut(all); calledOutSavedAt.current = Date.now()
-  }, [])
+  // ── "Called out" checks on the Dashboard page's Breach / Anomalies table ────
+  // See lib/calledOut.ts for the rule (a check lasts exactly as long as its
+  // breach stays in the table) and lib/useCalledOut.ts for the plumbing: the
+  // ticks are shared between every computer watching the account (sql/called_out.sql),
+  // and fall back to this browser alone until that SQL has been run.
+  const readyIds = new Set(accounts.filter(accountDataReady))
+  const freshIds = new Set([...readyIds].filter(id => !isDataStale(freshestAcrossSources(dataSources[id], data[id]))))
+  const { marks: calledOutMarks, mode: calledOutMode, toggle: toggleCalledOut } = useCalledOut({
+    accounts, allBreaches, readyIds, freshIds, me: profile.fullName || profile.username,
+  })
 
   // ── Global breach alarm (Settings → Alarm, super users) ────────────────────
   // One sound for every account, played here — at the top of the dashboard —
@@ -1048,7 +1008,8 @@ export default function Dashboard() {
                 accountId={currentAccount}
                 accountData={currentData}
                 breaches={breaches}
-                calledOut={calledOut[currentAccount] ?? NO_KEYS}
+                calledOut={calledOutMarks[currentAccount] ?? NO_MARKS}
+                calledOutMode={calledOutMode}
                 onToggleCalledOut={key => toggleCalledOut(currentAccount, key)}
                 alertAcked={alertAcked}
                 onAck={() => setAlertAcked(true)}
@@ -1297,21 +1258,26 @@ function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, ico
   )
 }
 
-// The checked-keys set a table gets when nothing is checked (one shared instance,
-// so a prop that never changes doesn't look changed).
-const NO_KEYS: Set<string> = new Set()
+// The marks a table gets when nothing is checked (one shared instance, so a prop
+// that never changes doesn't look changed).
+const NO_MARKS: Record<string, CalledOutMark> = {}
 
 // ── The "called out" checkbox in a Breach / Anomalies row ─────────────────────
 // Dashboard page only — the Overview cards are the compact at-a-glance view and
 // deliberately have no checkbox (per the users, 2026-10-19). See
 // lib/calledOut.ts for when a check clears.
-function CalledOutBox({ checked, onToggle, who }: { checked: boolean; onToggle: () => void; who: string }) {
+function CalledOutBox({ mark, disabled, onToggle, who }: {
+  mark: CalledOutMark | undefined; disabled: boolean; onToggle: () => void; who: string
+}) {
+  // Who ticked it and when, when known (it is, once ticks are shared).
+  const when = mark?.at ? new Date(mark.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null
+  const by = mark ? [mark.by ? `by ${mark.by}` : null, when ? `at ${when}` : null].filter(Boolean).join(' ') : ''
   return (
     <input
-      type="checkbox" className="called-out-box" checked={checked} onChange={onToggle}
+      type="checkbox" className="called-out-box" checked={!!mark} disabled={disabled} onChange={onToggle}
       aria-label={`Called out: ${who}`}
-      title={checked
-        ? 'Called out — stays checked while this breach continues, and clears when it goes away'
+      title={mark
+        ? `Called out${by ? ' ' + by : ''} — stays checked while this breach continues, and clears when it goes away`
         : 'Tick once you have called this out'}
     />
   )
@@ -1333,9 +1299,9 @@ function GroupHeaderRow({ label, colSpan }: { label: string; colSpan: number }) 
 }
 
 // ── Dashboard Page ─────────────────────────────────────────────────────────────
-function DashboardPage({ accountId, accountData, breaches, calledOut, onToggleCalledOut, alertAcked, onAck, agentTimers, kpiTh, statusTh, ds, layout, onLayoutChange }: {
+function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutMode, onToggleCalledOut, alertAcked, onAck, agentTimers, kpiTh, statusTh, ds, layout, onLayoutChange }: {
   accountId: string; accountData: AccountData | undefined; breaches: BreachRow[]
-  calledOut: Set<string>; onToggleCalledOut: (key: string) => void
+  calledOut: Record<string, CalledOutMark>; calledOutMode: CalledOutMode; onToggleCalledOut: (key: string) => void
   alertAcked: boolean; onAck: () => void; agentTimers: Record<string, number>
   kpiTh: Thresholds; statusTh: StatusThresholds; ds: DataSourceConfig
   layout: DashboardLayout; onLayoutChange: (layout: DashboardLayout) => void
@@ -1486,7 +1452,9 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, onToggleCa
           <table className="dash-table">
             <thead>
               <tr>
-                <th className="called-out-th" title="Called out — tick a row once you have called it out. It clears by itself when the breach goes away.">
+                <th className="called-out-th" title={calledOutMode === 'local'
+                  ? 'Called out — tick a row once you have called it out. For now this is saved on this computer only (shared ticking is not switched on yet). It clears by itself when the breach goes away.'
+                  : 'Called out — tick a row once you have called it out. Everyone watching this account sees it. It clears by itself when the breach goes away.'}>
                   <i className="bx bx-check-circle" />
                 </th>
                 <SortableTh label="Queue / Agent" active={breachSort?.col === 'entity'}    dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('entity')} />
@@ -1502,7 +1470,7 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, onToggleCa
                   const rows = section.rows.map((b, i) => (
                     <tr key={`${section.group}-${i}`}>
                       <td className="called-out-td">
-                        <CalledOutBox checked={calledOut.has(keyOf.get(b) ?? '')} who={`${b.entity} — ${b.metric}`}
+                        <CalledOutBox mark={calledOut[keyOf.get(b) ?? '']} disabled={calledOutMode === 'unknown'} who={`${b.entity} — ${b.metric}`}
                           onToggle={() => { const k = keyOf.get(b); if (k) onToggleCalledOut(k) }} />
                       </td>
                       <td style={{ fontWeight: 600 }}>{b.entity}</td>

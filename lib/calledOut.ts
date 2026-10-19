@@ -20,8 +20,12 @@
 // A genuine end can't sneak back inside the grace window for an agent: coming
 // back means a fresh status that has to run its whole threshold again.
 //
-// Kept per browser (localStorage), like the other view preferences here — each
-// person's "I've called this" is their own mark, and it survives a reload.
+// WHERE THE CHECKS LIVE: in the shared wfm_called_out table (sql/called_out.sql),
+// so a tick on one computer shows on every other watching the account, with who
+// ticked it and when (lib/calledOutShared.ts, driven by lib/useCalledOut.ts).
+// Until that SQL has been run, the checks fall back to this browser's
+// localStorage — the functions at the bottom of this file — so the feature
+// never just stops working. The grace-window rule is the same either way.
 
 import type { BreachRow } from './breaches'
 
@@ -31,6 +35,12 @@ export const CALLED_OUT_GRACE_MS = 90_000
 const STORAGE_KEY = 'wfm_called_out'
 const SEP = '\u001f'
 
+/** One checked row. `by`/`at` are unknown for a check saved only in this browser. */
+export interface CalledOutMark { by: string | null; at: number | null }
+/** account id -> breach key -> its mark. What the tables draw their checkboxes from. */
+export type CalledOutMarks = Record<string, Record<string, CalledOutMark>>
+
+// ── Browser-only storage (the fallback) ──────────────────────────────────────
 /** breach key -> when that breach was last seen in the table (ms since epoch). */
 export type CalledOutMap = Record<string, number>
 /** account id -> that account's called-out breaches. */
@@ -83,17 +93,19 @@ export function reconcileCalledOut(
   return { next, dropped }
 }
 
-/** The checked keys, per account, as sets (what the tables look things up in). */
-export function toKeySets(all: CalledOutAll): Record<string, Set<string>> {
-  const out: Record<string, Set<string>> = {}
+/** A browser-only store, as the marks the tables read (who/when are unknown). */
+export function localToMarks(all: CalledOutAll): CalledOutMarks {
+  const out: CalledOutMarks = {}
   for (const [acc, marked] of Object.entries(all)) {
     const keys = Object.keys(marked)
-    if (keys.length) out[acc] = new Set(keys)
+    if (!keys.length) continue
+    out[acc] = {}
+    for (const k of keys) out[acc][k] = { by: null, at: null }
   }
   return out
 }
 
-// ── Persistence ───────────────────────────────────────────────────────────────
+// ── Persistence (browser-only fallback) ───────────────────────────────────────
 // Defensive on every path: private windows / blocked storage throw, and an old
 // or hand-edited value must never take the dashboard down.
 export function loadCalledOut(): CalledOutAll {
