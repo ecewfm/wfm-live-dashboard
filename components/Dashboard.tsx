@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
 import { useAuth } from './AuthGate'
@@ -17,6 +17,7 @@ import {
 } from '@/lib/globalAlarm'
 import AlarmPrompt from './AlarmPrompt'
 import { loadView, saveView, pickAccount } from '@/lib/viewMemory'
+import { OV_GAP, columnGeometry, assignColumns, stackColumns, type ColumnGeometry, type CardPos } from '@/lib/overviewLayout'
 import { keyBreaches, type CalledOutMark } from '@/lib/calledOut'
 import { useCalledOut, type CalledOutMode } from '@/lib/useCalledOut'
 import {
@@ -1827,44 +1828,121 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
   onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
   rtaLogsEnabledMap: Record<string, boolean>
 }) {
-  const [layout, setLayout] = useState<{ top: number; left: number; width: number }[]>([])
+  // Cards stay in the column they were last SHUFFLED into, and only slide up or
+  // down inside it as cards above them grow/shrink — see lib/overviewLayout.ts.
+  // A shuffle happens only when the view changes (opening the page, the first
+  // real data arriving, the page width changing, the account filter changing),
+  // never just because new data or breaches came in while someone is watching.
+  const [layout, setLayout] = useState<Record<string, CardPos>>({})
   const [gridH, setGridH]   = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
-  const cardRefs     = useRef<(HTMLDivElement | null)[]>([])
+  // Keyed by account, not index: with the account filter, index i is not the
+  // same card from one render to the next.
+  const cardRefs     = useRef<Record<string, HTMLDivElement | null>>({})
+  // The last shuffle: each card's column, and the grid width it was made for.
+  const plan         = useRef<{ gridW: number; geom: ColumnGeometry; colOf: Record<string, number> } | null>(null)
+  const idsRef       = useRef(accounts)
+  // A layout effect, so it is current before the frame scheduled below reads it.
+  useLayoutEffect(() => { idsRef.current = accounts })
+  const accountsKey = accounts.join('|')
 
-  useEffect(() => {
-    function recalc() {
-      const grid = containerRef.current
-      if (!grid) return
-      const gap = 20; const minW = 520
-      const gridW = grid.offsetWidth
-      const numCols = Math.max(1, Math.floor((gridW + gap) / (minW + gap)))
-      const colW = (gridW + gap) / numCols - gap
-      const colHeights = Array(numCols).fill(0)
-      const positions: { top: number; left: number; width: number }[] = []
-      cardRefs.current.forEach(card => {
-        if (!card) { positions.push({ top: 0, left: 0, width: colW }); return }
-        card.style.width = `${colW}px`
-        const minH = Math.min(...colHeights); const cIdx = colHeights.indexOf(minH)
-        positions.push({ top: minH, left: cIdx * (colW + gap), width: colW })
-        colHeights[cIdx] += card.offsetHeight + gap
-      })
-      setLayout(positions)
-      setGridH(Math.max(...colHeights, 0) - gap)
+  /** Keep every card in its column; recompute tops from the current heights. */
+  const stack = useCallback(() => {
+    const p = plan.current
+    if (!p) return
+    const r = stackColumns(idsRef.current, id => cardRefs.current[id]?.offsetHeight ?? 0, p.colOf, p.geom, OV_GAP)
+    p.colOf = r.colOf
+    setLayout(r.pos)
+    setGridH(r.height)
+  }, [])
+
+  /** Re-decide every card's column for the current width, then stack. */
+  const shuffle = useCallback(() => {
+    const grid = containerRef.current
+    if (!grid) return
+    const gridW = grid.offsetWidth
+    const geom = columnGeometry(gridW)
+    const ids = idsRef.current
+    // Heights depend on width (text wraps), so size each card to the new column
+    // width BEFORE measuring it — with the width transition switched off for
+    // that moment, or the measurement would be taken at the OLD width.
+    for (const id of ids) {
+      const el = cardRefs.current[id]
+      if (!el) continue
+      el.style.transition = 'none'
+      el.style.width = `${geom.colW}px`
     }
-    const t = setTimeout(recalc, 60)
-    window.addEventListener('resize', recalc)
-    return () => { clearTimeout(t); window.removeEventListener('resize', recalc) }
-  }, [accounts, data, allBreaches])
+    const colOf = assignColumns(ids, id => cardRefs.current[id]?.offsetHeight ?? 0, geom.numCols, OV_GAP)
+    for (const id of ids) { const el = cardRefs.current[id]; if (el) el.style.transition = '' }
+    plan.current = { gridW, geom, colOf }
+    stack()
+  }, [stack])
+
+  // Coalesce everything that happens in one frame into ONE pass; a pending
+  // shuffle already includes a stack.
+  const pending = useRef<'stack' | 'shuffle' | null>(null)
+  const frame   = useRef<number | null>(null)
+  const schedule = useCallback((kind: 'stack' | 'shuffle') => {
+    if (pending.current === 'shuffle') return
+    pending.current = kind === 'shuffle' || !plan.current ? 'shuffle' : 'stack'
+    if (frame.current !== null) return
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null
+      const k = pending.current
+      pending.current = null
+      if (k === 'shuffle') shuffle(); else stack()
+    })
+  }, [shuffle, stack])
+  // Reset the handles too, not just cancel: React can run this cleanup and then
+  // the effects again on the SAME instance (Strict Mode does it on every mount),
+  // and a stale handle would make schedule() think a frame is still coming.
+  useEffect(() => () => {
+    if (frame.current !== null) cancelAnimationFrame(frame.current)
+    frame.current = null
+    pending.current = null
+  }, [])
+
+  // Shuffle: the page width changed (window resize, zoom, a scrollbar
+  // appearing). The grid's own height changes too — stack() sets it — and
+  // those are ignored, only the WIDTH counts.
+  useEffect(() => {
+    const grid = containerRef.current
+    if (!grid) return
+    const ro = new ResizeObserver(() => {
+      if (!plan.current || grid.offsetWidth !== plan.current.gridW) schedule('shuffle')
+    })
+    ro.observe(grid)
+    return () => ro.disconnect()
+  }, [schedule])
+
+  // Shuffle: a different set of accounts (the account filter, or the account
+  // list finishing loading).
+  useEffect(() => { schedule('shuffle') }, [accountsKey, schedule])
+
+  // Shuffle once more when every card has its REAL data: before that they're
+  // all short "no data yet" placeholders, and columns balanced on those would
+  // end up badly lopsided once the real content arrives.
+  const allLoaded = accounts.length > 0 && accounts.every(a => data[a]?.loaded)
+  useEffect(() => { if (allLoaded) schedule('shuffle') }, [allLoaded, schedule])
+
+  // Stack (never shuffle): any card changed size — a breach row appeared or
+  // went away, a table grew. Cards below it in the same column move down/up.
+  useEffect(() => {
+    const ro = new ResizeObserver(() => schedule('stack'))
+    for (const id of accounts) { const el = cardRefs.current[id]; if (el) ro.observe(el) }
+    return () => ro.disconnect()
+    // accountsKey stands in for `accounts` (a new array on every render).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountsKey, schedule])
 
   return (
     <div ref={containerRef} className="ov-grid" style={{ height: gridH }}>
-      {accounts.map((accId, i) => (
+      {accounts.map(accId => (
         <div
           key={accId}
-          ref={el => { cardRefs.current[i] = el }}
+          ref={el => { cardRefs.current[accId] = el }}
           className="ov-card"
-          style={layout[i] ? { top: layout[i].top, left: layout[i].left, width: layout[i].width } : { visibility: 'hidden' }}
+          style={layout[accId] ? { top: layout[accId].top, left: layout[accId].left, width: layout[accId].width } : { visibility: 'hidden' }}
         >
           <OverviewCard
             accId={accId}
