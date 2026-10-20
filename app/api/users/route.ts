@@ -64,20 +64,26 @@ export async function PATCH(req: Request) {
       return json({ ok: true })
     }
 
-    // Plain edit.
-    if (body.role !== undefined) {
+    // Plain edit. Editable here: full name, role, accounts. NOT the username — it is
+    // what the login's auth address is derived from (lib/authEmail), so it is chosen
+    // once at creation; any `username` in the body is ignored on purpose.
+    //
+    // Re-sending the role someone already has is not a change, so an admin can
+    // still rename THEMSELVES — only an actual change to your own role is refused.
+    const roleChange = body.role !== undefined && body.role !== target.role ? body.role : undefined
+    if (roleChange !== undefined) {
       // Changing your own role is how an admin accidentally demotes themselves
       // out of the ability to change it back.
       assertNotSelf(me, targetId, 'change the role of')
-      if (!can.assignableRoles(me.role).includes(body.role)) {
-        throw new AuthError(403, `You cannot grant the "${body.role}" role.`)
+      if (!can.assignableRoles(me.role).includes(roleChange)) {
+        throw new AuthError(403, `You cannot grant the "${roleChange}" role.`)
       }
     }
     const accountIds = body.accountIds === undefined
       ? undefined
       : await validateAccountIds(me, body.accountIds)
 
-    await updateUser(targetId, { fullName: body.fullName, role: body.role, accountIds })
+    await updateUser(targetId, { fullName: body.fullName, role: roleChange, accountIds })
     return json({ ok: true })
   } catch (e) { return errorResponse(e) }
 }

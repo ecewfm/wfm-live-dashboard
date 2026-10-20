@@ -10,7 +10,7 @@
 // Keeping the UI's rules in lib/authEmail's `can` means the two read from one
 // source, but the route re-derives them from the caller's token regardless.
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '@/lib/authClient'
 import { useAuth } from './AuthGate'
 import ColumnFilter, { type FilterOption } from './ColumnFilter'
@@ -30,7 +30,12 @@ type Draft = {
   accountIds: string[]
   /** Accounts as loaded, for edits — so we only send accountIds when they changed. */
   originalAccountIds?: string[]
+  /** Role as loaded, for edits — so we only send role when it changed (you can't change your own). */
+  originalRole?: UserRole
 }
+
+// .sm-input is a 68px box made for threshold numbers — names and usernames need the row.
+const TEXT_INPUT = { width: '100%', boxSizing: 'border-box', textAlign: 'left' } as const
 
 const blankDraft = (role: UserRole): Draft => ({ username: '', fullName: '', role, accountIds: [] })
 
@@ -80,6 +85,9 @@ export default function UsersTab({ accounts }: Props) {
   const [error, setError]   = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [draft, setDraft]   = useState<Draft | null>(null)
+  // Bumped on every open: the form remounts, which is what scrolls it into view.
+  const [formSeq, setFormSeq] = useState(0)
+  const openDraft = (d: Draft) => { setDraft(d); setFormSeq(n => n + 1) }
   const [busy, setBusy]     = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<UserProfile | null>(null)
   // One entry per column; null = no filter. Kept across reloads of the list,
@@ -105,6 +113,14 @@ export default function UsersTab({ accounts }: Props) {
 
   useEffect(() => { load() }, [load])
 
+  // "Saved" / "Created … temporary password" / a failure all appear at the TOP of
+  // the tab, but the form that triggered them is far down a long list — bring the
+  // message into view or a save looks like it did nothing (and a failure is missed).
+  const msgRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (error || notice) msgRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [error, notice])
+
   const run = async (fn: () => Promise<void>) => {
     setBusy(true); setError(null); setNotice(null)
     try { await fn(); await load() }
@@ -124,10 +140,15 @@ export default function UsersTab({ accounts }: Props) {
     } else {
       await apiFetch('/api/users', {
         method: 'PATCH',
+        // The sign-in username is deliberately never sent: it is what their login is
+        // derived from, so it can only be chosen when the user is created.
         body: JSON.stringify({
-          id: d.id, fullName: d.fullName, role: d.role,
-          // Omitted when untouched: someone imported before their accounts existed
-          // has none, and a rename must not be forced to assign one.
+          id: d.id, fullName: d.fullName,
+          // Omitted when untouched: changing your OWN role is refused (and an admin
+          // editing their own name must still go through), and someone imported
+          // before their accounts existed has none — a rename must not be forced
+          // to assign one.
+          ...(d.role === d.originalRole ? {} : { role: d.role }),
           ...(sameSet(d.accountIds, d.originalAccountIds) ? {} : { accountIds: d.accountIds }),
         }),
       })
@@ -206,12 +227,14 @@ export default function UsersTab({ accounts }: Props) {
           : 'Team leads you have added to your accounts. They can view the dashboard for those accounts but cannot change any settings.'}
       </p>
 
-      {error  && <div className="auth-note auth-note-err" style={{ marginBottom: 12 }}>{error}</div>}
-      {notice && <div className="auth-note auth-note-ok"  style={{ marginBottom: 12 }}>{notice}</div>}
+      <div ref={msgRef}>
+        {error  && <div className="auth-note auth-note-err" style={{ marginBottom: 12 }}>{error}</div>}
+        {notice && <div className="auth-note auth-note-ok"  style={{ marginBottom: 12 }}>{notice}</div>}
+      </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         <button className="sm-btn-save" disabled={busy || !assignable.length}
-                onClick={() => setDraft(blankDraft(assignable[assignable.length - 1]))}>
+                onClick={() => openDraft(blankDraft(assignable[assignable.length - 1]))}>
           <i className="bx bx-plus" /> Add user
         </button>
         {can.importUsers(me.role) && <RosterImport onDone={load} accountLabel={accountLabel} />}
@@ -268,9 +291,13 @@ export default function UsersTab({ accounts }: Props) {
               </td></tr>
             )}
             {visibleUsers.map(u => {
-              const mayEdit = editable(u) && u.id !== me.id
+              // Edit is allowed on your own row too (a super user fixing their own
+              // name); the server refuses only a change to your own ROLE. Deactivate
+              // and delete stay off your own row — either would lock you out.
+              const mayEdit = editable(u)
+              const notSelf = mayEdit && u.id !== me.id
               return (
-                <tr key={u.id}>
+                <tr key={u.id} className={draft?.id === u.id ? 'sm-row-editing' : undefined}>
                   <td>{u.username}{u.id === me.id && <span className="sm-metric-sub"> (you)</span>}</td>
                   <td>{u.fullName}</td>
                   <td>{ROLE_LABELS[u.role]}</td>
@@ -288,7 +315,7 @@ export default function UsersTab({ accounts }: Props) {
                   <td style={{ whiteSpace: 'nowrap' }}>
                     <button className="acc-btn acc-btn-cfg" disabled={!mayEdit || busy}
                             title={mayEdit ? 'Edit' : 'You cannot manage this user'} aria-label="Edit"
-                            onClick={() => setDraft({ id: u.id, username: u.username, fullName: u.fullName ?? '', role: u.role, accountIds: [...u.accountIds], originalAccountIds: [...u.accountIds] })}>
+                            onClick={() => openDraft({ id: u.id, username: u.username, fullName: u.fullName ?? '', role: u.role, originalRole: u.role, accountIds: [...u.accountIds], originalAccountIds: [...u.accountIds] })}>
                       <i className="bx bx-edit" />
                     </button>
                     <button className="acc-btn acc-btn-cfg" disabled={!editable(u) || busy}
@@ -296,12 +323,12 @@ export default function UsersTab({ accounts }: Props) {
                             onClick={() => resetPw(u)}>
                       <i className="bx bx-key" />
                     </button>
-                    <button className="acc-btn acc-btn-cfg" disabled={!mayEdit || busy}
+                    <button className="acc-btn acc-btn-cfg" disabled={!notSelf || busy}
                             title={u.isActive ? 'Deactivate' : 'Reactivate'} aria-label={u.isActive ? 'Deactivate' : 'Reactivate'}
                             onClick={() => toggleActive(u)}>
                       <i className={`bx ${u.isActive ? 'bx-user-x' : 'bx-user-check'}`} />
                     </button>
-                    <button className="acc-btn acc-btn-cfg" disabled={!mayEdit || busy}
+                    <button className="acc-btn acc-btn-cfg" disabled={!notSelf || busy}
                             title="Delete" aria-label="Delete"
                             onClick={() => setConfirmDelete(u)}>
                       <i className="bx bx-trash" />
@@ -317,7 +344,9 @@ export default function UsersTab({ accounts }: Props) {
 
       {draft && (
         <UserForm
+          key={formSeq}
           draft={draft} setDraft={setDraft}
+          isSelf={draft.id === me.id}
           assignableRoles={assignable}
           accounts={assignableAccounts}
           busy={busy}
@@ -339,9 +368,11 @@ export default function UsersTab({ accounts }: Props) {
 }
 
 // ── Add / edit form ─────────────────────────────────────────────────────────
-function UserForm({ draft, setDraft, assignableRoles, accounts, busy, onSave, onCancel }: {
+function UserForm({ draft, setDraft, isSelf, assignableRoles, accounts, busy, onSave, onCancel }: {
   draft: Draft
   setDraft: (d: Draft) => void
+  /** Editing your own login: the name can change, the role cannot. */
+  isSelf: boolean
   assignableRoles: UserRole[]
   accounts: AccountOpt[]
   busy: boolean
@@ -349,6 +380,15 @@ function UserForm({ draft, setDraft, assignableRoles, accounts, busy, onSave, on
   onCancel: () => void
 }) {
   const needsAccounts = draft.role !== 'superuser'
+
+  // The form sits below the users table, and the table is long — without this,
+  // clicking Edit (or Add user) on a row far from the bottom appears to do
+  // nothing, because the form opens off-screen. Runs once per form opened,
+  // not on every keystroke.
+  const formRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    formRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [])
   const toggle = (id: string) => setDraft({
     ...draft,
     accountIds: draft.accountIds.includes(id)
@@ -357,27 +397,38 @@ function UserForm({ draft, setDraft, assignableRoles, accounts, busy, onSave, on
   })
 
   return (
-    <div className="auth-note" style={{ marginTop: 16 }}>
+    <div className="auth-note" style={{ marginTop: 16 }} ref={formRef}>
       <div className="sm-section-title">{draft.id ? `EDIT ${draft.username.toUpperCase()}` : 'NEW USER'}</div>
 
-      {!draft.id && (
+      {!draft.id ? (
         <>
           <div className="ds-mini-label">Username (what they type to sign in)</div>
-          <input className="sm-input" value={draft.username} autoFocus spellCheck={false}
+          <input className="sm-input" style={TEXT_INPUT} value={draft.username} autoFocus spellCheck={false}
                  placeholder="e.g. jdoe@corp.com or vn20012"
                  onChange={e => setDraft({ ...draft, username: e.target.value })} />
+        </>
+      ) : (
+        <>
+          {/* Shown so you can see who you're editing, but never editable: it is what
+              their login is built from, so changing it would lock them out. */}
+          <div className="ds-mini-label">Username (what they type to sign in — can't be changed)</div>
+          <input className="sm-input" value={draft.username} readOnly disabled spellCheck={false}
+                 aria-label="Username" style={{ ...TEXT_INPUT, opacity: 0.7, cursor: 'not-allowed' }} />
         </>
       )}
 
       <div className="ds-mini-label">Full name</div>
-      <input className="sm-input" value={draft.fullName}
+      <input className="sm-input" style={TEXT_INPUT} value={draft.fullName} autoFocus={!!draft.id}
              onChange={e => setDraft({ ...draft, fullName: e.target.value })} />
 
       <div className="ds-mini-label">Role</div>
-      <select className="ds-select" value={draft.role} disabled={assignableRoles.length <= 1}
+      <select className="ds-select" value={draft.role} disabled={isSelf || assignableRoles.length <= 1}
               onChange={e => setDraft({ ...draft, role: e.target.value as UserRole })}>
-        {assignableRoles.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+        {/* Your own role may not be in the list you can hand out (an RTA can't be
+            edited here at all), but it must still display rather than blank out. */}
+        {[...new Set([draft.role, ...assignableRoles])].map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
       </select>
+      {isSelf && <p className="sm-desc">You can't change your own role — ask another super user.</p>}
 
       {needsAccounts ? (
         <>

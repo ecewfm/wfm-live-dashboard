@@ -228,6 +228,8 @@ const MODAL_STYLES = `
   .sm-table tbody tr:last-child td { border-bottom: none; }
   .sm-table tbody tr:hover { background: rgba(0,0,0,0.015); }
   .dark .sm-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+  /* Users tab: the row whose edit form is open. */
+  .sm-table tbody tr.sm-row-editing td { background: rgba(232,121,35,0.10); }
   .sm-metric { font-size: 13px; font-weight: 600; }
   .sm-metric-sub { font-size: 11px; color: var(--text-muted, #687d75); margin-top: 2px; }
   .sm-input-cell { display: flex; align-items: center; gap: 6px; }
