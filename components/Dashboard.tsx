@@ -16,6 +16,7 @@ import {
   type GlobalAlarmSettings, type AlarmBaseline, type PendingAlarm,
 } from '@/lib/globalAlarm'
 import AlarmPrompt from './AlarmPrompt'
+import { loadView, saveView, pickAccount } from '@/lib/viewMemory'
 import { keyBreaches, type CalledOutMark } from '@/lib/calledOut'
 import { useCalledOut, type CalledOutMode } from '@/lib/useCalledOut'
 import {
@@ -80,7 +81,11 @@ export default function Dashboard() {
   const canOpenSettings = can.openSettings(profile.role)
 
   const [isDark, setIsDark]                 = useState(false)
-  const [currentPage, setCurrentPage]       = useState<Page>('overview')
+  // The page this TAB was last on (lib/viewMemory.ts) — so a reload, above all the
+  // automatic one when a new version is deployed, comes straight back instead of
+  // dropping everyone on the Overview. A new tab has no memory: Overview, as before.
+  // (Dashboard only mounts after sign-in, on the client, so reading storage here is safe.)
+  const [currentPage, setCurrentPage]       = useState<Page>(() => loadView().page ?? 'overview')
   const [accounts, setAccounts]             = useState<string[]>([])
   // Distinguishes "still loading" from "loaded, and this person has no
   // accounts" — a roster import can create someone before their account
@@ -380,8 +385,9 @@ export default function Dashboard() {
       applySettingsMap(ids, allSettings)
       loadCliqSettings().then(setCliqGlobal)
 
-      const savedAcc = localStorage.getItem('wfm_current_account')
-      const first = savedAcc && ids.includes(savedAcc) ? savedAcc : (ids[0] ?? '')
+      // This tab's own last account first, then the browser-wide last one, then the
+      // first visible — see pickAccount(). (localStorage alone is shared by every tab.)
+      const first = pickAccount(ids, loadView().account, localStorage.getItem('wfm_current_account'))
       setCurrentAccount(first)
 
       // Fetch all accounts
@@ -787,6 +793,12 @@ export default function Dashboard() {
     saveCliqSettings(settings)
   }
 
+  // Keep this tab's memory up to date (the account is only saved once it is known —
+  // it is '' while the account list is still loading, and must not wipe the memory).
+  useEffect(() => {
+    saveView({ page: currentPage, ...(currentAccount ? { account: currentAccount } : {}) })
+  }, [currentPage, currentAccount])
+
   const switchAccount = (id: string) => {
     setCurrentAccount(id); localStorage.setItem('wfm_current_account', id); setAlertAcked(false)
   }
@@ -904,7 +916,7 @@ export default function Dashboard() {
             <div>
               <div className="topbar-title">
                 {currentPage === 'dashboard'
-                  ? `${currentAccount ? currentAccount.toUpperCase() : '—'} — Real-Time Dashboard`
+                  ? (currentAccount ? `${currentAccount.toUpperCase()} — Real-Time Dashboard` : 'Real-Time Dashboard')
                   : 'All Accounts Overview'}
               </div>
               <div className="topbar-sub">{stale ? '⚠ Data may be stale' : 'Live'}</div>
@@ -984,7 +996,13 @@ export default function Dashboard() {
               </div>
             </div>
           )}
-          {currentPage === 'dashboard' && accounts.length > 0 && (
+          {/* A Dashboard restored by a reload is open BEFORE the account list and settings
+              have loaded: with no account chosen yet (or its settings missing) it would flash
+              an empty page built from the default config. Hold it until both are in. */}
+          {currentPage === 'dashboard' && accounts.length > 0 && !(currentAccount && dataSources[currentAccount]) && (
+            <div className="no-data">Loading…</div>
+          )}
+          {currentPage === 'dashboard' && accounts.length > 0 && currentAccount && dataSources[currentAccount] && (
             <div style={{ position: 'relative' }}>
               {stale && (
                 <div className="stale-overlay">
