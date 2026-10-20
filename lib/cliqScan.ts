@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, legacyAgentSource, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
@@ -63,17 +63,8 @@ export async function fetchAccountData(ds: DataSourceConfig, accountId: string):
     : []
 
   const agentSourcesToFetch: AgentSource[] = []
-  if (ds.agentTable) {
-    agentSourcesToFetch.push({
-      id: 'legacy', label: ds.agentTable, groupByCol: '',
-      table: ds.agentTable, accountCol: ds.agentAccountCol,
-      nameCol: ds.agentNameCol, statusCol: ds.agentStatusCol,
-      durationCol: ds.agentDurationCol, durationSecsCol: ds.agentDurationSecs,
-      extraCols: ds.agentExtraColsMap || {},
-      extraDurationCols: ds.agentExtraDurationColsMap || {},
-      extraMetricCols: ds.agentExtraMetricColsMap || {},
-    })
-  }
+  const primarySource = legacyAgentSource(ds)   // shared with components/Dashboard.tsx — its title is ds.agentTableLabel
+  if (primarySource) agentSourcesToFetch.push(primarySource)
   if (ds.agentSources) agentSourcesToFetch.push(...ds.agentSources)
   const agentLists = await Promise.all(agentSourcesToFetch.map(src => fetchAgentSource(src, accountId)))
 

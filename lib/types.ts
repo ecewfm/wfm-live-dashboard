@@ -272,6 +272,11 @@ export interface DataSourceConfig {
   // is empty, so every account configured before agentSources existed keeps
   // working unchanged. New setup should use agentSources instead.
   agentTable:       string
+  // The title this table's agents get in the Agent Status list (and the Breach /
+  // Anomalies table, which sections by the same group) — what an Additional
+  // Agent Source's own "label" already does for that source. Blank/unset = the
+  // raw table name, exactly as before this existed. See legacyAgentSource().
+  agentTableLabel?: string
   agentAccountCol:  string
   agentNameCol:     string
   agentStatusCol:   string

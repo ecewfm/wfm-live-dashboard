@@ -7,7 +7,7 @@ import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, sectionBreaches, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, sectionBreaches, legacyAgentSource, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
@@ -169,17 +169,8 @@ export default function Dashboard() {
       // so downstream code (breaches, timers, rendering) never has to branch
       // on which source produced it.
       const agentSourcesToFetch: AgentSource[] = []
-      if (src.agentTable) {
-        agentSourcesToFetch.push({
-          id: 'legacy', label: src.agentTable, groupByCol: '',
-          table: src.agentTable, accountCol: src.agentAccountCol,
-          nameCol: src.agentNameCol, statusCol: src.agentStatusCol,
-          durationCol: src.agentDurationCol, durationSecsCol: src.agentDurationSecs,
-          extraCols: src.agentExtraColsMap || {},
-          extraDurationCols: src.agentExtraDurationColsMap || {},
-          extraMetricCols: src.agentExtraMetricColsMap || {},
-        })
-      }
+      const primarySource = legacyAgentSource(src)   // shared with lib/cliqScan.ts — its title is src.agentTableLabel
+      if (primarySource) agentSourcesToFetch.push(primarySource)
       if (src.agentSources) agentSourcesToFetch.push(...src.agentSources)
       const agents: any[] = (await Promise.all(agentSourcesToFetch.map(as_ => fetchAgentSource(as_, accId)))).flat()
 

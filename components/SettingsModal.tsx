@@ -2037,6 +2037,20 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
       {/* Agent Section (column-based) */}
       <div className="ds-section">
         <div className="ds-section-title">AGENT DATA SOURCE</div>
+        {/* The title this table's agents get in Agent Status — the same job an
+            Additional Agent Source's name box does for that source. Blank keeps
+            the raw table name (the placeholder shows what that would be). */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <span className="ds-mini-label">Name</span>
+          <input className="ds-group-name" aria-label="Agent data source name"
+            value={localDs.agentTableLabel || ''}
+            placeholder={localDs.agentTable || 'Name shown in Agent Status (e.g. Agents on Ready)'}
+            onChange={e => setField('agentTableLabel', e.target.value)} />
+        </div>
+        <p className="ds-hint" style={{ marginTop: -4 }}>
+          The title shown above these agents in <strong>Agent Status</strong> (and in Breach / Anomalies) when there is
+          more than one group. Leave blank to use the table name.
+        </p>
         <div className="ds-table-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="ds-mini-label">Table</span>

@@ -41,6 +41,29 @@ export function normalizeAgentRow(row: Record<string, any>, src: AgentSource): R
   return out
 }
 
+// ── The primary ("legacy") agent source ─────────────────────────────────────
+// CANONICAL — used by BOTH components/Dashboard.tsx (client fetch) AND
+// lib/cliqScan.ts (server fetch), same reasoning as normalizeAgentRow() above:
+// this exact object literal used to be hand-copied into both files.
+//
+// The account's own single agent table (Settings → Data Sources → AGENT DATA
+// SOURCE) is one agent source like any other; this builds it. Its group title is
+// the configured name (DataSourceConfig.agentTableLabel), and falls back to the
+// raw table name when that is blank — which is all it ever was before the name
+// could be set, so an account that never sets one is unchanged.
+export function legacyAgentSource(ds: DataSourceConfig): AgentSource | null {
+  if (!ds.agentTable) return null
+  return {
+    id: 'legacy', label: (ds.agentTableLabel || '').trim() || ds.agentTable, groupByCol: '',
+    table: ds.agentTable, accountCol: ds.agentAccountCol,
+    nameCol: ds.agentNameCol, statusCol: ds.agentStatusCol,
+    durationCol: ds.agentDurationCol, durationSecsCol: ds.agentDurationSecs,
+    extraCols: ds.agentExtraColsMap || {},
+    extraDurationCols: ds.agentExtraDurationColsMap || {},
+    extraMetricCols: ds.agentExtraMetricColsMap || {},
+  }
+}
+
 // ── Which KPI tables does this account's config actually need? ────────────
 // CANONICAL — used by BOTH components/Dashboard.tsx (client fetch) AND
 // lib/cliqScan.ts (server fetch), via fetchKpiSourceRows() below, so there is
