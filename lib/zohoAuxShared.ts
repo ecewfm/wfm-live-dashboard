@@ -153,6 +153,25 @@ export function breakCategory(type: string): 'break' | 'aux' {
   return c === 'Break' || c === 'Lunch' ? 'break' : 'aux'
 }
 
+/** The allowance a break/lunch type names, in minutes: "15 Minute Break" → 15,
+ *  "1 Hour Lunch" → 60. null when the name has none ("Lunch", "Chat"). Used to
+ *  suggest Status Durations thresholds: warning at the allowance, critical one
+ *  minute past it — vCORE's over-break line (allowance + 1 min grace). */
+export function allowanceMinutesOf(type: string): number | null {
+  const m = /(\d+(?:\.\d+)?)\s*-?\s*(minutes?|mins?|hours?|hrs?)\b/i.exec(type)
+  if (!m) return null
+  const n = parseFloat(m[1]) * (/^h/i.test(m[2]) ? 60 : 1)
+  return n > 0 ? Math.round(n) : null
+}
+
+/** Every Zoho break/aux type in the logs, most used first — what Status Durations lists. */
+export function zohoTypesSeen(breaks: ZohoBreak[]): { type: string; category: 'break' | 'aux'; count: number }[] {
+  const by = new Map<string, number>()
+  for (const b of breaks) { const t = (b.type || '').trim(); if (t) by.set(t, (by.get(t) ?? 0) + 1) }
+  return [...by.entries()].map(([type, count]) => ({ type, category: breakCategory(type), count }))
+    .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type))
+}
+
 // ── Which account a Zoho person is on ─────────────────────────────────────────
 // vCORE never reads an account off these reports (its doc §6), so its doc names
 // no field for it. The field is therefore FOUND on the rows at pull time: the
@@ -184,7 +203,7 @@ export function pickAccountField(rows: Record<string, unknown>[]): string | null
 /** Account names compared ignoring case, spaces and punctuation ("Guardian Bikes" = "guardianbikes"). */
 export const normalizeAccount = (s: string | null | undefined) => normalizeName(s).replace(/[^a-z0-9]/g, '')
 
-/** The names this account goes by in Zoho, normalized: its "Zoho account name" setting when set,
+/** The names this account goes by in Zoho, normalized: its "Zoho account(s) to use" setting when set,
  *  else its display name here and its id. */
 export function accountKeysFor(accountId: string, displayName: string | undefined, cfg: ZohoAuxConfig | undefined): string[] {
   const set = parseExtraNames(cfg?.zohoAccounts)

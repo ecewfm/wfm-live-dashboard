@@ -23,7 +23,7 @@ import UsersTab from './UsersTab'
 import AlarmTab from './AlarmTab'
 import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
-import { includeBreaksOf, includeAuxOf, accountKeysFor, normalizeAccount, type ZohoAuxConfig } from '@/lib/zohoAuxShared'
+import { includeBreaksOf, includeAuxOf, accountKeysFor, normalizeAccount, parseExtraNames, breakCategory, allowanceMinutesOf, ZOHO_AUX_TABLE, type ZohoAuxConfig } from '@/lib/zohoAuxShared'
 
 type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq' | 'users' | 'alarm'
 
@@ -2245,11 +2245,21 @@ function ZohoAuxSection({ accountId, displayName, value, onChange }: {
   const [status, setStatus] = useState<{ pullMinutes?: number; lastPull?: string | null; zohoAccounts?: { name: string; people: number }[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [log, setLog] = useState<string[] | null>(null)
+  // Zoho's own Accounts list (the field scan's x_Account values) — offered in
+  // the "Zoho account(s) to use" picker alongside the accounts in today's logs,
+  // so the right one can be picked even before the next pull.
+  const [zohoAccountList, setZohoAccountList] = useState<string[]>([])
+  const [draftAccount, setDraftAccount] = useState('')
 
   const loadStatus = useCallback(() => {
     fetch('/api/zoho/aux-status').then(r => r.json()).then(d => setStatus(d && !d.error ? d : {})).catch(() => setStatus({}))
   }, [])
   useEffect(() => { loadStatus() }, [loadStatus])
+  useEffect(() => {
+    let cancelled = false
+    loadZohoFieldOptions('x_Account').then(o => { if (!cancelled) setZohoAccountList(o.map(x => x.label)) })
+    return () => { cancelled = true }
+  }, [])
 
   const pullNow = async () => {
     setBusy(true); setLog(null)
@@ -2266,11 +2276,29 @@ function ZohoAuxSection({ accountId, displayName, value, onChange }: {
 
   const lastPull = status?.lastPull ? new Date(status.lastPull).toLocaleTimeString() : 'not pulled yet today'
   const off = !cfg.enabled
-  // Which of today's Zoho accounts this account matches (same rule as the pull — lib/zohoAuxShared.ts).
+  // ── "Zoho account(s) to use" (ZohoAuxConfig.zohoAccounts, one per line) ──
+  // Empty = this account's own name here. Same matching rule as the pull
+  // (lib/zohoAuxShared.ts): case, spaces and punctuation don't matter.
+  const picked = parseExtraNames(cfg.zohoAccounts)
+  const setPicked = (names: string[]) => set({ zohoAccounts: names.join('\n') })
+  const addZohoAccount = (name: string) => {
+    const n = name.trim()
+    if (n && !picked.some(p => normalizeAccount(p) === normalizeAccount(n))) setPicked([...picked, n])
+    setDraftAccount('')
+  }
   const keys = new Set(accountKeysFor(accountId, displayName, cfg))
   const seen = status?.zohoAccounts ?? []
+  const peopleOn = (name: string) => seen.find(a => normalizeAccount(a.name) === normalizeAccount(name))?.people
   const matched = seen.filter(a => keys.has(normalizeAccount(a.name)))
   const matchedPeople = matched.reduce((n, a) => n + a.people, 0)
+  // Every Zoho account known, once each: today's logs first (they have counts), then Zoho's Accounts list.
+  const accountOptions = [...new Map([...seen.map(a => a.name), ...zohoAccountList]
+    .map(n => [normalizeAccount(n), n] as const).filter(([k]) => k)).values()]
+  const chip = (on: boolean): React.CSSProperties => ({
+    display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 9px', fontSize: 12, borderRadius: 12,
+    border: `1px solid ${on ? 'var(--success)' : 'var(--border,#e1e6e4)'}`,
+    background: on ? 'rgba(72,127,98,.12)' : 'transparent', color: 'var(--text-main)', fontFamily: 'inherit',
+  })
 
   return (
     <>
@@ -2310,41 +2338,75 @@ function ZohoAuxSection({ accountId, displayName, value, onChange }: {
       </table>
 
       <div style={{ marginTop: 12, opacity: off ? 0.5 : 1 }}>
-        <div className="sm-metric">Zoho account name</div>
-        <div className="sm-metric-sub" style={{ marginBottom: 6 }}>
-          People are matched <strong>by their account in Zoho</strong>. Leave blank to use this account&apos;s
-          name here — <strong>{displayName || accountId}</strong> (capitals, spaces and punctuation don&apos;t
-          matter). Fill it in only if Zoho spells it differently; more than one, one per line.
+        <div className="sm-metric">Zoho account(s) to use</div>
+        <div className="sm-metric-sub" style={{ marginBottom: 8 }}>
+          Which account in Zoho this account&apos;s people come from (Zoho is pulled once for everyone; this
+          picks whose breaks show here). Leave it empty to use this account&apos;s own name,{' '}
+          <strong>{displayName || accountId}</strong>. Pick one — or several — when Zoho calls it something
+          else (e.g. &quot;Rocco Fridge&quot; for Rocco Ridge). Capitals, spaces and punctuation don&apos;t matter.
         </div>
-        <textarea className="sm-input" aria-label="Zoho account name" disabled={off} rows={1}
-          style={{ width: '100%', textAlign: 'left', resize: 'vertical', fontFamily: 'inherit' }}
-          placeholder={displayName || accountId}
-          value={cfg.zohoAccounts ?? ''} onChange={e => set({ zohoAccounts: e.target.value })} />
+
+        <div aria-label="Zoho accounts used" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+          {picked.length === 0 ? (
+            <span style={{ ...chip(false), borderStyle: 'dashed', color: 'var(--text-muted)' }}>
+              Using this account&apos;s name: <strong style={{ color: 'var(--text-main)' }}>{displayName || accountId}</strong>
+            </span>
+          ) : picked.map(p => {
+            const n = peopleOn(p)
+            return (
+              <span key={p} style={chip(n !== undefined)} data-zoho-account={p}>
+                {p}
+                <span style={{ opacity: .7 }}>{n !== undefined ? `· ${n} today` : '· not in today\'s logs'}</span>
+                <button type="button" disabled={off} aria-label={`Remove ${p}`} title={`Remove ${p}`}
+                  onClick={() => setPicked(picked.filter(x => x !== p))}
+                  style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', padding: 0, fontSize: 15, lineHeight: 1 }}>
+                  ×
+                </button>
+              </span>
+            )
+          })}
+        </div>
+
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input type="text" className="sm-input" aria-label="Add a Zoho account" disabled={off}
+            list={`zoho-accounts-${accountId}`} placeholder="Pick or type a Zoho account…"
+            style={{ flex: 1, textAlign: 'left' }} value={draftAccount}
+            onChange={e => setDraftAccount(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addZohoAccount(draftAccount) } }} />
+          <datalist id={`zoho-accounts-${accountId}`}>
+            {accountOptions.map(o => {
+              const n = peopleOn(o)
+              return <option key={o} value={o} label={n !== undefined ? `${n} in today's Zoho logs` : 'Zoho account'} />
+            })}
+          </datalist>
+          <button type="button" className="acc-btn acc-btn-cfg" disabled={off || !draftAccount.trim()} aria-label="Add this Zoho account"
+            style={{ fontSize: 13, padding: '0 14px' }} onClick={() => addZohoAccount(draftAccount)}>
+            <i className="bx bx-plus" /> Add
+          </button>
+        </div>
+
         {status && (
-          <div className="sm-metric-sub" role="status" style={{ marginTop: 4, color: matched.length ? 'var(--success)' : 'var(--warning)' }}>
+          <div className="sm-metric-sub" role="status" style={{ marginTop: 6, color: matched.length ? 'var(--success)' : 'var(--warning)' }}>
             {!seen.length
-              ? 'No account found in today\'s Zoho logs yet — "Pull now" shows which account field Zoho has.'
+              ? 'No account in today\'s Zoho logs yet — "Pull now" shows which account field Zoho has.'
               : matched.length
-                ? `Matches ${matched.map(a => `"${a.name}"`).join(', ')} in Zoho — ${matchedPeople} people in today's logs.`
-                : `No Zoho account by that name in today's logs (${seen.length} accounts there).`}
+                ? `Showing people from ${matched.map(a => `"${a.name}" (${a.people})`).join(', ')} — ${matchedPeople} in today's Zoho logs.`
+                : `None of these is an account in today's Zoho logs (${seen.length} accounts there) — pick one from the list.`}
           </div>
         )}
-        {!!seen.length && (
+        {accountOptions.length > 0 && (
           <details style={{ marginTop: 4 }}>
-            <summary className="sm-metric-sub" style={{ cursor: 'pointer' }}>Accounts in today&apos;s Zoho logs — click one to use it</summary>
+            <summary className="sm-metric-sub" style={{ cursor: 'pointer' }}>All Zoho accounts — click to add</summary>
             <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {seen.map(a => (
-                <button key={a.name} type="button" disabled={off}
-                  style={{
-                    padding: '3px 9px', fontSize: 11.5, borderRadius: 12, cursor: off ? 'default' : 'pointer',
-                    border: `1px solid ${keys.has(normalizeAccount(a.name)) ? 'var(--success)' : 'var(--border,#e1e6e4)'}`,
-                    background: keys.has(normalizeAccount(a.name)) ? 'rgba(72,127,98,.12)' : 'transparent',
-                    color: 'var(--text-main)', fontFamily: 'inherit',
-                  }}
-                  title={`Use "${a.name}"`} onClick={() => set({ zohoAccounts: a.name })}>
-                  {a.name} <span style={{ opacity: .7 }}>({a.people})</span>
-                </button>
-              ))}
+              {accountOptions.map(o => {
+                const n = peopleOn(o)
+                return (
+                  <button key={o} type="button" disabled={off} title={`Add "${o}"`} onClick={() => addZohoAccount(o)}
+                    style={{ ...chip(keys.has(normalizeAccount(o))), cursor: off ? 'default' : 'pointer' }}>
+                    {o}{n !== undefined && <span style={{ opacity: .7 }}>({n})</span>}
+                  </button>
+                )
+              })}
             </div>
           </details>
         )}
@@ -2677,6 +2739,51 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
     return () => { cancelled = true }
   }, [ds.agentTable, ds.agentAccountCol, ds.agentStatusCol, JSON.stringify(ds.agentSources), accountId, statSupaUrl, statSupaKey])
 
+  // ── Zoho Breaks & Aux types (per the user, 2026-10-23) ──────────────────────
+  // While this account shows Zoho breaks & aux, every Zoho type gets its own
+  // section below — listed from Zoho's logs (organisation-wide, via
+  // /api/zoho/aux-status), so its thresholds can be set BEFORE anyone on this
+  // account has been in it — plus how many of this account's people are in
+  // each right now. Same thresholds map as every other status: a Zoho row's
+  // status IS its Zoho type, so a too-long one breaches (Breach / Anomalies,
+  // Cliq, RTA Logs) exactly like a CRM status does.
+  const zohoOn = !!ds.zohoAux?.enabled
+  const [zohoTypes, setZohoTypes] = useState<{ type: string; category: 'break' | 'aux'; count: number }[]>([])
+  const [zohoNow, setZohoNow] = useState<Record<string, number>>({})
+  useEffect(() => {
+    if (!zohoOn) return   // nothing to load — the section isn't shown (zohoStatusRows is empty while off)
+    let cancelled = false
+    fetch('/api/zoho/aux-status').then(r => r.json())
+      .then(d => { if (!cancelled && Array.isArray(d?.zohoTypes)) setZohoTypes(d.zohoTypes) }).catch(() => {})
+    fetch(`${statSupaUrl}/rest/v1/${ZOHO_AUX_TABLE}?select=status&account_id=eq.${encodeURIComponent(accountId)}`,
+      { headers: { apikey: statSupaKey, Authorization: `Bearer ${statSupaKey}` } })
+      .then(r => r.json())
+      .then(rows => {
+        if (cancelled || !Array.isArray(rows)) return
+        const n: Record<string, number> = {}
+        rows.forEach((r: any) => { const s = String(r.status ?? '').trim(); if (s) n[s] = (n[s] ?? 0) + 1 })
+        setZohoNow(n)
+      }).catch(() => {})
+    return () => { cancelled = true }
+  }, [zohoOn, accountId, statSupaUrl, statSupaKey])
+  // Breaks/lunches first (the ones with an allowance), then every other aux.
+  const zohoInfo = new Map(zohoTypes.map(t => [t.type, t]))
+  Object.keys(zohoNow).forEach(t => { if (!zohoInfo.has(t)) zohoInfo.set(t, { type: t, category: breakCategory(t), count: 0 }) })
+  const zohoStatusRows = zohoOn
+    ? [...zohoInfo.values()].sort((a, b) => (a.category === b.category ? 0 : a.category === 'break' ? -1 : 1)).map(t => t.type)
+    : []
+  const zohoKeySet = new Set(zohoStatusRows)
+  // "Fill break & lunch thresholds from their names": warning at the named
+  // allowance, critical one minute past it (allowanceMinutesOf) — only for
+  // types with no threshold yet, so nothing already set is overwritten.
+  const zohoFillable = zohoStatusRows.filter(t => zohoInfo.get(t)?.category === 'break' && allowanceMinutesOf(t) !== null
+    && !((stat[t]?.warn ?? 999) < 999 || (stat[t]?.crit ?? 999) < 999))
+  const fillZohoFromNames = () => setStat(prev => {
+    const next = { ...prev }
+    for (const t of zohoFillable) { const n = allowanceMinutesOf(t)!; next[t] = { ...(prev[t] ?? {}), warn: n, crit: n + 1 } }
+    return next
+  })
+
   // Split into two sections (per the user, 2026-10-15): a status this live
   // scan actually found just now vs. one that's ONLY known from history —
   // already-configured thresholds, or lib/settings.ts's knownStatuses (every
@@ -2693,11 +2800,11 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const liveSet = new Set(discoveredStatuses)
   const currentStatusRows = Array.from(new Set(discoveredStatuses)).sort((a, b) => a.localeCompare(b))
   const pastStatusRows = Array.from(new Set([...knownStatuses, ...customConfiguredKeys]))
-    .filter(k => !liveSet.has(k))
+    .filter(k => !liveSet.has(k) && !zohoKeySet.has(k))   // a Zoho type lives in its own section
     .sort((a, b) => a.localeCompare(b))
   // Kept for "Reset to Defaults" (resets every row currently shown, in
-  // either section) — not rendered directly.
-  const statusRows = Array.from(new Set([...currentStatusRows, ...pastStatusRows]))
+  // any section) — not rendered directly.
+  const statusRows = Array.from(new Set([...currentStatusRows, ...zohoStatusRows, ...pastStatusRows]))
 
   // ── Status search / filter ────────────────────────────────────────────────
   // Per the user (2026-10-17): some accounts accumulate hundreds of statuses
@@ -2718,6 +2825,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
     return !q || k.toLowerCase().includes(q)
   }
   const currentShown = currentStatusRows.filter(statusMatches)
+  const zohoShown    = zohoStatusRows.filter(statusMatches)
   const pastShown    = pastStatusRows.filter(statusMatches)
   const statusFiltering = !!statusFilter.trim() || statusConfiguredOnly
 
@@ -3102,7 +3210,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   // columns/mutators regardless of which section a status is
                   // currently sorted into (it can move between them over
                   // time as agents enter/leave it).
-                  const renderStatusRow = (key: string) => {
+                  const renderStatusRow = (key: string, sub?: React.ReactNode) => {
                     const th = stat[key] ?? { warn: 999, crit: 999 }
                     const excluded = !!th.excluded
                     const cliqDisabled = !(cliqGlobal.enabled && cliqChan)
@@ -3120,6 +3228,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                           {key === '' && (
                             <div className="sm-metric-sub">Agents whose status column is empty — shown as “—” on the dashboard</div>
                           )}
+                          {sub && <div className="sm-metric-sub">{sub}</div>}
                         </td>
                         {(['warn','crit'] as const).map(f => (
                           <td key={f}>
@@ -3197,7 +3306,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                         </label>
                         {statusFiltering && (
                           <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                            {currentShown.length + pastShown.length} of {statusRows.length} shown
+                            {currentShown.length + zohoShown.length + pastShown.length} of {statusRows.length} shown
                           </span>
                         )}
                       </div>
@@ -3214,10 +3323,52 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                 : <>No agent statuses currently live — set up an Agent Data Source on the Data Sources tab first
                                    (or check back once the scraper has written some data).</>}
                             </td></tr>
-                          ) : currentShown.map(renderStatusRow)}
+                          ) : currentShown.map(k => renderStatusRow(k))}
                         </tbody>
                       </table>
                       </div>
+
+                      {zohoOn && (
+                        <>
+                          <div className="sm-section-title" style={{ marginTop: 22 }}>ZOHO BREAKS &amp; AUX</div>
+                          <p className="sm-desc" style={{ marginBottom: 10 }}>
+                            Every break and aux type in Zoho&apos;s logs (the <strong>Zoho Breaks &amp; Aux</strong> section of
+                            Agent Status). Give one a Warning / Critical and anyone on it that long shows in{' '}
+                            <strong>Breach / Anomalies</strong> — and Cliq / RTA Logs, per the switches here — timed from when the
+                            break started in Zoho, even on an account whose Duration column isn&apos;t a time.
+                          </p>
+                          {zohoFillable.length > 0 && (
+                            <button type="button" className="acc-btn acc-btn-cfg" style={{ fontSize: 12.5, padding: '7px 14px', marginBottom: 10 }}
+                              onClick={fillZohoFromNames}
+                              title={`Sets Warning to the time in the name and Critical one minute after it — ${zohoFillable.map(t => `${t}: ${allowanceMinutesOf(t)} / ${allowanceMinutesOf(t)! + 1} min`).join(', ')}. Types that already have a threshold are left alone.`}>
+                              <i className="bx bx-time-five" style={{ marginRight: 6 }} />
+                              Fill {zohoFillable.length} break / lunch threshold{zohoFillable.length === 1 ? '' : 's'} from their names (e.g. 15 Minute Break → 15 / 16 min)
+                            </button>
+                          )}
+                          <div style={{ overflowX: 'auto' }}>
+                          <table className="sm-table" aria-label="Zoho Breaks & Aux statuses">
+                            {statusTableHead}
+                            <tbody>
+                              {zohoShown.length === 0 ? (
+                                <tr><td colSpan={7} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                                  {zohoStatusRows.length > 0
+                                    ? <>No Zoho type matches the filter ({zohoStatusRows.length} hidden).</>
+                                    : <>Loading Zoho&apos;s break &amp; aux types… (none yet if Zoho hasn&apos;t been pulled today — Zoho Integrations → &quot;Pull now&quot;)</>}
+                                </td></tr>
+                              ) : zohoShown.map(t => {
+                                const info = zohoInfo.get(t)
+                                const now = zohoNow[t] ?? 0
+                                return renderStatusRow(t, <>
+                                  {info?.category === 'break' ? 'break' : 'aux'}
+                                  {now > 0 && <> · <strong style={{ color: 'var(--warning)' }}>{now} on it now</strong></>}
+                                  {info && info.count > 0 && <> · seen {info.count.toLocaleString()}× in Zoho&apos;s last 2 days</>}
+                                </>)
+                              })}
+                            </tbody>
+                          </table>
+                          </div>
+                        </>
+                      )}
 
                       <div className="sm-section-title" style={{ marginTop: 22 }}>PREVIOUSLY SEEN STATUSES</div>
                       <p className="sm-desc" style={{ marginBottom: 10 }}>
@@ -3234,7 +3385,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                 ? <>No previously-seen status matches the filter ({pastStatusRows.length} hidden).</>
                                 : <>Nothing here yet — every status ever seen for this account is currently active above.</>}
                             </td></tr>
-                          ) : pastShown.map(renderStatusRow)}
+                          ) : pastShown.map(k => renderStatusRow(k))}
                         </tbody>
                       </table>
                       </div>

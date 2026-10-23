@@ -557,7 +557,7 @@ project (no `zoho_activity` here), so this app pulls Zoho itself.
   names like Gorgias's "Ayla S" rarely equal a Zoho full name). An account shows
   the people whose account in Zoho equals its display name here (or its id),
   compared ignoring case/spaces/punctuation (`normalizeAccount`), or its own
-  "Zoho account name" setting (`zohoAux.zohoAccounts`) when Zoho spells it
+  "Zoho account(s) to use" picker (`zohoAux.zohoAccounts`, one or more) when Zoho calls it
   differently — plus the optional "Extra Zoho names". Rows show the ZOHO name
   only (`agent_name` = the Zoho Employee name). vCORE never reads an account off
   these reports, so the field isn't documented anywhere: `pickAccountField()`
@@ -567,6 +567,16 @@ project (no `zoho_activity` here), so this app pulls Zoho itself.
   lists the fields the rows DO have. The Settings panel lists every account in
   today's Zoho logs (from `/api/zoho/aux-status`) and shows live whether this
   account's name matches one.
+- Settings → Status Durations has its own **ZOHO BREAKS & AUX** section while the
+  account has Zoho on: every type in the last 2 days of Zoho logs (org-wide,
+  `zohoTypes` from `/api/zoho/aux-status`, breaks/lunch first) plus how many of
+  this account's people are in each right now (`wfm_zoho_agent_status`), so
+  thresholds can be set before anyone on the account has been in a type. Same
+  `status_thresholds` map as every other status (a Zoho row's status IS its Zoho
+  type) — Exclude, text trigger and Send to Cliq all apply. "Fill break / lunch
+  thresholds from their names" sets Warning = the named allowance and Critical
+  = +1 min (`allowanceMinutesOf`, vCORE's over-break line), only where unset.
+  A Zoho type is listed there instead of under Previously Seen.
 - A Zoho row is always elapsed time (`durationIsStatic()` / `agentElapsedSecs()` /
   `agentTimerKey()` in `lib/breaches.ts`), even on an account whose Duration is
   "static" (Guardian Bikes: "Ticket solved") — before, Zoho breaks there showed

@@ -29,7 +29,7 @@ import type { DataSourceConfig } from './types'
 import {
   ZOHO_AUX_SOURCES, ZOHO_AUX_TABLE, zohoCriteriaDate, parseSessionRow, parseBreakRow,
   normalizeName, dateInTz, addDays, computeCurrentAux, buildAccountStatusRows, parseExtraNames,
-  pickAccountField, accountKeysFor, zohoPeopleOnAccount, zohoAccountsSeen,
+  pickAccountField, accountKeysFor, zohoPeopleOnAccount, zohoAccountsSeen, zohoTypesSeen,
   type ZohoSession, type ZohoBreak, type ZohoAgentStatusRow,
 } from './zohoAuxShared'
 
@@ -272,7 +272,7 @@ export async function runZohoAuxSync(
   for (const a of enabled) {
     try {
       const cfg = a.ds.zohoAux!
-      // Matched on its "Zoho account name" setting, else its display name here (and id).
+      // Matched on its "Zoho account(s) to use" setting, else its display name here (and id).
       const keys = accountKeysFor(a.id, displayNames[a.id], cfg)
       const asked = parseExtraNames(cfg.zohoAccounts)
       const label = (asked.length ? asked : [displayNames[a.id] || a.id]).map(n => `"${n}"`).join(' / ')
@@ -284,7 +284,7 @@ export async function runZohoAuxSync(
       let line = `${a.id}: Zoho account ${label} — ${people.size} ${people.size === 1 ? 'person' : 'people'} in Zoho's logs${extra.length ? ` (+${extra.length} extra name(s))` : ''}, ${rows.length} on a break/aux now`
       if (!people.size) {
         line += seen.length
-          ? `. No one in Zoho's logs is on that account — if it's spelled differently in Zoho, set "Zoho account name" for this account. Zoho accounts seen: ${seen.slice(0, 40).map(x => x.name).join(', ')}${seen.length > 40 ? `, … (${seen.length} in all)` : ''}`
+          ? `. No one in Zoho's logs is on that account — if Zoho calls it something else, pick it under "Zoho account(s) to use" in Settings → Zoho Integrations. Zoho accounts seen: ${seen.slice(0, 40).map(x => x.name).join(', ')}${seen.length > 40 ? `, … (${seen.length} in all)` : ''}`
           : `. Zoho's cached logs carry no account at all yet (see the pull lines above).`
       }
       l(line)
@@ -297,17 +297,23 @@ export async function runZohoAuxSync(
 
 // ── For the Settings panel ────────────────────────────────────────────────────
 // `zohoAccounts`: every account in today's Zoho logs and how many people are on
-// it — what the "Zoho account name" field suggests, and how the panel shows
-// whether this account's name matches one.
+// it — what the "Zoho account(s) to use" picker suggests, and how the panel shows
+// whether this account's name matches one. `zohoTypes`: every break/aux type in
+// the last two days of Zoho logs (organisation-wide), so Settings → Status
+// Durations can list them all — and their thresholds be set — before anyone
+// on this account has actually been in them.
 export async function getZohoAuxStatus(store: AuxStore = supabaseAuxStore()): Promise<{
   pullMinutes: number; today: string; lastPull: string | null; note: string | null
   zohoAccounts: { name: string; people: number }[]
+  zohoTypes: { type: string; category: 'break' | 'aux'; count: number }[]
 }> {
   const today = dateInTz(Date.now(), PRIMARY_TZ)
   const r = await getSupabaseAdmin().from(ZOHO_AUX_SYNC_TABLE).select('refreshed_at, note').eq('log_date', today).maybeSingle()
   const { sessions, breaks } = await store.readCache([today])
+  const yesterday = await store.readCache([addDays(today, -1)])
   return {
     pullMinutes: ZOHO_AUX_PULL_MINUTES, today, lastPull: (r.data as any)?.refreshed_at ?? null, note: (r.data as any)?.note ?? null,
     zohoAccounts: zohoAccountsSeen(sessions, breaks),
+    zohoTypes: zohoTypesSeen([...breaks, ...yesterday.breaks]),
   }
 }
