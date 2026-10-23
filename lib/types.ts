@@ -1,6 +1,9 @@
 // ── Supabase table types ──────────────────────────────────────────────────────
 // this is found at lib/types.ts because it is used by both the dashboard and the API routes.
 
+import type { ZohoAuxConfig } from './zohoAuxShared'
+export type { ZohoAuxConfig }
+
 export interface KpiSnapshot {
   id?: string
   account_id: string
@@ -356,6 +359,14 @@ export interface DataSourceConfig {
   // column's value instead of a fixed label. When non-empty, this takes
   // priority over the legacy single-table fields above.
   agentSources:  AgentSource[]
+
+  // Zoho breaks & aux for this account's agents (Settings → Zoho Integrations).
+  // When enabled, the dashboard adds a "Zoho Breaks & Aux" agent section fed by
+  // wfm_zoho_agent_status — see lib/zohoAuxShared.ts / lib/zohoAux.ts. Kept in
+  // this always-saved JSONB rather than its own wfm_settings column, so it needs
+  // no migration of wfm_settings and can't trip the unknown-column fallbacks in
+  // lib/settings.ts.
+  zohoAux?: ZohoAuxConfig
 }
 
 // ── Dashboard panel layout (Dashboard page — KPI groups, Breach, Agent Status)
@@ -423,6 +434,13 @@ export interface AgentSource {
   extraDurationCols?: Record<string, string>
   // Mirrors DataSourceConfig.agentExtraMetricColsMap — see its comment.
   extraMetricCols?: Record<string, string>
+  // Optional: a column holding WHEN the current status started (a timestamp),
+  // instead of a scraped "00:05:44" duration. The duration is then worked out
+  // as now − that time whenever the row is read (lib/breaches.ts's
+  // normalizeAgentRow), so it is right however long ago the row was written —
+  // used by the Zoho Breaks & Aux section, whose rows only change when Zoho
+  // does (lib/zohoAuxShared.ts).
+  durationSinceCol?: string
 }
 
 // ── Custom Agent Status table columns ─────────────────────────────────────────
@@ -446,4 +464,8 @@ export interface AgentExtraColumn {
   // column — a purely informational display column, the default.
   breachText?:     string
   breachSeverity?: 'warning' | 'critical'   // only meaningful when breachText is set; defaults to 'critical'
+  // Also show this column in the Breach / Anomalies table (Dashboard page AND
+  // the Overview card): an agent breach shows that agent's value for it, a KPI
+  // breach shows "—". Off by default — the table stays as it was.
+  showInBreachTable?: boolean
 }

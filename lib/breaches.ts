@@ -8,6 +8,7 @@
 
 import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags, KpiUnit, KpiGroup, GroupTile, CellBinding, KpiGroupSource } from './types'
 import { extractPercent, parseDurationToSeconds, formatSeconds, extractKpiValue, formatKpiThresholdLabel, resolveCell, type StatusThresholds } from './utils'
+import { ZOHO_AUX_TABLE, ZOHO_AUX_SECTION_LABEL } from './zohoAuxShared'
 
 // ── Normalize one raw agent row from a configured AgentSource ────────────────
 // CANONICAL — used by BOTH components/Dashboard.tsx (client, live polling)
@@ -29,6 +30,13 @@ export function normalizeAgentRow(row: Record<string, any>, src: AgentSource): R
     _status:       String(row[src.statusCol]   ?? ''),
     _duration:     String(row[src.durationCol] ?? ''),
     _durationSecs: src.durationSecsCol ? String(row[src.durationSecsCol] ?? '') : '',
+  }
+  // A source that stores WHEN the status started (AgentSource.durationSinceCol)
+  // gets its elapsed seconds worked out here, at read time — right however long
+  // ago the row itself was written.
+  if (src.durationSinceCol) {
+    const t = Date.parse(String(row[src.durationSinceCol] ?? ''))
+    if (Number.isFinite(t)) out._durationSecs = String(Math.max(0, Math.round((Date.now() - t) / 1000)))
   }
   Object.keys(src.extraCols || {}).forEach(key => {
     const colName = src.extraCols[key]
@@ -62,6 +70,36 @@ export function legacyAgentSource(ds: DataSourceConfig): AgentSource | null {
     extraDurationCols: ds.agentExtraDurationColsMap || {},
     extraMetricCols: ds.agentExtraMetricColsMap || {},
   }
+}
+
+// ── The Zoho Breaks & Aux section ───────────────────────────────────────────
+// Not a saved AgentSource: it exists exactly while the account's own toggle
+// (DataSourceConfig.zohoAux.enabled, Settings → Zoho Integrations) is on, and
+// reads the rows lib/zohoAux.ts keeps up to date for that account.
+export function zohoAuxAgentSource(ds: DataSourceConfig): AgentSource | null {
+  if (!ds.zohoAux?.enabled) return null
+  return {
+    id: 'zoho_aux', label: ZOHO_AUX_SECTION_LABEL, table: ZOHO_AUX_TABLE,
+    accountCol: 'account_id', nameCol: 'agent_name', statusCol: 'status',
+    durationCol: '', durationSecsCol: '', durationSinceCol: 'since',
+    groupByCol: '', extraCols: {},
+  }
+}
+
+// ── Every agent source an account reads ─────────────────────────────────────
+// CANONICAL — the one list both components/Dashboard.tsx and lib/cliqScan.ts
+// fetch (and lib/zohoAux.ts, minus the Zoho section itself, for its roster):
+// the account's own table, every additional source, then Zoho Breaks & Aux.
+export function agentSourcesFor(ds: DataSourceConfig, opts: { includeZohoAux?: boolean } = {}): AgentSource[] {
+  const out: AgentSource[] = []
+  const primary = legacyAgentSource(ds)
+  if (primary) out.push(primary)
+  if (ds.agentSources) out.push(...ds.agentSources)
+  if (opts.includeZohoAux !== false) {
+    const zoho = zohoAuxAgentSource(ds)
+    if (zoho) out.push(zoho)
+  }
+  return out
 }
 
 // ── Which KPI tables does this account's config actually need? ────────────
@@ -326,6 +364,11 @@ export interface BreachRow {
   // checkKpi() below, so lib/cliqScan.ts can filter the Cliq message
   // per-KPI the same way it does per-status above.
   sendToCliq?: boolean
+  // Only on 'kind:agent' rows: that agent's value for each of the account's
+  // custom Agent Status columns (AgentExtraColumn), keyed by column key — what
+  // the Breach / Anomalies tables show for the columns ticked "Also show in
+  // Breach / Anomalies" (see breachTableExtraCols). Absent on KPI rows.
+  extras?: Record<string, string>
 }
 
 // ── Freshest updated_at across all of an account's KPI rows ───────────────────
@@ -548,6 +591,10 @@ export function buildBreaches(
     const name   = String(a._name ?? '')
     // Carried on every row this agent produces (see BreachRow.group).
     const group  = String(a._agentGroup ?? '') || undefined
+    // Every row this agent produces below also carries its custom-column values
+    // (BreachRow.extras) — stamped on at the END of this agent's turn, so none
+    // of the separate breach checks below has to remember to.
+    const firstRowOfAgent = rows.length
 
     // Excluded statuses (e.g. "Logged Out"/"Offline") never breach AT ALL —
     // not just duration, but ALSO the text-based custom-column check below.
@@ -655,9 +702,23 @@ export function buildBreaches(
         rows.push({ entity: name, metric: metricVal || col.label, value: durationVal || raw, threshold: trigger, severity: col.breachSeverity || 'critical', kind: 'agent', group })
       }
     })
+
+    if (rows.length > firstRowOfAgent && (ds.agentExtraCols ?? []).length) {
+      const extras: Record<string, string> = {}
+      for (const col of ds.agentExtraCols) extras[col.key] = String(a[`_extra_${col.key}`] ?? '')
+      for (let i = firstRowOfAgent; i < rows.length; i++) rows[i].extras = extras
+    }
   })
 
   return rows
+}
+
+// ── Custom columns shown in the Breach / Anomalies table ────────────────────
+// The account's custom Agent Status columns (DataSourceConfig.agentExtraCols)
+// ticked "Also show in Breach / Anomalies" in Settings — shared by the Dashboard
+// page's breach table and the Overview card's, so the two always match.
+export function breachTableExtraCols(ds: DataSourceConfig): { key: string; label: string }[] {
+  return (ds.agentExtraCols ?? []).filter(c => c.showInBreachTable).map(c => ({ key: c.key, label: c.label }))
 }
 
 // ── Section the Breach / Anomalies table by agent group ──────────────────────

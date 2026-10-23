@@ -7,6 +7,10 @@
     {
       "path": "/api/zoho/scan-fields",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/zoho/aux-sync",
+      "schedule": "* * * * *"
     }
   ]
 }

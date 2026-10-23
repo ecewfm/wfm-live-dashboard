@@ -526,6 +526,62 @@ Decisions made explicitly by the user when this was designed:
   submission posted to Zoho successfully (Test Workforce RTA Logs button,
   AI Categorization on).
 
+## Zoho breaks & aux → "Zoho Breaks & Aux" agent section (2026-10-23)
+
+Per the user: show each account's agents who are on a Zoho break or aux (from
+the ECE Time Tracker break logs) as an agent-status section, with a per-account
+on/off toggle. Ported from Workforce R.E.S.T. vCORE's own pipeline (its "Zoho
+breaks & aux → the Adherence timeline" technical reference) so both apps read
+the same Zoho data the same way. vCORE's cache is in a DIFFERENT Supabase
+project (no `zoho_activity` here), so this app pulls Zoho itself.
+
+- `lib/zohoAuxShared.ts` — the pure rules: the two Creator apps/reports/fields
+  (`ece-time-tracker`: `Time_Log_Records_RTA`/`T_Date`, `View_Break_Logs_All`/
+  `B_Date`; `ece-time-tracker-honduras`: `Time_Logs_Report`/`Breaks_Report`,
+  `Shift_Date`), wall-clock → UTC in each SOURCE app's timezone (ET / Tegucigalpa),
+  vCORE's `normalizeName` + `classifyBreak`, and `computeCurrentAux()`: someone is
+  "on a break/aux" only while LOGGED IN (open session) with an open break (no End)
+  that started inside that session — Zoho has hundreds of never-closed break rows
+  a week, and without the session check those would show for days.
+- `lib/zohoAux.ts` (server) — `runZohoAuxSync()`: org-wide, ONE date per pull
+  (never per account/page view), today every `ZOHO_AUX_PULL_MINUTES` (default 5,
+  2–10 — same as vCORE, the org's Zoho API allowance is shared with it),
+  yesterday every 30 min for overnight shifts. Creator v2.1 + `record_cursor`
+  paging (same call as `lib/zohoFieldScan.ts`), our existing token
+  (`lib/zohoAuth.ts`, `ZohoCreator.report.READ` already granted). A failed pull
+  keeps the last good copy; an ok-but-empty pull never wipes a date. Pulls
+  NOTHING while no account has the toggle on. Keeps every session per person per
+  date (vCORE keeps only the first — its §10.1).
+- Matching is BY NAME (vCORE has no account field on breaks either): roster =
+  every name in the account's OWN agent tables (`agentSourcesFor(ds,
+  { includeZohoAux: false })`) + the optional "Extra Zoho names" list. The log
+  of "Pull now" lists roster names NOT found in Zoho — name mismatches are the #1
+  cause of an agent never showing.
+- `sql/zoho_breaks_aux.sql` — `wfm_zoho_activity` (cache) and `wfm_zoho_sync`
+  (per-date pull stamp + in-progress lease) are RLS-on / NO policies (they hold
+  EVERY employee's logs); `wfm_zoho_agent_status` (what each enabled account
+  shows) is RLS-off like the other agent tables.
+- Setting: `DataSourceConfig.zohoAux` `{ enabled, includeBreaks, includeAux,
+  extraNames }` — in the data_source JSONB on purpose (no `wfm_settings` column,
+  so no migration and nothing for `lib/settings.ts`'s unknown-column tiers to
+  trip on). UI: Settings → Zoho Integrations → "ZOHO BREAKS & AUX — {account}"
+  (`ZohoAuxSection` in `SettingsModal.tsx`) + "Pull Zoho breaks & aux now".
+- Dashboard + Cliq scan: `agentSourcesFor(ds)` in `lib/breaches.ts` is now the
+  ONE list of an account's agent sources (legacy table, additional sources, then
+  `zohoAuxAgentSource(ds)` while the toggle is on) — `components/Dashboard.tsx`
+  and `lib/cliqScan.ts` both call it, so a too-long Zoho break breaches/alerts
+  through the normal Status Durations thresholds (each Zoho Type, e.g.
+  "15 Minute Break", appears there once seen). Durations come from the row's
+  `since` timestamp at READ time (`AgentSource.durationSinceCol`, handled in
+  `normalizeAgentRow`), so they're right however long ago the 5-min pull wrote it.
+- Routes: `app/api/zoho/aux-sync` (cron, every minute in `vercel.json`, gated
+  internally; `CRON_SECRET`), `app/api/zoho/aux-sync-now` (Settings button),
+  `app/api/zoho/aux-status` (last-pull time for the panel).
+- NOT yet verified against live Zoho (no Zoho client id/secret locally): field
+  names/report link names are vCORE's, verified in its source 2026-10-22; whether
+  OUR consenting Zoho user can read these reports (and the Honduras app) shows up
+  in the "Pull now" log. Optional env: `ZOHO_HONDURAS_ENABLED=false`.
+
 ## `lib/settings.ts` load/save silently dropping fields (fixed 2026-09-28)
 
 Found while chasing why `rta_sites`/`rta_account_name` kept reverting to

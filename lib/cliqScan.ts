@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, legacyAgentSource, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
@@ -62,10 +62,9 @@ export async function fetchAccountData(ds: DataSourceConfig, accountId: string):
     ? ((await supabase.from(ds.kpiTable as any).select('*').eq(ds.kpiAccountCol || 'account_id', accountId)).data as any[] ?? [])
     : []
 
-  const agentSourcesToFetch: AgentSource[] = []
-  const primarySource = legacyAgentSource(ds)   // shared with components/Dashboard.tsx — its title is ds.agentTableLabel
-  if (primarySource) agentSourcesToFetch.push(primarySource)
-  if (ds.agentSources) agentSourcesToFetch.push(...ds.agentSources)
+  // Shared with components/Dashboard.tsx — incl. the Zoho Breaks & Aux section
+  // when this account has it on, so a too-long break alerts like any status.
+  const agentSourcesToFetch: AgentSource[] = agentSourcesFor(ds)
   const agentLists = await Promise.all(agentSourcesToFetch.map(src => fetchAgentSource(src, accountId)))
 
   // Alternate KPI sources — any GROUP (KpiGroup.source) or individual TILE

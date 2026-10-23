@@ -7,7 +7,7 @@ import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, sectionBreaches, legacyAgentSource, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, sectionBreaches, breachTableExtraCols, agentSourcesFor, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
@@ -174,10 +174,10 @@ export default function Dashboard() {
       // out normalized to _name/_status/_duration/_durationSecs/_agentGroup
       // so downstream code (breaches, timers, rendering) never has to branch
       // on which source produced it.
-      const agentSourcesToFetch: AgentSource[] = []
-      const primarySource = legacyAgentSource(src)   // shared with lib/cliqScan.ts — its title is src.agentTableLabel
-      if (primarySource) agentSourcesToFetch.push(primarySource)
-      if (src.agentSources) agentSourcesToFetch.push(...src.agentSources)
+      // agentSourcesFor() is shared with lib/cliqScan.ts: the account's own table
+      // (titled src.agentTableLabel), its additional sources, and — when this
+      // account's Zoho toggle is on — the Zoho Breaks & Aux section.
+      const agentSourcesToFetch: AgentSource[] = agentSourcesFor(src)
       const agents: any[] = (await Promise.all(agentSourcesToFetch.map(as_ => fetchAgentSource(as_, accId)))).flat()
 
       // Alternate KPI sources — any GROUP (KpiGroup.source) or individual
@@ -1423,6 +1423,9 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutM
   const breachSections = useMemo(
     () => sectionBreaches(sortedBreaches, Array.from(agentGroups.keys()), showAgentGroupHeaders),
     [sortedBreaches, agentGroups, showAgentGroupHeaders])
+  // Custom Agent Status columns ticked "Also show in Breach / Anomalies" in
+  // Settings — the same list the Overview card's breach table uses.
+  const breachExtraCols = breachTableExtraCols(ds)
   // Each row's "called out" key — computed from the UNSORTED list so a row keeps
   // its key (including any duplicate suffix) whatever the sort order is.
   const keyOf = useMemo(() => new Map(keyBreaches(breaches).map(k => [k.row, k.key])), [breaches])
@@ -1471,11 +1474,12 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutM
                 <SortableTh label="Metric"        active={breachSort?.col === 'metric'}    dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('metric')} />
                 <SortableTh label="Value"         active={breachSort?.col === 'value'}     dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('value')} />
                 <SortableTh label="Threshold"     active={breachSort?.col === 'threshold'} dir={breachSort?.dir ?? 'asc'} onClick={() => toggleBreachSort('threshold')} />
+                {breachExtraCols.map(col => <th key={col.key}>{col.label}</th>)}
               </tr>
             </thead>
             <tbody>
               {sortedBreaches.length === 0
-                ? <tr><td colSpan={5} className="no-data">No breaches detected</td></tr>
+                ? <tr><td colSpan={5 + breachExtraCols.length} className="no-data">No breaches detected</td></tr>
                 : breachSections.flatMap(section => {
                   const rows = section.rows.map((b, i) => (
                     <tr key={`${section.group}-${i}`}>
@@ -1487,10 +1491,13 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutM
                       <td>{b.metric}</td>
                       <td><span className={b.severity === 'critical' ? 'badge-crit' : 'badge-warn'}>{b.value}</span></td>
                       <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{b.threshold}</td>
+                      {breachExtraCols.map(col => (
+                        <td key={col.key}>{b.kind === 'agent' ? (b.extras?.[col.key] || '—') : '—'}</td>
+                      ))}
                     </tr>
                   ))
                   return section.group
-                    ? [<GroupHeaderRow key={`${section.group}-hdr`} label={section.group} colSpan={5} />, ...rows]
+                    ? [<GroupHeaderRow key={`${section.group}-hdr`} label={section.group} colSpan={5 + breachExtraCols.length} />, ...rows]
                     : rows
                 })
               }
@@ -1976,6 +1983,8 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
   const groups  = ds.groups ?? []
   // Cross-source — see the same call on the Dashboard page above.
   const freshestUpdatedAt = freshestAcrossSources(ds, accountData)
+  // Same columns as the Dashboard page's breach table (see breachTableExtraCols).
+  const ovBreachExtraCols = breachTableExtraCols(ds)
   const stale   = isDataStale(freshestUpdatedAt)
   const hasCrit = breaches.some(b => b.severity === 'critical')
 
@@ -2120,11 +2129,11 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
       <div className="ov-breach-section">
         <div className="ov-breach-header"><i className="bx bx-error-circle" /> Breach / Anomalies</div>
         <table className="ov-breach-table">
-          <thead><tr><th>Queue/Agent</th><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr></thead>
+          <thead><tr><th>Queue/Agent</th><th>Metric</th><th>Value</th><th>Threshold</th>{ovBreachExtraCols.map(col => <th key={col.key}>{col.label}</th>)}<th>Status</th></tr></thead>
           <tbody>
             {breaches.length === 0 ? (
               <tr>
-                <td colSpan={5} style={{ textAlign: 'center', color: 'var(--success)', fontSize: 12, padding: 14 }}>
+                <td colSpan={5 + ovBreachExtraCols.length} style={{ textAlign: 'center', color: 'var(--success)', fontSize: 12, padding: 14 }}>
                   <i className="bx bx-check-circle" style={{ marginRight: 5, verticalAlign: 'middle' }} />
                   No breaches detected
                 </td>
@@ -2135,6 +2144,9 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
                 <td>{b.metric}</td>
                 <td><span className={`ov-breach-value ${b.severity}`}>{b.value}</span></td>
                 <td style={{ color: 'var(--text-muted)' }}>{b.threshold}</td>
+                {ovBreachExtraCols.map(col => (
+                  <td key={col.key}>{b.kind === 'agent' ? (b.extras?.[col.key] || '—') : '—'}</td>
+                ))}
                 <td><span className={`ov-status-badge ${b.severity}`}>{b.severity === 'critical' ? 'Critical' : 'Warning'}</span></td>
               </tr>
             ))}

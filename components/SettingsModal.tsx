@@ -23,6 +23,7 @@ import UsersTab from './UsersTab'
 import AlarmTab from './AlarmTab'
 import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
+import { includeBreaksOf, includeAuxOf, type ZohoAuxConfig } from '@/lib/zohoAuxShared'
 
 type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq' | 'users' | 'alarm'
 
@@ -1548,6 +1549,11 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const setAgentExtraColBreachText = useCallback((key: string, breachText: string) => {
     setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c => c.key === key ? { ...c, breachText } : c) }))
   }, [])
+  // AgentExtraColumn.showInBreachTable — see lib/breaches.ts's breachTableExtraCols().
+  const toggleAgentExtraColInBreach = useCallback((key: string) => {
+    setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c =>
+      c.key === key ? { ...c, showInBreachTable: !c.showInBreachTable } : c) }))
+  }, [])
   const toggleAgentExtraColSeverity = useCallback((key: string) => {
     setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c =>
       c.key === key ? { ...c, breachSeverity: c.breachSeverity === 'warning' ? 'critical' : 'warning' } : c) }))
@@ -2137,6 +2143,26 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             )}
           </div>
         )}
+        {localDs.agentExtraCols.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <div className="ds-mini-label">Also show in the Breach / Anomalies table</div>
+            <p className="ds-hint" style={{ marginTop: 2 }}>
+              Ticked custom columns get their own column in Breach / Anomalies — on this Dashboard
+              AND on the Overview card. An agent&apos;s breach shows that agent&apos;s value (from
+              whichever table it came from); a KPI breach shows &quot;—&quot;.
+            </p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 6 }}>
+              {localDs.agentExtraCols.map(c => (
+                <label key={c.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={!!c.showInBreachTable}
+                    aria-label={`Show ${c.label} in Breach / Anomalies`}
+                    onChange={() => toggleAgentExtraColInBreach(c.key)} />
+                  {c.label || '(unnamed column)'}
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Multiple agent sources — either several physical tables, or one
@@ -2219,6 +2245,116 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, 
         <div className="sm-metric-sub" style={{ marginTop: 4 }}>Pick a Category above to narrow this list.</div>
       )}
     </div>
+  )
+}
+
+// ── Zoho Breaks & Aux — per account (Settings → Zoho Integrations) ──────────
+// Edits DataSourceConfig.zohoAux (saved with everything else by Save Changes).
+// The pull itself and the matching are lib/zohoAux.ts; the rules are
+// lib/zohoAuxShared.ts. "Pull now" runs on the SAVED settings, server-side.
+function ZohoAuxSection({ accountId, value, onChange }: {
+  accountId: string
+  value: ZohoAuxConfig | undefined
+  onChange: (v: ZohoAuxConfig) => void
+}) {
+  const cfg: ZohoAuxConfig = value ?? { enabled: false }
+  const set = (patch: Partial<ZohoAuxConfig>) => onChange({ ...cfg, ...patch })
+  const [status, setStatus] = useState<{ pullMinutes?: number; lastPull?: string | null } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [log, setLog] = useState<string[] | null>(null)
+
+  const loadStatus = useCallback(() => {
+    fetch('/api/zoho/aux-status').then(r => r.json()).then(d => setStatus(d && !d.error ? d : {})).catch(() => setStatus({}))
+  }, [])
+  useEffect(() => { loadStatus() }, [loadStatus])
+
+  const pullNow = async () => {
+    setBusy(true); setLog(null)
+    try {
+      const res = await fetch('/api/zoho/aux-sync-now', { method: 'POST' })
+      const data = await res.json()
+      setLog(data.log ?? [data.error || `HTTP ${res.status}`])
+      loadStatus()
+    } catch (e: any) {
+      setLog([`Request failed: ${e.message}`])
+    }
+    setBusy(false)
+  }
+
+  const lastPull = status?.lastPull ? new Date(status.lastPull).toLocaleTimeString() : 'not pulled yet today'
+  const off = !cfg.enabled
+
+  return (
+    <>
+      <div className="sm-section-title" style={{ marginTop: 20 }}>ZOHO BREAKS &amp; AUX — {accountId}</div>
+      <p className="sm-desc" style={{ marginBottom: 10 }}>
+        Adds a <strong>Zoho Breaks &amp; Aux</strong> section to this account&apos;s Agent Status: every
+        agent who is on a Zoho break or aux right now (from the ECE Time Tracker break logs), with how long
+        they&apos;ve been on it. Each Zoho type — 15 Minute Break, 1 Hour Lunch, Chat, Meeting, … — shows up
+        in <strong>Status Durations</strong> once it&apos;s been seen, so it can have its own thresholds; a
+        break that runs too long then appears in Breach / Anomalies like any other status.
+      </p>
+      <table className="sm-table">
+        <tbody>
+          <tr>
+            <td><div className="sm-metric">Show Zoho breaks &amp; aux for this account</div><div className="sm-metric-sub">Off by default — nothing is fetched from Zoho for an account until this is on</div></td>
+            <td style={{ textAlign: 'center' }}>
+              <input type="checkbox" aria-label="Show Zoho breaks and aux" checked={!!cfg.enabled}
+                onChange={() => set({ enabled: !cfg.enabled })} />
+            </td>
+          </tr>
+          <tr style={{ opacity: off ? 0.5 : 1 }}>
+            <td><div className="sm-metric">Include breaks &amp; lunch</div><div className="sm-metric-sub">15 / 10 / 30 Minute Break, 1 Hour Lunch, …</div></td>
+            <td style={{ textAlign: 'center' }}>
+              <input type="checkbox" aria-label="Include breaks and lunch" disabled={off} checked={includeBreaksOf(cfg)}
+                onChange={() => set({ includeBreaks: !includeBreaksOf(cfg) })} />
+            </td>
+          </tr>
+          <tr style={{ opacity: off ? 0.5 : 1 }}>
+            <td><div className="sm-metric">Include other aux</div><div className="sm-metric-sub">Chat, Email, Meeting, Training, Coaching, Back-Office, Lactation, …</div></td>
+            <td style={{ textAlign: 'center' }}>
+              <input type="checkbox" aria-label="Include other aux" disabled={off} checked={includeAuxOf(cfg)}
+                onChange={() => set({ includeAux: !includeAuxOf(cfg) })} />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div style={{ marginTop: 12, opacity: off ? 0.5 : 1 }}>
+        <div className="sm-metric">Extra Zoho names (optional)</div>
+        <div className="sm-metric-sub" style={{ marginBottom: 6 }}>
+          Agents are matched <strong>by name</strong>: an agent counts for this account when the name in this
+          account&apos;s own agent tables is their Zoho Employee name (capitals and extra spaces don&apos;t matter).
+          Add, one per line, anyone who isn&apos;t in those tables or whose Zoho name is spelled differently.
+        </div>
+        <textarea className="sm-input" aria-label="Extra Zoho names" disabled={off} rows={3}
+          style={{ width: '100%', textAlign: 'left', resize: 'vertical', fontFamily: 'inherit' }}
+          placeholder={'Jane Doe\nJuan Dela Cruz'}
+          value={cfg.extraNames ?? ''} onChange={e => set({ extraNames: e.target.value })} />
+      </div>
+
+      <p className="sm-desc" style={{ marginTop: 10, marginBottom: 10 }}>
+        Zoho is pulled for the whole organisation every {status?.pullMinutes ?? 5} min while any account has
+        this on (last pull today: <strong>{status ? lastPull : '…'}</strong>), so a break that just started or
+        ended can take that long to show. Changes here apply after <strong>Save Changes</strong> — and
+        &quot;Pull now&quot; uses the saved settings, so save first.
+      </p>
+      <button type="button" className="acc-btn acc-btn-cfg" disabled={busy}
+        style={{ fontSize: 13, padding: '9px 16px' }} onClick={pullNow}>
+        <i className={`bx ${busy ? 'bx-loader-alt bx-spin' : 'bx-download'}`} style={{ marginRight: 6 }} />
+        {busy ? 'Pulling from Zoho...' : 'Pull Zoho breaks & aux now'}
+      </button>
+      {log && (
+        <pre style={{
+          marginTop: 12, padding: 12, maxHeight: 220, overflowY: 'auto',
+          background: 'var(--bg-body,#f0f2f1)', border: '1px solid var(--border,#e1e6e4)',
+          borderRadius: 6, fontSize: 11.5, lineHeight: 1.6, whiteSpace: 'pre-wrap',
+          color: 'var(--text-main)',
+        }}>
+          {log.join('\n')}
+        </pre>
+      )}
+    </>
   )
 }
 
@@ -3444,6 +3580,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     Authorized Zoho account: <strong>{rtaTestAuthorizedAs ? `${rtaTestAuthorizedAs.displayName} <${rtaTestAuthorizedAs.email}>` : 'Unknown (could not read identity — token may predate the profile-read scope; re-authorize to pick it up)'}</strong>
                   </div>
                 )}
+
+                <ZohoAuxSection accountId={accountId} value={ds.zohoAux}
+                  onChange={z => setDs(prev => ({ ...prev, zohoAux: z }))} />
 
                 <div className="sm-section-title" style={{ marginTop: 20 }}>SCAN ZOHO FIELD OPTIONS</div>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
