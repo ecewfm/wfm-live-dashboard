@@ -552,11 +552,26 @@ project (no `zoho_activity` here), so this app pulls Zoho itself.
   keeps the last good copy; an ok-but-empty pull never wipes a date. Pulls
   NOTHING while no account has the toggle on. Keeps every session per person per
   date (vCORE keeps only the first — its §10.1).
-- Matching is BY NAME (vCORE has no account field on breaks either): roster =
-  every name in the account's OWN agent tables (`agentSourcesFor(ds,
-  { includeZohoAux: false })`) + the optional "Extra Zoho names" list. The log
-  of "Pull now" lists roster names NOT found in Zoho — name mismatches are the #1
-  cause of an agent never showing.
+- Matching is BY ZOHO ACCOUNT (per the user, 2026-10-23 — replaced matching by
+  name against the account's CRM agent tables, which found almost nobody: CRM
+  names like Gorgias's "Ayla S" rarely equal a Zoho full name). An account shows
+  the people whose account in Zoho equals its display name here (or its id),
+  compared ignoring case/spaces/punctuation (`normalizeAccount`), or its own
+  "Zoho account name" setting (`zohoAux.zohoAccounts`) when Zoho spells it
+  differently — plus the optional "Extra Zoho names". Rows show the ZOHO name
+  only (`agent_name` = the Zoho Employee name). vCORE never reads an account off
+  these reports, so the field isn't documented anywhere: `pickAccountField()`
+  finds it on the rows each pull (known names first, then any field with
+  "account" in its name — never a manager/lead one), break rows take it from the
+  person's time log, and the "Pull now" log names the field used — or, if none,
+  lists the fields the rows DO have. The Settings panel lists every account in
+  today's Zoho logs (from `/api/zoho/aux-status`) and shows live whether this
+  account's name matches one.
+- A Zoho row is always elapsed time (`durationIsStatic()` / `agentElapsedSecs()` /
+  `agentTimerKey()` in `lib/breaches.ts`), even on an account whose Duration is
+  "static" (Guardian Bikes: "Ticket solved") — before, Zoho breaks there showed
+  "--" and never breached — and keeps its own timer key, so the same full name
+  in a CRM section and the Zoho section doesn't share one clock.
 - `sql/zoho_breaks_aux.sql` — `wfm_zoho_activity` (cache) and `wfm_zoho_sync`
   (per-date pull stamp + in-progress lease) are RLS-on / NO policies (they hold
   EVERY employee's logs); `wfm_zoho_agent_status` (what each enabled account

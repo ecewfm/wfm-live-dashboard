@@ -35,6 +35,7 @@ export function normalizeAgentRow(row: Record<string, any>, src: AgentSource): R
   // gets its elapsed seconds worked out here, at read time — right however long
   // ago the row itself was written.
   if (src.durationSinceCol) {
+    out._durationFromSince = true   // see agentTimerKey / durationIsStatic below
     const t = Date.parse(String(row[src.durationSinceCol] ?? ''))
     if (Number.isFinite(t)) out._durationSecs = String(Math.max(0, Math.round((Date.now() - t) / 1000)))
   }
@@ -70,6 +71,34 @@ export function legacyAgentSource(ds: DataSourceConfig): AgentSource | null {
     extraDurationCols: ds.agentExtraDurationColsMap || {},
     extraMetricCols: ds.agentExtraMetricColsMap || {},
   }
+}
+
+// ── An agent row's clock ─────────────────────────────────────────────────────
+// A row timed from `since` (_durationFromSince — the Zoho Breaks & Aux section)
+// is different from a CRM row in two ways:
+//  - its own timer key: Zoho names are full names, like Five9's / NICE's, so the
+//    same person can sit in a CRM section AND the Zoho one, and the two must not
+//    share one ticking clock;
+//  - it is ALWAYS elapsed time, even on an account whose Duration column is
+//    "static" (DataSourceConfig.agentDurationStatic — e.g. Guardian Bikes, whose
+//    Duration is "Ticket solved"): that setting is about the account's own CRM
+//    column. Without this, Zoho breaks there showed "--" and never breached.
+export function agentTimerKey(accountId: string, a: Record<string, any>): string {
+  return `${accountId}:${String(a._name ?? '')}${a._durationFromSince ? '#zoho' : ''}`
+}
+
+/** Seconds in the current status: the live ticking timer when there is one
+ *  (the browser), else the row's own value (the Cliq/RTA scan has no timers). */
+export function agentElapsedSecs(agentTimers: Record<string, number>, accountId: string, a: Record<string, any>): number {
+  const t = agentTimers[agentTimerKey(accountId, a)]
+  if (t !== undefined) return t
+  // A row timed from `since` has no duration text — its seconds were worked out at read time.
+  return parseDurationToSeconds(String((a._durationFromSince ? a._durationSecs : a._duration) ?? ''))
+}
+
+/** This row's Duration is not elapsed time (shown as scraped, never ticked or minute-thresholded). */
+export function durationIsStatic(ds: DataSourceConfig, a: Record<string, any>): boolean {
+  return !!ds.agentDurationStatic && !a._durationFromSince
 }
 
 // ── The Zoho Breaks & Aux section ───────────────────────────────────────────
@@ -609,10 +638,10 @@ export function buildBreaches(
     // entirely in "static" mode (ds.agentDurationStatic — see Settings' Data
     // Sources tab) since the mapped column isn't real elapsed time there
     // (e.g. a ticket count) — there's no meaningful "how long" to threshold.
+    // A Zoho Breaks & Aux row is always real time — see durationIsStatic().
     const thSt = statusTh[status]
-    if (thSt && thSt.crit < 999 && !ds.agentDurationStatic) {
-      const key  = `${accountId}:${name}`
-      const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+    if (thSt && thSt.crit < 999 && !durationIsStatic(ds, a)) {
+      const secs = agentElapsedSecs(agentTimers, accountId, a)
       const mins = secs / 60
       const dur  = formatSeconds(secs)
       if (mins >= thSt.crit)      rows.push({ entity: name, metric: `${status} Duration`, value: dur, threshold: `${thSt.crit}m`, severity: 'critical', kind: 'agent', status, group })
@@ -651,7 +680,7 @@ export function buildBreaches(
     // DataSourceConfig.agentDurationStaticThreshold's comment. Independent of
     // (and the direct replacement for) the minutes-in-status check above,
     // which is skipped in static mode since there's no real elapsed time.
-    if (ds.agentDurationStatic && ds.agentDurationStaticThreshold) {
+    if (durationIsStatic(ds, a) && ds.agentDurationStaticThreshold) {
       const th  = ds.agentDurationStaticThreshold
       const raw = String(a._duration ?? '')
       const num = extractPercent(raw)
@@ -709,9 +738,9 @@ export function buildBreaches(
       const rawDur = String(a._duration ?? '')
       const extras: Record<string, string> = {
         [BREACH_COL_STATUS]:   status,
-        [BREACH_COL_DURATION]: ds.agentDurationStatic
+        [BREACH_COL_DURATION]: durationIsStatic(ds, a)
           ? rawDur
-          : formatSeconds(agentTimers[`${accountId}:${name}`] ?? parseDurationToSeconds(rawDur)),
+          : formatSeconds(agentElapsedSecs(agentTimers, accountId, a)),
       }
       for (const col of ds.agentExtraCols ?? []) extras[col.key] = String(a[`_extra_${col.key}`] ?? '')
       for (let i = firstRowOfAgent; i < rows.length; i++) rows[i].extras = extras

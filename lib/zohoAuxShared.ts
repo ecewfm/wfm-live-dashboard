@@ -14,6 +14,13 @@
 //
 // One deliberate improvement over vCORE (its doc's §10.1): every Zoho session
 // for a person on a date is kept, not just the first one with a login.
+//
+// One deliberate DIFFERENCE (per the user, 2026-10-23): vCORE scopes people to
+// an account by name, against the account's roster. Here an account shows the
+// people whose ACCOUNT in Zoho is this account (see "Which account a Zoho
+// person is on" below), under their Zoho name — CRM agent names (Gorgias's
+// "Ayla S", Five9 logins…) rarely equal a Zoho full name, so name matching
+// found almost nobody.
 
 // ── Where the data lives ──────────────────────────────────────────────────────
 export interface ZohoAuxSource {
@@ -46,8 +53,12 @@ export interface ZohoAuxConfig {
   enabled: boolean
   includeBreaks?: boolean   // breaks & lunch — default true
   includeAux?: boolean      // every other aux (Chat, Meeting, Training, …) — default true
-  // Extra Zoho names to match, one per line — for agents who aren't in this
-  // account's own agent tables (or whose CRM name differs from their Zoho name).
+  // This account's name in Zoho (the Account on its people's Zoho records),
+  // one or more, one per line — only when it isn't the same as the account's
+  // display name here. Blank = the display name (and the account id).
+  zohoAccounts?: string
+  // Extra Zoho names to show whatever their Zoho account is, one per line —
+  // someone who works this account but is filed under another one in Zoho.
   extraNames?: string
 }
 
@@ -142,26 +153,94 @@ export function breakCategory(type: string): 'break' | 'aux' {
   return c === 'Break' || c === 'Lunch' ? 'break' : 'aux'
 }
 
-// ── Parsed rows (what the cache holds) ────────────────────────────────────────
-export interface ZohoSession { employee: string; login: string | null; logout: string | null; source: string }
-export interface ZohoBreak   { employee: string; start: string | null; end: string | null; type: string; source: string }
+// ── Which account a Zoho person is on ─────────────────────────────────────────
+// vCORE never reads an account off these reports (its doc §6), so its doc names
+// no field for it. The field is therefore FOUND on the rows at pull time: the
+// first of these that has values, else whichever other field with "account" in
+// its name has the most (a manager/lead field never counts). The pull's log says
+// which one was used — or, if none, which fields the rows do have.
+export const ZOHO_ACCOUNT_FIELDS = [
+  'Account', 'x_Account', 'Employee.Account', 'Employee.x_Account', 'AccountHR', 'Employee.AccountHR',
+  'Account_Name', 'Employee.Account_Name', 'Accounts', 'Employee.Accounts',
+]
 
-export function parseSessionRow(r: Record<string, unknown>, s: ZohoAuxSource): ZohoSession {
+/** A Zoho account value — text, a lookup ({ display_value }), or a multi-lookup array — as names. */
+export function zohoAccountValues(v: unknown): string[] {
+  if (Array.isArray(v)) return [...new Set(v.flatMap(zohoAccountValues))]
+  const s = zohoDisplay(v)
+  return s ? [s] : []
+}
+
+export function pickAccountField(rows: Record<string, unknown>[]): string | null {
+  const filled = (k: string) => rows.reduce((n, r) => n + (zohoAccountValues(r[k]).length ? 1 : 0), 0)
+  for (const k of ZOHO_ACCOUNT_FIELDS) if (filled(k) > 0) return k
+  const others = [...new Set(rows.slice(0, 100).flatMap(r => Object.keys(r)))]
+    .filter(k => /account/i.test(k) && !/manager|leader|supervisor|owner|lead\b/i.test(k) && !ZOHO_ACCOUNT_FIELDS.includes(k))
+  let best: string | null = null, bestN = 0
+  for (const k of others) { const n = filled(k); if (n > bestN) { best = k; bestN = n } }
+  return best
+}
+
+/** Account names compared ignoring case, spaces and punctuation ("Guardian Bikes" = "guardianbikes"). */
+export const normalizeAccount = (s: string | null | undefined) => normalizeName(s).replace(/[^a-z0-9]/g, '')
+
+/** The names this account goes by in Zoho, normalized: its "Zoho account name" setting when set,
+ *  else its display name here and its id. */
+export function accountKeysFor(accountId: string, displayName: string | undefined, cfg: ZohoAuxConfig | undefined): string[] {
+  const set = parseExtraNames(cfg?.zohoAccounts)
+  const names = set.length ? set : [displayName || '', accountId]
+  return [...new Set(names.map(normalizeAccount).filter(Boolean))]
+}
+
+/** Everyone in Zoho's logs on one of `accountKeys`: normalized name → their Zoho name. */
+export function zohoPeopleOnAccount(sessions: ZohoSession[], breaks: ZohoBreak[], accountKeys: string[]): Map<string, string> {
+  const keys = new Set(accountKeys), out = new Map<string, string>()
+  for (const x of [...sessions, ...breaks]) {
+    if (!x.employee || !(x.accounts ?? []).some(a => keys.has(normalizeAccount(a)))) continue
+    const k = normalizeName(x.employee)
+    if (k && !out.has(k)) out.set(k, x.employee)
+  }
+  return out
+}
+
+/** Every Zoho account in the logs, with how many people are on it — for the Settings panel. */
+export function zohoAccountsSeen(sessions: ZohoSession[], breaks: ZohoBreak[]): { name: string; people: number }[] {
+  const by = new Map<string, { name: string; people: Set<string> }>()
+  for (const x of [...sessions, ...breaks]) {
+    for (const a of x.accounts ?? []) {
+      const k = normalizeAccount(a)
+      if (!k) continue
+      if (!by.has(k)) by.set(k, { name: a, people: new Set() })
+      by.get(k)!.people.add(normalizeName(x.employee))
+    }
+  }
+  return [...by.values()].map(v => ({ name: v.name, people: v.people.size })).sort((a, b) => a.name.localeCompare(b.name))
+}
+
+// ── Parsed rows (what the cache holds) ────────────────────────────────────────
+// `accounts`: the person's Zoho account(s) on that row — see above. Absent on
+// rows cached before 2026-10-23 (they're re-pulled within minutes).
+export interface ZohoSession { employee: string; login: string | null; logout: string | null; source: string; accounts?: string[] }
+export interface ZohoBreak   { employee: string; start: string | null; end: string | null; type: string; source: string; accounts?: string[] }
+
+export function parseSessionRow(r: Record<string, unknown>, s: ZohoAuxSource, accountField: string | null = null): ZohoSession {
   return {
     employee: zohoDisplay(r.Employee),
     login:  parseZohoDate(r[s.timelog.login], s.tz),
     logout: parseZohoDate(r[s.timelog.logout], s.tz),
     source: s.key,
+    accounts: accountField ? zohoAccountValues(r[accountField]) : [],
   }
 }
 
-export function parseBreakRow(r: Record<string, unknown>, s: ZohoAuxSource): ZohoBreak {
+export function parseBreakRow(r: Record<string, unknown>, s: ZohoAuxSource, accountField: string | null = null): ZohoBreak {
   return {
     employee: zohoDisplay(r.Employee),
     start: parseZohoDate(r.Start, s.tz),
     end:   parseZohoDate(r.End, s.tz),
     type:  String(r[s.breaks.type] ?? '').trim() || 'Break',   // blank Type is a plain Break, as in vCORE
     source: s.key,
+    accounts: accountField ? zohoAccountValues(r[accountField]) : [],
   }
 }
 
@@ -221,17 +300,17 @@ export interface ZohoAgentStatusRow {
 }
 
 /**
- * The rows for one account: every roster name that is on a break/aux right now
- * (and of a kind this account shows). The agent keeps the name THIS account
- * already shows them under, so the same person reads the same in every section.
+ * The rows for one account: everyone in `names` (its people in Zoho, plus its
+ * extra names) who is on a break/aux right now, of a kind this account shows —
+ * listed under their ZOHO name (per the user, 2026-10-23: the Zoho name only).
  */
 export function buildAccountStatusRows(
-  accountId: string, rosterNames: string[], current: Map<string, CurrentAux>,
+  accountId: string, names: string[], current: Map<string, CurrentAux>,
   cfg: ZohoAuxConfig, nowIso: string,
 ): ZohoAgentStatusRow[] {
   const wantBreaks = includeBreaksOf(cfg), wantAux = includeAuxOf(cfg)
   const seen = new Set<string>(), rows: ZohoAgentStatusRow[] = []
-  for (const name of rosterNames) {
+  for (const name of names) {
     const k = normalizeName(name)
     if (!k || seen.has(k)) continue
     seen.add(k)
@@ -239,7 +318,7 @@ export function buildAccountStatusRows(
     if (!c) continue
     if (c.category === 'break' ? !wantBreaks : !wantAux) continue
     rows.push({
-      id: `${accountId}:${k}`, account_id: accountId, agent_name: name.trim(), zoho_name: c.employee,
+      id: `${accountId}:${k}`, account_id: accountId, agent_name: c.employee, zoho_name: c.employee,
       status: c.type, category: c.category, since: c.since, source: c.source, updated_at: nowIso,
     })
   }

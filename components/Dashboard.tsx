@@ -8,7 +8,7 @@ import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, agentTimerKey, agentElapsedSecs, durationIsStatic, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
@@ -235,7 +235,7 @@ export default function Dashboard() {
       setAgentTimers(prev => {
         const next = { ...prev }
         agents.forEach(a => {
-          const key  = `${accId}:${String(a._name ?? '')}`
+          const key  = agentTimerKey(accId, a)   // a Zoho Breaks & Aux row has its own (see lib/breaches.ts)
           // parseDurationToSeconds (not parseInt) for BOTH fields — it already
           // handles a plain integer string correctly, but also correctly
           // parses "HH:MM:SS"/"MM:SS" text. parseInt() on "01:55:04" silently
@@ -255,7 +255,7 @@ export default function Dashboard() {
           // — same mechanism already used for day/hour-only coarse durations,
           // just forced on unconditionally instead of only when the text
           // itself looks coarse.
-          if (src.agentDurationStatic || isCoarseDuration(raw)) coarseKeysRef.current.add(key)
+          if (durationIsStatic(src, a) || isCoarseDuration(raw)) coarseKeysRef.current.add(key)
           else coarseKeysRef.current.delete(key)
 
           // Breach-table companion duration columns (see AgentExtraColumn /
@@ -1440,8 +1440,7 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutM
   const agentSortValue = (a: any, col: AgentSortCol): string | number => {
     if (col === 'name')   return String(a._name ?? '').toLowerCase()
     if (col === 'status') return String(a._status ?? '').toLowerCase()
-    const key = `${accountId}:${String(a._name ?? '')}`
-    return agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+    return agentElapsedSecs(agentTimers, accountId, a)
   }
   const sortAgentRows = (list: any[]): any[] => {
     if (!agentSort) return list
@@ -1598,14 +1597,14 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutM
                   if (filtered.length === 0) return []
                   const rows = filtered.map((a, i) => {
                     const name = String(a._name ?? '')
-                    const key  = `${accountId}:${name}`
-                    const secs = agentTimers[key] ?? parseDurationToSeconds(String(a._duration ?? ''))
+                    const secs = agentElapsedSecs(agentTimers, accountId, a)
                     // Static mode (see Settings' Data Sources tab's Duration
                     // slot toggle): the mapped column isn't real elapsed time
                     // (e.g. a ticket count), so show it exactly as scraped
                     // instead of running it through formatSeconds(), which
                     // would otherwise misread e.g. "27" as "27 seconds".
-                    const durationDisplay = ds.agentDurationStatic ? (a._duration || '--') : formatSeconds(secs)
+                    // (Never for a Zoho Breaks & Aux row — that's always time.)
+                    const durationDisplay = durationIsStatic(ds, a) ? (a._duration || '--') : formatSeconds(secs)
                     return (
                       <tr key={`${groupName}-${i}`}>
                         <td style={{ fontWeight: 600 }}>{name}</td>

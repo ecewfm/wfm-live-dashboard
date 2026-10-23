@@ -6,7 +6,8 @@
 //
 // Same shape as Workforce R.E.S.T. vCORE's pipeline (see that file's header):
 //   - pulls are ORGANISATION-WIDE, one date per pull, never per account or per
-//     page view — accounts are scoped afterwards, by name;
+//     page view — accounts are scoped afterwards, by each person's ACCOUNT in
+//     Zoho (unlike vCORE, which goes by name — see lib/zohoAuxShared.ts);
 //   - the parsed result is cached (wfm_zoho_activity) so yesterday's data — for
 //     overnight shifts — is pulled every 30 min, not every few minutes;
 //   - a failed pull keeps the last good copy, and an ok-but-empty pull never
@@ -23,13 +24,12 @@
 
 import { getZohoAccessToken } from './zohoAuth'
 import { getSupabaseAdmin } from './supabaseAdmin'
-import { supabase } from './supabase'
 import { OWNER_NAME } from './zohoCreator'
-import { agentSourcesFor } from './breaches'
 import type { DataSourceConfig } from './types'
 import {
   ZOHO_AUX_SOURCES, ZOHO_AUX_TABLE, zohoCriteriaDate, parseSessionRow, parseBreakRow,
   normalizeName, dateInTz, addDays, computeCurrentAux, buildAccountStatusRows, parseExtraNames,
+  pickAccountField, accountKeysFor, zohoPeopleOnAccount, zohoAccountsSeen,
   type ZohoSession, type ZohoBreak, type ZohoAgentStatusRow,
 } from './zohoAuxShared'
 
@@ -92,7 +92,8 @@ export interface AuxStore {
   markSynced(date: string, at: string, note: string): Promise<void>
   writeCache(date: string, source: string, rows: CacheRow[]): Promise<void>
   readCache(dates: string[]): Promise<{ sessions: ZohoSession[]; breaks: ZohoBreak[] }>
-  rosterNames(ds: DataSourceConfig, accountId: string): Promise<string[]>
+  /** account id → its display name here (what its Zoho account is matched against). */
+  accountNames(): Promise<Record<string, string>>
   replaceAccountRows(accountId: string, rows: ZohoAgentStatusRow[]): Promise<void>
   clearAccountsExcept(keepIds: string[]): Promise<void>
 }
@@ -138,14 +139,9 @@ export function supabaseAuxStore(): AuxStore {
       }
       return { sessions, breaks }
     },
-    async rosterNames(ds, accountId) {
-      const names: string[] = []
-      for (const src of agentSourcesFor(ds, { includeZohoAux: false })) {
-        if (!src.table || !src.nameCol) continue
-        const r = await supabase.from(src.table as any).select(src.nameCol).eq(src.accountCol || 'account_id', accountId)
-        for (const row of (r.data as any[]) ?? []) { const n = row?.[src.nameCol]; if (n) names.push(String(n)) }
-      }
-      return names
+    async accountNames() {
+      const rows = must(await db.from('wfm_accounts').select('id, display_name'), 'reading account names') as { id: string; display_name: string | null }[]
+      return Object.fromEntries((rows ?? []).map(r => [r.id, r.display_name || r.id]))
     },
     async replaceAccountRows(accountId, rows) {
       if (rows.length) must(await db.from(ZOHO_AUX_TABLE).upsert(rows, { onConflict: 'id' }), 'writing Zoho Breaks & Aux rows')
@@ -180,8 +176,21 @@ async function pullDate(date: string, token: string, store: AuxStore, f: FetchLi
       continue
     }
     anyOk = true
-    const sessions = tl.rows.map(r => parseSessionRow(r, s)).filter(x => x.employee)
-    const breaks = bl.rows.map(r => parseBreakRow(r, s)).filter(x => x.employee)
+    // Which field holds each person's account — see pickAccountField(). Break
+    // rows that don't carry it take it from the same person's time log.
+    const tlField = pickAccountField(tl.rows), blField = pickAccountField(bl.rows)
+    const sessions = tl.rows.map(r => parseSessionRow(r, s, tlField)).filter(x => x.employee)
+    const breaks = bl.rows.map(r => parseBreakRow(r, s, blField)).filter(x => x.employee)
+    const accountOf = new Map<string, string[]>()
+    for (const x of sessions) if (x.accounts?.length) accountOf.set(normalizeName(x.employee), x.accounts)
+    for (const b of breaks) if (!b.accounts?.length) b.accounts = accountOf.get(normalizeName(b.employee)) ?? []
+    const accountsFound = zohoAccountsSeen(sessions, breaks).length
+    if (tlField || blField) {
+      l(`Zoho ${s.key} ${date}: each person's account read from ${[tlField && `${s.timelog.report}.${tlField}`, blField && `${s.breaks.report}.${blField}`].filter(Boolean).join(' and ')} — ${accountsFound} account(s).`)
+    } else if (tl.rows.length) {
+      const fields = [...new Set(tl.rows.slice(0, 20).flatMap(r => Object.keys(r)))]
+      l(`Zoho ${s.key} ${date}: NO account field found on ${s.timelog.report} or ${s.breaks.report}, so its people can't be matched to an account. Fields on ${s.timelog.report}: ${fields.join(', ')}`)
+    }
     const grouped = new Map<string, CacheRow>()
     const add = (kind: CacheRow['kind'], employee: string, item: unknown) => {
       const k = `${kind}|${normalizeName(employee)}`
@@ -193,7 +202,7 @@ async function pullDate(date: string, token: string, store: AuxStore, f: FetchLi
     // An ok-but-EMPTY pull is a no-op, never a wipe of a populated date.
     if (grouped.size) await store.writeCache(date, s.key, [...grouped.values()])
     l(`Zoho ${s.key} ${date}: ${sessions.length} time log(s), ${breaks.length} break/aux row(s).`)
-    notes.push(`${s.key}: ${sessions.length} logs / ${breaks.length} breaks`)
+    notes.push(`${s.key}: ${sessions.length} logs / ${breaks.length} breaks / account field ${tlField || blField || 'NONE'}`)
   }
   if (anyOk) await store.markSynced(date, nowIso, notes.join('; '))
   return anyOk
@@ -203,7 +212,9 @@ async function pullDate(date: string, token: string, store: AuxStore, f: FetchLi
 export interface AuxSyncResult {
   log: string[]
   pulled: string[]
-  accounts: { id: string; onBreakOrAux: number; roster: number; foundInZoho: number; notFoundSample: string[] }[]
+  // per enabled account: which Zoho account name(s) it was matched on, how many
+  // people Zoho has on it, and how many of them (plus extra names) are on a break/aux now
+  accounts: { id: string; zohoAccounts: string[]; people: number; extraNames: number; onBreakOrAux: number }[]
 }
 
 export async function runZohoAuxSync(
@@ -254,20 +265,29 @@ export async function runZohoAuxSync(
 
   const { sessions, breaks } = await store.readCache([yesterday, today])
   const current = computeCurrentAux(sessions, breaks, now)
-  const inZoho = new Set(sessions.map(s => normalizeName(s.employee)))
+  const seen = zohoAccountsSeen(sessions, breaks)
+  const displayNames = await store.accountNames()
 
   const accounts: AuxSyncResult['accounts'] = []
   for (const a of enabled) {
     try {
-      const roster = [...await store.rosterNames(a.ds, a.id), ...parseExtraNames(a.ds.zohoAux?.extraNames)]
-      const uniq = [...new Map(roster.map(n => [normalizeName(n), n.trim()])).values()].filter(Boolean)
-      const rows = buildAccountStatusRows(a.id, uniq, current, a.ds.zohoAux!, nowIso)
+      const cfg = a.ds.zohoAux!
+      // Matched on its "Zoho account name" setting, else its display name here (and id).
+      const keys = accountKeysFor(a.id, displayNames[a.id], cfg)
+      const asked = parseExtraNames(cfg.zohoAccounts)
+      const label = (asked.length ? asked : [displayNames[a.id] || a.id]).map(n => `"${n}"`).join(' / ')
+      const people = zohoPeopleOnAccount(sessions, breaks, keys)
+      const extra = parseExtraNames(cfg.extraNames)
+      const rows = buildAccountStatusRows(a.id, [...people.values(), ...extra], current, cfg, nowIso)
       await store.replaceAccountRows(a.id, rows)
-      const found = uniq.filter(n => inZoho.has(normalizeName(n)))
-      const notFound = uniq.filter(n => !inZoho.has(normalizeName(n)))
-      accounts.push({ id: a.id, onBreakOrAux: rows.length, roster: uniq.length, foundInZoho: found.length, notFoundSample: notFound.slice(0, 8) })
-      l(`${a.id}: ${rows.length} on a Zoho break/aux now · ${found.length} of ${uniq.length} agent name(s) found in Zoho's logs` +
-        (notFound.length ? ` — not found: ${notFound.slice(0, 8).join(', ')}${notFound.length > 8 ? ', …' : ''}` : ''))
+      accounts.push({ id: a.id, zohoAccounts: asked.length ? asked : [displayNames[a.id] || a.id], people: people.size, extraNames: extra.length, onBreakOrAux: rows.length })
+      let line = `${a.id}: Zoho account ${label} — ${people.size} ${people.size === 1 ? 'person' : 'people'} in Zoho's logs${extra.length ? ` (+${extra.length} extra name(s))` : ''}, ${rows.length} on a break/aux now`
+      if (!people.size) {
+        line += seen.length
+          ? `. No one in Zoho's logs is on that account — if it's spelled differently in Zoho, set "Zoho account name" for this account. Zoho accounts seen: ${seen.slice(0, 40).map(x => x.name).join(', ')}${seen.length > 40 ? `, … (${seen.length} in all)` : ''}`
+          : `. Zoho's cached logs carry no account at all yet (see the pull lines above).`
+      }
+      l(line)
     } catch (e) {
       l(`${a.id}: could not update — ${e instanceof Error ? e.message : String(e)}`)
     }
@@ -276,8 +296,18 @@ export async function runZohoAuxSync(
 }
 
 // ── For the Settings panel ────────────────────────────────────────────────────
-export async function getZohoAuxStatus(): Promise<{ pullMinutes: number; today: string; lastPull: string | null; note: string | null }> {
+// `zohoAccounts`: every account in today's Zoho logs and how many people are on
+// it — what the "Zoho account name" field suggests, and how the panel shows
+// whether this account's name matches one.
+export async function getZohoAuxStatus(store: AuxStore = supabaseAuxStore()): Promise<{
+  pullMinutes: number; today: string; lastPull: string | null; note: string | null
+  zohoAccounts: { name: string; people: number }[]
+}> {
   const today = dateInTz(Date.now(), PRIMARY_TZ)
   const r = await getSupabaseAdmin().from(ZOHO_AUX_SYNC_TABLE).select('refreshed_at, note').eq('log_date', today).maybeSingle()
-  return { pullMinutes: ZOHO_AUX_PULL_MINUTES, today, lastPull: (r.data as any)?.refreshed_at ?? null, note: (r.data as any)?.note ?? null }
+  const { sessions, breaks } = await store.readCache([today])
+  return {
+    pullMinutes: ZOHO_AUX_PULL_MINUTES, today, lastPull: (r.data as any)?.refreshed_at ?? null, note: (r.data as any)?.note ?? null,
+    zohoAccounts: zohoAccountsSeen(sessions, breaks),
+  }
 }

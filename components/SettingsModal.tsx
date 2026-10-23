@@ -23,7 +23,7 @@ import UsersTab from './UsersTab'
 import AlarmTab from './AlarmTab'
 import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
-import { includeBreaksOf, includeAuxOf, type ZohoAuxConfig } from '@/lib/zohoAuxShared'
+import { includeBreaksOf, includeAuxOf, accountKeysFor, normalizeAccount, type ZohoAuxConfig } from '@/lib/zohoAuxShared'
 
 type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq' | 'users' | 'alarm'
 
@@ -2234,14 +2234,15 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, 
 // Edits DataSourceConfig.zohoAux (saved with everything else by Save Changes).
 // The pull itself and the matching are lib/zohoAux.ts; the rules are
 // lib/zohoAuxShared.ts. "Pull now" runs on the SAVED settings, server-side.
-function ZohoAuxSection({ accountId, value, onChange }: {
+function ZohoAuxSection({ accountId, displayName, value, onChange }: {
   accountId: string
+  displayName: string
   value: ZohoAuxConfig | undefined
   onChange: (v: ZohoAuxConfig) => void
 }) {
   const cfg: ZohoAuxConfig = value ?? { enabled: false }
   const set = (patch: Partial<ZohoAuxConfig>) => onChange({ ...cfg, ...patch })
-  const [status, setStatus] = useState<{ pullMinutes?: number; lastPull?: string | null } | null>(null)
+  const [status, setStatus] = useState<{ pullMinutes?: number; lastPull?: string | null; zohoAccounts?: { name: string; people: number }[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [log, setLog] = useState<string[] | null>(null)
 
@@ -2265,14 +2266,20 @@ function ZohoAuxSection({ accountId, value, onChange }: {
 
   const lastPull = status?.lastPull ? new Date(status.lastPull).toLocaleTimeString() : 'not pulled yet today'
   const off = !cfg.enabled
+  // Which of today's Zoho accounts this account matches (same rule as the pull — lib/zohoAuxShared.ts).
+  const keys = new Set(accountKeysFor(accountId, displayName, cfg))
+  const seen = status?.zohoAccounts ?? []
+  const matched = seen.filter(a => keys.has(normalizeAccount(a.name)))
+  const matchedPeople = matched.reduce((n, a) => n + a.people, 0)
 
   return (
     <>
       <div className="sm-section-title" style={{ marginTop: 20 }}>ZOHO BREAKS &amp; AUX — {accountId}</div>
       <p className="sm-desc" style={{ marginBottom: 10 }}>
-        Adds a <strong>Zoho Breaks &amp; Aux</strong> section to this account&apos;s Agent Status: every
-        agent who is on a Zoho break or aux right now (from the ECE Time Tracker break logs), with how long
-        they&apos;ve been on it. Each Zoho type — 15 Minute Break, 1 Hour Lunch, Chat, Meeting, … — shows up
+        Adds a <strong>Zoho Breaks &amp; Aux</strong> section to this account&apos;s Agent Status: everyone
+        whose <strong>account in Zoho</strong> is this account and who is on a Zoho break or aux right now (from
+        the ECE Time Tracker logs), shown under their Zoho name, with how long they&apos;ve been on it. Each
+        Zoho type — 15 Minute Break, 1 Hour Lunch, Chat, Meeting, … — shows up
         in <strong>Status Durations</strong> once it&apos;s been seen, so it can have its own thresholds; a
         break that runs too long then appears in Breach / Anomalies like any other status.
       </p>
@@ -2303,11 +2310,51 @@ function ZohoAuxSection({ accountId, value, onChange }: {
       </table>
 
       <div style={{ marginTop: 12, opacity: off ? 0.5 : 1 }}>
+        <div className="sm-metric">Zoho account name</div>
+        <div className="sm-metric-sub" style={{ marginBottom: 6 }}>
+          People are matched <strong>by their account in Zoho</strong>. Leave blank to use this account&apos;s
+          name here — <strong>{displayName || accountId}</strong> (capitals, spaces and punctuation don&apos;t
+          matter). Fill it in only if Zoho spells it differently; more than one, one per line.
+        </div>
+        <textarea className="sm-input" aria-label="Zoho account name" disabled={off} rows={1}
+          style={{ width: '100%', textAlign: 'left', resize: 'vertical', fontFamily: 'inherit' }}
+          placeholder={displayName || accountId}
+          value={cfg.zohoAccounts ?? ''} onChange={e => set({ zohoAccounts: e.target.value })} />
+        {status && (
+          <div className="sm-metric-sub" role="status" style={{ marginTop: 4, color: matched.length ? 'var(--success)' : 'var(--warning)' }}>
+            {!seen.length
+              ? 'No account found in today\'s Zoho logs yet — "Pull now" shows which account field Zoho has.'
+              : matched.length
+                ? `Matches ${matched.map(a => `"${a.name}"`).join(', ')} in Zoho — ${matchedPeople} people in today's logs.`
+                : `No Zoho account by that name in today's logs (${seen.length} accounts there).`}
+          </div>
+        )}
+        {!!seen.length && (
+          <details style={{ marginTop: 4 }}>
+            <summary className="sm-metric-sub" style={{ cursor: 'pointer' }}>Accounts in today&apos;s Zoho logs — click one to use it</summary>
+            <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {seen.map(a => (
+                <button key={a.name} type="button" disabled={off}
+                  style={{
+                    padding: '3px 9px', fontSize: 11.5, borderRadius: 12, cursor: off ? 'default' : 'pointer',
+                    border: `1px solid ${keys.has(normalizeAccount(a.name)) ? 'var(--success)' : 'var(--border,#e1e6e4)'}`,
+                    background: keys.has(normalizeAccount(a.name)) ? 'rgba(72,127,98,.12)' : 'transparent',
+                    color: 'var(--text-main)', fontFamily: 'inherit',
+                  }}
+                  title={`Use "${a.name}"`} onClick={() => set({ zohoAccounts: a.name })}>
+                  {a.name} <span style={{ opacity: .7 }}>({a.people})</span>
+                </button>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+
+      <div style={{ marginTop: 12, opacity: off ? 0.5 : 1 }}>
         <div className="sm-metric">Extra Zoho names (optional)</div>
         <div className="sm-metric-sub" style={{ marginBottom: 6 }}>
-          Agents are matched <strong>by name</strong>: an agent counts for this account when the name in this
-          account&apos;s own agent tables is their Zoho Employee name (capitals and extra spaces don&apos;t matter).
-          Add, one per line, anyone who isn&apos;t in those tables or whose Zoho name is spelled differently.
+          Also show these people, whatever their account in Zoho — e.g. someone working this account who is
+          filed under another one there. Their Zoho Employee name, one per line.
         </div>
         <textarea className="sm-input" aria-label="Extra Zoho names" disabled={off} rows={3}
           style={{ width: '100%', textAlign: 'left', resize: 'vertical', fontFamily: 'inherit' }}
@@ -3563,7 +3610,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   </div>
                 )}
 
-                <ZohoAuxSection accountId={accountId} value={ds.zohoAux}
+                <ZohoAuxSection accountId={accountId}
+                  displayName={accounts.find(a => a.id === accountId)?.display_name || accountId}
+                  value={ds.zohoAux}
                   onChange={z => setDs(prev => ({ ...prev, zohoAux: z }))} />
 
                 <div className="sm-section-title" style={{ marginTop: 20 }}>SCAN ZOHO FIELD OPTIONS</div>
