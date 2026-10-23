@@ -1010,7 +1010,7 @@ export default function Dashboard() {
                   <div className="stale-stamp">
                     <div className="stale-stamp-icon"><i className="bx bx-error-circle" /></div>
                     <div className="stale-stamp-title">DATA NOT IN SYNC</div>
-                    <div className="stale-stamp-sub">Not updated in 3+ minutes</div>
+                    <div className="stale-stamp-sub">Not updated in 5+ minutes</div>
                   </div>
                 </div>
               )}
@@ -2063,7 +2063,7 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
             <div className="stale-stamp">
               <div className="stale-stamp-icon"><i className="bx bx-error-circle" /></div>
               <div className="stale-stamp-title">DATA NOT IN SYNC</div>
-              <div className="stale-stamp-sub">Not updated in 3+ minutes</div>
+              <div className="stale-stamp-sub">Not updated in 5+ minutes</div>
             </div>
           </div>
         )}
