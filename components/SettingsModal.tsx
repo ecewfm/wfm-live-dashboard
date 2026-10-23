@@ -1549,11 +1549,6 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const setAgentExtraColBreachText = useCallback((key: string, breachText: string) => {
     setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c => c.key === key ? { ...c, breachText } : c) }))
   }, [])
-  // AgentExtraColumn.showInBreachTable — see lib/breaches.ts's breachTableExtraCols().
-  const toggleAgentExtraColInBreach = useCallback((key: string) => {
-    setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c =>
-      c.key === key ? { ...c, showInBreachTable: !c.showInBreachTable } : c) }))
-  }, [])
   const toggleAgentExtraColSeverity = useCallback((key: string) => {
     setLocalDs(prev => ({ ...prev, agentExtraCols: prev.agentExtraCols.map(c =>
       c.key === key ? { ...c, breachSeverity: c.breachSeverity === 'warning' ? 'critical' : 'warning' } : c) }))
@@ -2143,26 +2138,13 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             )}
           </div>
         )}
-        {localDs.agentExtraCols.length > 0 && (
-          <div style={{ marginTop: 14 }}>
-            <div className="ds-mini-label">Also show in the Breach / Anomalies table</div>
-            <p className="ds-hint" style={{ marginTop: 2 }}>
-              Ticked custom columns get their own column in Breach / Anomalies — on this Dashboard
-              AND on the Overview card. An agent&apos;s breach shows that agent&apos;s value (from
-              whichever table it came from); a KPI breach shows &quot;—&quot;.
-            </p>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 6 }}>
-              {localDs.agentExtraCols.map(c => (
-                <label key={c.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={!!c.showInBreachTable}
-                    aria-label={`Show ${c.label} in Breach / Anomalies`}
-                    onChange={() => toggleAgentExtraColInBreach(c.key)} />
-                  {c.label || '(unnamed column)'}
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
+        {/* Which of these columns the Breach / Anomalies tables show is picked
+            with the gear on those tables (components/BreachColumnsModal.tsx). */}
+        <p className="ds-hint" style={{ marginTop: 14 }}>
+          <i className="bx bx-cog" style={{ verticalAlign: -2 }} /> To show any of these columns next to
+          each breach, use the gear on the <strong>Breach / Anomalies</strong> table (Dashboard page or
+          Overview card).
+        </p>
       </div>
 
       {/* Multiple agent sources — either several physical tables, or one

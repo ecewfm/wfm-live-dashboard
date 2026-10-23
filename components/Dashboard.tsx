@@ -3,11 +3,12 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
+import BreachColumnsModal from './BreachColumnsModal'
 import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, sectionBreaches, breachTableExtraCols, agentSourcesFor, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
@@ -21,7 +22,7 @@ import { OV_GAP, columnGeometry, assignColumns, stackColumns, type ColumnGeometr
 import { keyBreaches, type CalledOutMark } from '@/lib/calledOut'
 import { useCalledOut, type CalledOutMode } from '@/lib/useCalledOut'
 import {
-  loadSettings, saveSettings, saveDashboardLayout, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
+  loadSettings, saveSettings, saveDashboardLayout, saveDataSourceOnly, saveHeaderColors, loadAllSettings, loadAccounts, seedAccountsIfEmpty, addAccount,
   loadCliqSettings, saveCliqSettings, appendKnownStatuses, DEFAULT_CLIQ_GLOBAL_SETTINGS,
   type AccountConfig, type AccountSettings
 } from '@/lib/settings'
@@ -80,6 +81,9 @@ export default function Dashboard() {
   // signed-in, active profile.
   const { profile, signOut: doSignOut } = useAuth()
   const canOpenSettings = can.openSettings(profile.role)
+  // The Breach / Anomalies tables' gear changes what EVERYONE watching that
+  // account sees, so it's a settings edit — same roles as the Settings modal.
+  const canEditSettings = can.editSettings(profile.role)
 
   const [isDark, setIsDark]                 = useState(false)
   // The page this TAB was last on (lib/viewMemory.ts) — so a reload, above all the
@@ -97,6 +101,8 @@ export default function Dashboard() {
   const [alertAcked, setAlertAcked]         = useState(false)
   const [agentTimers, setAgentTimers]       = useState<Record<string, number>>({})
   const [settingsOpen, setSettingsOpen]     = useState(false)
+  // Account whose Breach / Anomalies columns modal is open (the tables' gear).
+  const [breachColsFor, setBreachColsFor]   = useState<string | null>(null)
   const [mounted, setMounted]               = useState(false)
 
   const [kpiThresholds, setKpiThresholds]       = useState<Record<string, Thresholds>>({})
@@ -781,6 +787,23 @@ export default function Dashboard() {
     await saveSettings(currentAccount, kpi, status, ds, cliqChannel, wfLogsEnabled, zohoLookups, alarmSound, rtaLogsEnabled, rtaSites, rtaAccountName, rtaAiCategorizationEnabled, rtaReportKpi, rtaReportAgentStatus)
   }
 
+  // ── Save one account's Breach / Anomalies columns (the tables' gear) ──────
+  // Applied to the LATEST data source for that account (not a copy taken when
+  // the modal opened), so nothing saved meanwhile is undone. The older
+  // per-column "Also show in Breach / Anomalies" ticks are dropped — this list
+  // replaces them (see breachTableExtraCols).
+  const saveBreachCols = async (accId: string, keys: string[]): Promise<boolean> => {
+    const cur = dataSources[accId] ?? DEFAULT_DATA_SOURCE
+    const next: DataSourceConfig = {
+      ...cur,
+      breachTableCols: keys,
+      agentExtraCols: (cur.agentExtraCols ?? []).map(c => { const copy = { ...c }; delete copy.showInBreachTable; return copy }),
+    }
+    const ok = await saveDataSourceOnly(accId, next)
+    if (ok) setDataSources(prev => ({ ...prev, [accId]: next }))
+    return ok
+  }
+
   // ── Save one account's Overview header colors — instant, like layout drag ──
   const updateHeaderColors = (accId: string, patch: Partial<HeaderColors>) => {
     const next = { ...(headerColors[accId] ?? DEFAULT_HEADER_COLORS), ...patch }
@@ -823,6 +846,17 @@ export default function Dashboard() {
           isDark={isDark}
           name={id => id === PREVIEW_ACCOUNT ? 'Test alarm' : displayNames[id] || id}
           onAcknowledge={acknowledgeAlarm}
+        />
+      )}
+
+      {breachColsFor && mounted && (
+        <BreachColumnsModal
+          isDark={isDark}
+          accountName={displayNames[breachColsFor] || breachColsFor}
+          choices={breachColumnChoices(dataSources[breachColsFor] ?? DEFAULT_DATA_SOURCE)}
+          picked={breachTableExtraCols(dataSources[breachColsFor] ?? DEFAULT_DATA_SOURCE).map(c => c.key)}
+          onSave={keys => saveBreachCols(breachColsFor, keys)}
+          onClose={() => setBreachColsFor(null)}
         />
       )}
 
@@ -1032,6 +1066,7 @@ export default function Dashboard() {
                   setDashboardLayouts(prev => ({ ...prev, [currentAccount]: layout }))
                   saveDashboardLayout(currentAccount, layout)
                 }}
+                onConfigureBreachCols={canEditSettings ? () => setBreachColsFor(currentAccount) : undefined}
               />
             </div>
           )}
@@ -1050,6 +1085,7 @@ export default function Dashboard() {
               alarmSounds={alarmSettings.enabled ? {} : alarmSounds}
               onHeaderColorsChange={updateHeaderColors}
               rtaLogsEnabledMap={rtaLogsEnabledMap}
+              onConfigureBreachCols={canEditSettings ? setBreachColsFor : undefined}
             />
           )}
         </div>
@@ -1175,9 +1211,12 @@ function FilterableTh({ label, options, filter, isOpen, onToggle, onClose, onApp
 // reads the latest value even though the mousemove/mouseup listeners were
 // attached before this render's `rect` prop existed (avoids a stale-closure
 // bug where releasing the mouse would save the position from BEFORE the drag).
-function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, icon, children, onChange, onCommit }: {
+function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, icon, actions, children, onChange, onCommit }: {
   id: string; rect: PanelRect; minW?: number; minH?: number
   headerColor?: string; title: React.ReactNode; icon?: string
+  // Buttons at the right end of the header (e.g. the breach table's gear).
+  // Pressing one must not start a panel drag, hence the mousedown stop below.
+  actions?: React.ReactNode
   children: React.ReactNode
   onChange: (id: string, rect: PanelRect) => void
   onCommit: (id: string, rect: PanelRect) => void
@@ -1252,6 +1291,9 @@ function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, ico
       }}>
         {icon && <i className={`bx ${icon}`} style={{ marginRight: 6 }} />}
         {title}
+        {actions && (
+          <span className="panel-header-actions" onMouseDown={e => e.stopPropagation()}>{actions}</span>
+        )}
       </div>
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
         {children}
@@ -1265,6 +1307,18 @@ function LayoutPanel({ id, rect, minW = 260, minH = 120, headerColor, title, ico
       <div className="panel-resize-handle" onMouseDown={startResize('bottom-right')}
         style={{ ...handleStyle, right: 0, bottom: 0, width: 14, height: 14, cursor: 'nwse-resize' }} />
     </div>
+  )
+}
+
+// ── The gear on a Breach / Anomalies table's header ─────────────────────────
+// Opens BreachColumnsModal for that account. Shared by the Dashboard page's
+// table and the Overview card's, so both look and behave the same.
+function BreachColsGear({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" className="breach-cols-gear" onClick={onClick}
+      title="Choose which Agent Status columns this table shows" aria-label="Breach / Anomalies column settings">
+      <i className="bx bx-cog" />
+    </button>
   )
 }
 
@@ -1309,12 +1363,14 @@ function GroupHeaderRow({ label, colSpan }: { label: string; colSpan: number }) 
 }
 
 // ── Dashboard Page ─────────────────────────────────────────────────────────────
-function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutMode, onToggleCalledOut, alertAcked, onAck, agentTimers, kpiTh, statusTh, ds, layout, onLayoutChange }: {
+function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutMode, onToggleCalledOut, alertAcked, onAck, agentTimers, kpiTh, statusTh, ds, layout, onLayoutChange, onConfigureBreachCols }: {
   accountId: string; accountData: AccountData | undefined; breaches: BreachRow[]
   calledOut: Record<string, CalledOutMark>; calledOutMode: CalledOutMode; onToggleCalledOut: (key: string) => void
   alertAcked: boolean; onAck: () => void; agentTimers: Record<string, number>
   kpiTh: Thresholds; statusTh: StatusThresholds; ds: DataSourceConfig
   layout: DashboardLayout; onLayoutChange: (layout: DashboardLayout) => void
+  // Opens the Breach / Anomalies columns modal; absent = this user can't (no gear).
+  onConfigureBreachCols?: () => void
 }) {
   const agents  = accountData?.agents ?? []
   const hasCrit = breaches.some(b => b.severity === 'critical')
@@ -1461,7 +1517,8 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutM
         ))}
 
         <LayoutPanel id="breach" rect={liveLayout.breach ?? effectiveLayout.breach} headerColor="var(--danger,#c0392b)" icon="bx-error-circle"
-          title="Breach / Anomalies" onChange={handlePanelChange} onCommit={handlePanelCommit}>
+          title="Breach / Anomalies" onChange={handlePanelChange} onCommit={handlePanelCommit}
+          actions={onConfigureBreachCols && <BreachColsGear onClick={onConfigureBreachCols} />}>
           <table className="dash-table">
             <thead>
               <tr>
@@ -1784,7 +1841,7 @@ function AccountFilterDropdown({ accounts, displayNames, selected, onApply }: {
 }
 
 // ── Overview Page ──────────────────────────────────────────────────────────────
-function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
+function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap, onConfigureBreachCols }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
@@ -1792,6 +1849,8 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
   headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
   onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
   rtaLogsEnabledMap: Record<string, boolean>
+  // Opens an account's Breach / Anomalies columns modal; absent = no gear.
+  onConfigureBreachCols?: (accId: string) => void
 }) {
   const [accountFilter, setAccountFilter] = useState<Set<string> | null>(null)
   useEffect(() => { setAccountFilter(loadOverviewAccountFilter()) }, [])
@@ -1821,12 +1880,13 @@ function OverviewPage({ accounts, data, agentTimers, allBreaches, kpiThresholds,
         displayNames={displayNames} headerColors={headerColors} alarmSounds={alarmSounds}
         onHeaderColorsChange={onHeaderColorsChange}
         rtaLogsEnabledMap={rtaLogsEnabledMap}
+        onConfigureBreachCols={onConfigureBreachCols}
       />
     </>
   )
 }
 
-function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap }: {
+function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThresholds, dataSources, displayNames, headerColors, alarmSounds, onHeaderColorsChange, rtaLogsEnabledMap, onConfigureBreachCols }: {
   accounts: string[]; data: Record<string, AccountData>
   agentTimers: Record<string, number>; allBreaches: Record<string, BreachRow[]>
   kpiThresholds: Record<string, Thresholds>; dataSources: Record<string, DataSourceConfig>
@@ -1834,6 +1894,7 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
   headerColors: Record<string, HeaderColors>; alarmSounds: Record<string, string>
   onHeaderColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
   rtaLogsEnabledMap: Record<string, boolean>
+  onConfigureBreachCols?: (accId: string) => void
 }) {
   // Cards stay in the column they were last SHUFFLED into, and only slide up or
   // down inside it as cards above them grow/shrink — see lib/overviewLayout.ts.
@@ -1963,6 +2024,7 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
             alarmSound={alarmSounds[accId] ?? ''}
             onColorsChange={onHeaderColorsChange}
             rtaLogsEnabled={rtaLogsEnabledMap[accId] ?? false}
+            onConfigureBreachCols={onConfigureBreachCols && (() => onConfigureBreachCols(accId))}
           />
         </div>
       ))}
@@ -1971,13 +2033,14 @@ function OverviewMasonry({ accounts, data, agentTimers, allBreaches, kpiThreshol
 }
 
 // ── Overview Card ─────────────────────────────────────────────────────────────
-function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds, colors, alarmSound, onColorsChange, rtaLogsEnabled }: {
+function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, kpiTh, ds, colors, alarmSound, onColorsChange, rtaLogsEnabled, onConfigureBreachCols }: {
   accId: string; displayName: string; accountData: AccountData | undefined
   agentTimers: Record<string, number>; breaches: BreachRow[]
   kpiTh: Thresholds; ds: DataSourceConfig
   colors: HeaderColors; alarmSound: string
   onColorsChange: (accId: string, patch: Partial<HeaderColors>) => void
   rtaLogsEnabled: boolean
+  onConfigureBreachCols?: () => void
 }) {
   const kpiRows = accountData?.kpiRows ?? []
   const groups  = ds.groups ?? []
@@ -2127,7 +2190,10 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
 
       {/* Breach table */}
       <div className="ov-breach-section">
-        <div className="ov-breach-header"><i className="bx bx-error-circle" /> Breach / Anomalies</div>
+        <div className="ov-breach-header">
+          <i className="bx bx-error-circle" /> Breach / Anomalies
+          {onConfigureBreachCols && <BreachColsGear onClick={onConfigureBreachCols} />}
+        </div>
         <table className="ov-breach-table">
           <thead><tr><th>Queue/Agent</th><th>Metric</th><th>Value</th><th>Threshold</th>{ovBreachExtraCols.map(col => <th key={col.key}>{col.label}</th>)}<th>Status</th></tr></thead>
           <tbody>

@@ -350,6 +350,16 @@ export interface DataSourceConfig {
   // legacy single table, AgentSource.extraCols for each additional source.
   agentExtraCols: AgentExtraColumn[]
 
+  // Which Agent Status columns the Breach / Anomalies tables (Dashboard page
+  // AND Overview card) show next to each breach — picked with the gear on the
+  // table's header (components/BreachColumnsModal.tsx). Keys are
+  // BREACH_COL_STATUS / BREACH_COL_DURATION (lib/breaches.ts) for the built-in
+  // Status and Duration columns, or an AgentExtraColumn.key. Always shown in
+  // the Agent Status table's own column order. Undefined = never set with the
+  // gear: falls back to the older per-column AgentExtraColumn.showInBreachTable
+  // flags (see breachTableExtraCols).
+  breachTableCols?: string[]
+
   // Multiple agent tables and/or one table split into groups. Covers two
   // cases: (1) agent status is scraped into several physical tables (e.g.
   // Hippo's hippo_licensed_agents + hippo_level_1) — one AgentSource per
@@ -466,6 +476,8 @@ export interface AgentExtraColumn {
   breachSeverity?: 'warning' | 'critical'   // only meaningful when breachText is set; defaults to 'critical'
   // Also show this column in the Breach / Anomalies table (Dashboard page AND
   // the Overview card): an agent breach shows that agent's value for it, a KPI
-  // breach shows "—". Off by default — the table stays as it was.
+  // breach shows "—". Off by default — the table stays as it was. Superseded by
+  // DataSourceConfig.breachTableCols once the table's gear has been used; only
+  // read while that is unset.
   showInBreachTable?: boolean
 }

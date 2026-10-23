@@ -364,10 +364,11 @@ export interface BreachRow {
   // checkKpi() below, so lib/cliqScan.ts can filter the Cliq message
   // per-KPI the same way it does per-status above.
   sendToCliq?: boolean
-  // Only on 'kind:agent' rows: that agent's value for each of the account's
-  // custom Agent Status columns (AgentExtraColumn), keyed by column key — what
-  // the Breach / Anomalies tables show for the columns ticked "Also show in
-  // Breach / Anomalies" (see breachTableExtraCols). Absent on KPI rows.
+  // Only on 'kind:agent' rows: that agent's value for every Agent Status column
+  // a Breach / Anomalies table can show — the built-in Status/Duration
+  // (BREACH_COL_STATUS/BREACH_COL_DURATION) and each custom AgentExtraColumn,
+  // keyed by column key. The tables show the ones picked with their gear (see
+  // breachTableExtraCols). Absent on KPI rows.
   extras?: Record<string, string>
 }
 
@@ -703,9 +704,16 @@ export function buildBreaches(
       }
     })
 
-    if (rows.length > firstRowOfAgent && (ds.agentExtraCols ?? []).length) {
-      const extras: Record<string, string> = {}
-      for (const col of ds.agentExtraCols) extras[col.key] = String(a[`_extra_${col.key}`] ?? '')
+    if (rows.length > firstRowOfAgent) {
+      // Status/Duration exactly as the Agent Status table shows them.
+      const rawDur = String(a._duration ?? '')
+      const extras: Record<string, string> = {
+        [BREACH_COL_STATUS]:   status,
+        [BREACH_COL_DURATION]: ds.agentDurationStatic
+          ? rawDur
+          : formatSeconds(agentTimers[`${accountId}:${name}`] ?? parseDurationToSeconds(rawDur)),
+      }
+      for (const col of ds.agentExtraCols ?? []) extras[col.key] = String(a[`_extra_${col.key}`] ?? '')
       for (let i = firstRowOfAgent; i < rows.length; i++) rows[i].extras = extras
     }
   })
@@ -713,12 +721,35 @@ export function buildBreaches(
   return rows
 }
 
-// ── Custom columns shown in the Breach / Anomalies table ────────────────────
-// The account's custom Agent Status columns (DataSourceConfig.agentExtraCols)
-// ticked "Also show in Breach / Anomalies" in Settings — shared by the Dashboard
-// page's breach table and the Overview card's, so the two always match.
+// ── Agent Status columns shown in the Breach / Anomalies table ──────────────
+// Keys for the Agent Status table's two built-in columns (Agent is already the
+// breach table's own Queue / Agent column). Custom AgentExtraColumn keys are
+// "agentcol_<n>", so these can never collide with one.
+export const BREACH_COL_STATUS   = '@status'
+export const BREACH_COL_DURATION = '@duration'
+
+/** Every Agent Status column a Breach / Anomalies table can show, in the Agent
+ *  Status table's own order — what the table's gear offers. */
+export function breachColumnChoices(ds: DataSourceConfig): { key: string; label: string }[] {
+  return [
+    // Not plain "Status": the Overview card's breach table already has a
+    // Status column (Critical/Warning).
+    { key: BREACH_COL_STATUS,   label: 'Agent Status' },
+    { key: BREACH_COL_DURATION, label: ds.agentDurationLabel || 'Duration' },
+    ...(ds.agentExtraCols ?? []).map(c => ({ key: c.key, label: c.label || '(unnamed column)' })),
+  ]
+}
+
+/** The columns picked for this account's Breach / Anomalies tables — shared by
+ *  the Dashboard page's table and the Overview card's, so the two always match.
+ *  A picked custom column that has since been deleted simply drops out. */
 export function breachTableExtraCols(ds: DataSourceConfig): { key: string; label: string }[] {
-  return (ds.agentExtraCols ?? []).filter(c => c.showInBreachTable).map(c => ({ key: c.key, label: c.label }))
+  const picked = new Set(Array.isArray(ds.breachTableCols)
+    ? ds.breachTableCols
+    // Not set with the gear yet — the older "Also show in Breach / Anomalies"
+    // ticks on the custom columns themselves.
+    : (ds.agentExtraCols ?? []).filter(c => c.showInBreachTable).map(c => c.key))
+  return breachColumnChoices(ds).filter(c => picked.has(c.key))
 }
 
 // ── Section the Breach / Anomalies table by agent group ──────────────────────

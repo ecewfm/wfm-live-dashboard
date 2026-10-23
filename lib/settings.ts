@@ -229,6 +229,25 @@ export async function saveDashboardLayout(accountId: string, layout: DashboardLa
   }
 }
 
+// ── Save just the data source config ─────────────────────────────────────────
+// For changes made OUTSIDE the Settings modal that live in data_source — the
+// Breach / Anomalies tables' gear (DataSourceConfig.breachTableCols). Same idea
+// as saveDashboardLayout: the upsert only touches data_source, so thresholds,
+// Cliq and every other column are left exactly as they are.
+export async function saveDataSourceOnly(accountId: string, ds: DataSourceConfig): Promise<boolean> {
+  saveDataSource(accountId, ds)
+  try {
+    const { error } = await supabase
+      .from('wfm_settings')
+      .upsert({ id: accountId, account_id: accountId, data_source: ds, updated_at: new Date().toISOString() })
+    if (error) { console.warn('[settings] data source save error:', error.message); return false }
+    return true
+  } catch (e) {
+    console.warn('[settings] data source save failed:', e)
+    return false
+  }
+}
+
 // ── Save just the Overview header colors (band background + title text) ─────
 // Separate from saveSettings — colors save immediately on pick, not gated
 // behind the Settings modal's Save button. Requires sql/header_colors.sql to

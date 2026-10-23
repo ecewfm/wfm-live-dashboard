@@ -582,6 +582,27 @@ project (no `zoho_activity` here), so this app pulls Zoho itself.
   OUR consenting Zoho user can read these reports (and the Honduras app) shows up
   in the "Pull now" log. Optional env: `ZOHO_HONDURAS_ENABLED=false`.
 
+## Breach / Anomalies columns — the table's gear (2026-10-23)
+
+Per the user: a gear on the Breach / Anomalies header (Dashboard page panel AND
+each Overview card) opens `components/BreachColumnsModal.tsx`, to pick which
+Agent Status columns appear next to each breach. Choices = `breachColumnChoices(ds)`
+in `lib/breaches.ts`: the built-in Agent Status / Duration (`BREACH_COL_STATUS` /
+`BREACH_COL_DURATION`) plus every custom `AgentExtraColumn`, in Agent Status order.
+
+- Saved as `DataSourceConfig.breachTableCols` (in the data_source JSONB — no
+  migration) via `saveDataSourceOnly()` in `lib/settings.ts`, which writes ONLY
+  `data_source`. Both tables read it through `breachTableExtraCols(ds)` — never
+  build the column list anywhere else.
+- The values come from `BreachRow.extras`, stamped on every agent breach row by
+  `buildBreaches()` (status, duration exactly as the Agent Status table shows it,
+  and each custom column). KPI breach rows have none → "—".
+- Older per-column `AgentExtraColumn.showInBreachTable` ticks (the Settings
+  checkboxes this replaced) still apply until the gear is first saved for that
+  account; saving drops them.
+- Gear shown only to `can.editSettings` roles (superuser / RTA) — it changes what
+  everyone watching the account sees. Everyone sees the chosen columns.
+
 ## `lib/settings.ts` load/save silently dropping fields (fixed 2026-09-28)
 
 Found while chasing why `rta_sites`/`rta_account_name` kept reverting to
