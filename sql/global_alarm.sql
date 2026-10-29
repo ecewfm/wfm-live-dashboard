@@ -1,5 +1,6 @@
 -- sql/global_alarm.sql
--- Global breach alarm: one sound, set by a super user, used for every account.
+-- Global breach alarm, set by a super user, used for every account: one sound
+-- for critical breaches and (optionally) another for warnings.
 -- See lib/globalAlarm.ts for the rules, components/AlarmTab.tsx for the UI.
 --
 -- Replaces the per-account `wfm_settings.alarm_sound` idea in practice: that
@@ -19,7 +20,7 @@ create table if not exists wfm_alarm_settings (
   sound_path      text,        -- its path in the bucket, so it can be deleted on replace
   sound_name      text,        -- original filename, for display
   volume          real not null default 0.8 check (volume between 0 and 1),
-  -- 'all' = warning + critical breaches; 'critical' = critical only.
+  -- 'all' = warning + critical breaches ring; 'critical' = critical only.
   severity        text not null default 'all' check (severity in ('all', 'critical')),
   -- 'once'      = one ring per change, then silence (min_gap_seconds apart);
   -- 'until_ack' = rings over and over, with a prompt, until someone on that
@@ -39,6 +40,22 @@ insert into wfm_alarm_settings (id) values ('global') on conflict (id) do nothin
 alter table wfm_alarm_settings
   add column if not exists ring_mode text not null default 'until_ack'
   check (ring_mode in ('once', 'until_ack'));
+
+-- Upgrade (2026-10-26): a separate sound for WARNING breaches. The sound_*,
+-- builtin_key and volume columns above are the CRITICAL breaches' sound.
+-- warning_sound_kind 'same' = warnings use the critical sound — how it worked
+-- before, and the default, so nothing changes until someone picks one.
+-- An uploaded warning sound lives in the same bucket (alarm-warning-*.ext).
+-- Safe to re-run, like the one above.
+alter table wfm_alarm_settings
+  add column if not exists warning_sound_kind  text not null default 'same'
+    check (warning_sound_kind in ('same', 'builtin', 'upload')),
+  add column if not exists warning_builtin_key text not null default 'chime',
+  add column if not exists warning_sound_url   text,
+  add column if not exists warning_sound_path  text,
+  add column if not exists warning_sound_name  text,
+  add column if not exists warning_volume      real not null default 0.8
+    check (warning_volume between 0 and 1);
 
 -- Every dashboard reads this (that's how each screen learns the sound), so
 -- reads are open. Writes are NOT: no write policy exists, and the grants are

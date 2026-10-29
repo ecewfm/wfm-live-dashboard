@@ -1,6 +1,12 @@
 // lib/globalAlarm.ts
-// The global breach alarm: one sound, configured by a super user (Settings →
-// Alarm), that every signed-in dashboard plays for the accounts it can see.
+// The global breach alarm, configured by a super user (Settings → Alarm), that
+// every signed-in dashboard plays for the accounts it can see.
+//
+// WHICH sound (per the user, 2026-10-26): critical and warning breaches each
+// have their own sound and volume — alarmSoundFor(). The original single sound
+// is the CRITICAL one (same columns); warnings use it too until someone picks
+// a warning sound ('same', the default). When both are waiting on the prompt,
+// the critical sound plays.
 //
 // WHEN IT RINGS — only when a breach actually CHANGES:
 //   - a KPI breach whose value changes while still breaching
@@ -38,12 +44,20 @@ import { playAlarm, stopAllSounds, audioAllowed, unlockAudio, onAudioStateChange
 
 export interface GlobalAlarmSettings {
   enabled: boolean
+  // ── Critical breaches' sound (also the warning sound while warningSoundKind is 'same')
   soundKind: 'builtin' | 'upload'
   builtinKey: string
   soundUrl: string | null
   soundName: string | null
   volume: number
+  /** 'all' = warning breaches ring too; 'critical' = critical only. */
   severity: 'all' | 'critical'
+  // ── Warning breaches' sound. 'same' = the critical sound above.
+  warningSoundKind: 'same' | 'builtin' | 'upload'
+  warningBuiltinKey: string
+  warningSoundUrl: string | null
+  warningSoundName: string | null
+  warningVolume: number
   /** 'once' = one ring per change; 'until_ack' = keeps ringing until acknowledged. */
   ringMode: RingMode
   /** 'once': minimum gap between rings. 'until_ack': quiet time after acknowledging. */
@@ -51,10 +65,13 @@ export interface GlobalAlarmSettings {
 }
 
 export type RingMode = 'once' | 'until_ack'
+export type AlarmSeverity = 'warning' | 'critical'
 
 export const DEFAULT_ALARM_SETTINGS: GlobalAlarmSettings = {
   enabled: false, soundKind: 'builtin', builtinKey: 'siren', soundUrl: null, soundName: null,
-  volume: 0.8, severity: 'all', ringMode: 'until_ack', minGapSeconds: 30,
+  volume: 0.8, severity: 'all',
+  warningSoundKind: 'same', warningBuiltinKey: 'chime', warningSoundUrl: null, warningSoundName: null, warningVolume: 0.8,
+  ringMode: 'until_ack', minGapSeconds: 30,
 }
 
 /** Read the one global row. Falls back to "off" if the table isn't migrated yet. */
@@ -62,14 +79,23 @@ export async function loadAlarmSettings(): Promise<GlobalAlarmSettings> {
   try {
     const { data, error } = await supabase.from('wfm_alarm_settings').select('*').eq('id', 'global').maybeSingle()
     if (error || !data) return DEFAULT_ALARM_SETTINGS
+    const volume = typeof data.volume === 'number' ? data.volume : 0.8
     return {
       enabled: !!data.enabled,
       soundKind: data.sound_kind === 'upload' && data.sound_url ? 'upload' : 'builtin',
       builtinKey: data.builtin_key || 'siren',
       soundUrl: data.sound_url ?? null,
       soundName: data.sound_name ?? null,
-      volume: typeof data.volume === 'number' ? data.volume : 0.8,
+      volume,
       severity: data.severity === 'critical' ? 'critical' : 'all',
+      // Missing columns (SQL not upgraded yet) → 'same': warnings sound like
+      // criticals, exactly as before there were two sounds.
+      warningSoundKind: data.warning_sound_kind === 'upload' ? (data.warning_sound_url ? 'upload' : 'builtin')
+        : data.warning_sound_kind === 'builtin' ? 'builtin' : 'same',
+      warningBuiltinKey: data.warning_builtin_key || 'chime',
+      warningSoundUrl: data.warning_sound_url ?? null,
+      warningSoundName: data.warning_sound_name ?? null,
+      warningVolume: typeof data.warning_volume === 'number' ? data.warning_volume : volume,
       // Missing column (SQL not upgraded yet) or an unknown value → the default.
       ringMode: data.ring_mode === 'once' ? 'once' : 'until_ack',
       minGapSeconds: Number.isFinite(data.min_gap_seconds) ? data.min_gap_seconds : 30,
@@ -79,8 +105,33 @@ export async function loadAlarmSettings(): Promise<GlobalAlarmSettings> {
   }
 }
 
+/** One sound, ready to play: what alarmSoundFor() hands the players below. */
+export interface AlarmSound {
+  kind: 'builtin' | 'upload'
+  builtinKey: string    // also the fallback when an uploaded file won't play
+  url: string | null
+  volume: number
+}
+
+/** The sound for a breach of this severity. */
+export function alarmSoundFor(s: GlobalAlarmSettings, severity: AlarmSeverity): AlarmSound {
+  if (severity === 'warning' && s.warningSoundKind !== 'same') {
+    const upload = s.warningSoundKind === 'upload' && !!s.warningSoundUrl
+    return { kind: upload ? 'upload' : 'builtin', builtinKey: s.warningBuiltinKey, url: upload ? s.warningSoundUrl : null, volume: s.warningVolume }
+  }
+  const upload = s.soundKind === 'upload' && !!s.soundUrl
+  return { kind: upload ? 'upload' : 'builtin', builtinKey: s.builtinKey, url: upload ? s.soundUrl : null, volume: s.volume }
+}
+
+/** 'critical' if any of these is critical — that's the sound that plays. */
+export function topSeverity(items: { severity: AlarmSeverity }[]): AlarmSeverity {
+  return items.some(i => i.severity === 'critical') ? 'critical' : 'warning'
+}
+
 // ── The rule ─────────────────────────────────────────────────────────────────
-export interface AlarmEvent { accountId: string; changes: BreachChange[] }
+/** A change, with the severity of the breach it's about (picks the sound). */
+export type AlarmChange = BreachChange & { severity: AlarmSeverity }
+export interface AlarmEvent { accountId: string; changes: AlarmChange[] }
 
 /** Per-account memory between evaluations. */
 export interface AlarmBaseline {
@@ -138,10 +189,13 @@ export function evaluateAlarm(
 
     // First sighting of the account sets the baseline without ringing.
     if (prev && changes.length) {
-      const sevOf = (c: BreachChange) => c.kind === 'kpi'
+      // Every change comes from a row in `rows`; 'critical' if it somehow
+      // can't be found, so a doubt rings the louder alarm, not none.
+      const sevOf = (c: BreachChange): AlarmSeverity => (c.kind === 'kpi'
         ? rows.find(r => r.kind === 'kpi' && r.entity === c.entity && r.metric === c.metric)?.severity
-        : rows.find(r => r.kind === 'agent' && r.entity === c.agent && r.metric === c.metric)?.severity
-      const ringing = severity === 'all' ? changes : changes.filter(c => sevOf(c) === 'critical')
+        : rows.find(r => r.kind === 'agent' && r.entity === c.agent && r.metric === c.metric)?.severity) ?? 'critical'
+      const tagged: AlarmChange[] = changes.map(c => ({ ...c, severity: sevOf(c) }))
+      const ringing = severity === 'all' ? tagged : tagged.filter(c => c.severity === 'critical')
       if (ringing.length) events.push({ accountId, changes: ringing })
     }
 
@@ -174,8 +228,9 @@ export function describeEvent(e: AlarmEvent, name: (id: string) => string): stri
 }
 
 // ── Waiting for an acknowledgement ──────────────────────────────────────────
-/** Settings → Alarm's "Preview on this screen" fires this (detail: saved settings). */
+/** Settings → Alarm's "Preview critical / warning" buttons fire this. */
 export const ALARM_PREVIEW_EVENT = 'wfm-alarm-preview'
+export interface AlarmPreview { settings: GlobalAlarmSettings; severity: AlarmSeverity }
 /** Account id used for the preview's sample line. */
 export const PREVIEW_ACCOUNT = '__alarm_preview__'
 
@@ -183,9 +238,10 @@ export const PREVIEW_ACCOUNT = '__alarm_preview__'
 export interface PendingAlarm {
   key: string
   accountId: string
-  /** The latest change. For a KPI, `previous` is the value from BEFORE the
-   *  first change, so the line reads "85% → 70%" across several updates. */
-  change: BreachChange
+  /** The latest change (and its latest severity). For a KPI, `previous` is
+   *  the value from BEFORE the first change, so the line reads "85% → 70%"
+   *  across several updates. */
+  change: AlarmChange
   firstAt: number
   lastAt: number
 }
@@ -205,7 +261,7 @@ export function mergePending(pending: PendingAlarm[], events: AlarmEvent[], now:
       const i = out.findIndex(p => p.key === key)
       if (i < 0) { out.push({ key, accountId: e.accountId, change: c, firstAt: now, lastAt: now }); continue }
       const was = out[i].change
-      const change: BreachChange = c.kind === 'kpi' && was.kind === 'kpi'
+      const change: AlarmChange = c.kind === 'kpi' && was.kind === 'kpi'
         ? { ...c, previous: was.previous ?? was.value }
         : c
       out[i] = { ...out[i], change, lastAt: now }
@@ -215,17 +271,22 @@ export function mergePending(pending: PendingAlarm[], events: AlarmEvent[], now:
 }
 
 // ── Playing it ───────────────────────────────────────────────────────────────
-let uploaded: HTMLAudioElement | null = null
-let uploadedSrc: string | null = null
+// One preloaded <audio> per uploaded file (critical and warning can each have
+// one), so a sound plays without a fetch delay.
+const uploaded = new Map<string, HTMLAudioElement>()
 
-/** Keep one preloaded <audio> per uploaded file, so it plays without a fetch delay. */
+function audioFor(url: string): HTMLAudioElement {
+  let a = uploaded.get(url)
+  if (!a) { a = new Audio(url); a.preload = 'auto'; uploaded.set(url, a) }
+  return a
+}
+
+/** Preload every uploaded sound these settings use, and forget the rest. */
 export function preloadAlarm(s: GlobalAlarmSettings): void {
   if (typeof window === 'undefined') return
-  if (s.soundKind !== 'upload' || !s.soundUrl) { uploaded = null; uploadedSrc = null; return }
-  if (uploadedSrc === s.soundUrl) return
-  uploaded = new Audio(s.soundUrl)
-  uploaded.preload = 'auto'
-  uploadedSrc = s.soundUrl
+  const urls = new Set((['critical', 'warning'] as const).map(sev => alarmSoundFor(s, sev).url).filter((u): u is string => !!u))
+  for (const [url, a] of uploaded) if (!urls.has(url)) { a.pause(); uploaded.delete(url) }
+  for (const url of urls) audioFor(url)
 }
 
 /**
@@ -234,11 +295,10 @@ export function preloadAlarm(s: GlobalAlarmSettings): void {
  */
 export type PlayResult = 'played' | 'blocked' | 'broken'
 
-async function playUploaded(s: GlobalAlarmSettings): Promise<PlayResult> {
-  preloadAlarm(s)
-  const a = uploaded!
+async function playUploaded(sound: AlarmSound): Promise<PlayResult> {
+  const a = audioFor(sound.url!)
   try {
-    a.volume = Math.min(1, Math.max(0, s.volume))
+    a.volume = Math.min(1, Math.max(0, sound.volume))
     a.currentTime = 0
     await a.play()
     return 'played'
@@ -247,10 +307,10 @@ async function playUploaded(s: GlobalAlarmSettings): Promise<PlayResult> {
   }
 }
 
-/** Play the alarm ONCE (Settings → Alarm's "Test sound"). */
-export async function playGlobalAlarm(s: GlobalAlarmSettings): Promise<PlayResult> {
-  if (s.soundKind === 'upload' && s.soundUrl) return playUploaded(s)
-  return playAlarm(s.builtinKey, s.volume) ? 'played' : 'blocked'
+/** Play a sound ONCE (Settings → Alarm's "Test sound"). */
+export async function playGlobalAlarm(sound: AlarmSound): Promise<PlayResult> {
+  if (sound.kind === 'upload' && sound.url) return playUploaded(sound)
+  return playAlarm(sound.builtinKey, sound.volume) ? 'played' : 'blocked'
 }
 
 /**
@@ -258,12 +318,12 @@ export async function playGlobalAlarm(s: GlobalAlarmSettings): Promise<PlayResul
  * "Test sound" uses to tell you a file is broken), a broken uploaded file falls
  * back to the built-in sound here — a real alarm must never be silent.
  */
-export async function ringOnce(s: GlobalAlarmSettings): Promise<'played' | 'blocked'> {
-  if (s.soundKind === 'upload' && s.soundUrl) {
-    const r = await playUploaded(s)
+export async function ringOnce(sound: AlarmSound): Promise<'played' | 'blocked'> {
+  if (sound.kind === 'upload' && sound.url) {
+    const r = await playUploaded(sound)
     if (r !== 'broken') return r
   }
-  return playAlarm(s.builtinKey, s.volume) ? 'played' : 'blocked'
+  return playAlarm(sound.builtinKey, sound.volume) ? 'played' : 'blocked'
 }
 
 // ── Looping until acknowledged ──────────────────────────────────────────────
@@ -286,7 +346,7 @@ let loopTimer: ReturnType<typeof setTimeout> | null = null
  * falls back to the built-in sound: a broken upload must never mean silence.
  * `onResult` reports each attempt, so the page can show "sound is blocked".
  */
-export function startAlarmLoop(s: GlobalAlarmSettings, onResult?: (r: PlayResult) => void): void {
+export function startAlarmLoop(sound: AlarmSound, onResult?: (r: PlayResult) => void): void {
   stopAlarmLoop()
   const id = current = ++loopSeq
   const alive = () => current === id
@@ -294,15 +354,15 @@ export function startAlarmLoop(s: GlobalAlarmSettings, onResult?: (r: PlayResult
   const tick = async () => {
     if (!alive()) return
     let r: PlayResult = 'broken'
-    if (s.soundKind === 'upload' && s.soundUrl) r = await playUploaded(s)
+    if (sound.kind === 'upload' && sound.url) r = await playUploaded(sound)
     if (!alive()) { if (current === 0) stopAlarmLoop(); return }   // acknowledged while play() was starting
     if (r === 'played') {
       // Next play once this one finishes.
-      uploaded!.onended = () => again(UPLOAD_PAUSE_MS)
+      audioFor(sound.url!).onended = () => again(UPLOAD_PAUSE_MS)
     } else if (r === 'blocked') {
       again(BLOCKED_RETRY_MS)
     } else {
-      r = playAlarm(s.builtinKey, s.volume) ? 'played' : 'blocked'
+      r = playAlarm(sound.builtinKey, sound.volume) ? 'played' : 'blocked'
       again(r === 'played' ? BUILTIN_REPEAT_MS : BLOCKED_RETRY_MS)
     }
     onResult?.(r)
@@ -314,7 +374,7 @@ export function startAlarmLoop(s: GlobalAlarmSettings, onResult?: (r: PlayResult
 export function stopAlarmLoop(): void {
   current = 0
   if (loopTimer) { clearTimeout(loopTimer); loopTimer = null }
-  if (uploaded) { uploaded.onended = null; uploaded.pause(); try { uploaded.currentTime = 0 } catch {} }
+  for (const a of uploaded.values()) { a.onended = null; a.pause(); try { a.currentTime = 0 } catch {} }
   stopAllSounds()
 }
 

@@ -2,44 +2,60 @@
 
 // components/AlarmTab.tsx
 // Settings → Alarm (super users only): the ONE breach alarm used by every
-// account. Rules live in lib/globalAlarm.ts; saving goes through
-// app/api/alarm (settings) and app/api/alarm/sound (the uploaded file), both
-// of which re-check that the caller is a super user.
+// account — with its own sound for critical breaches and for warnings (per the
+// user, 2026-10-26). Rules live in lib/globalAlarm.ts; saving goes through
+// app/api/alarm (settings) and app/api/alarm/sound (the uploaded files, one
+// per severity), both of which re-check that the caller is a super user.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { supabase } from '@/lib/supabase'
 import { apiFetch } from '@/lib/authClient'
 import { ALARM_SOUNDS } from '@/lib/alarmSounds'
-import { loadAlarmSettings, playGlobalAlarm, DEFAULT_ALARM_SETTINGS, ALARM_PREVIEW_EVENT, type GlobalAlarmSettings } from '@/lib/globalAlarm'
+import {
+  loadAlarmSettings, playGlobalAlarm, alarmSoundFor, DEFAULT_ALARM_SETTINGS, ALARM_PREVIEW_EVENT,
+  type GlobalAlarmSettings, type AlarmSeverity, type AlarmPreview,
+} from '@/lib/globalAlarm'
 
 const BUILTINS = ALARM_SOUNDS.filter(s => s.key !== 'none')
+
+/** One severity's sound fields in the settings — critical uses the original ones. */
+const SOUND_FIELDS = {
+  critical: ['soundKind', 'soundUrl', 'soundName'],
+  warning:  ['warningSoundKind', 'warningSoundUrl', 'warningSoundName'],
+} as const
 
 export default function AlarmTab() {
   const [saved, setSaved] = useState<GlobalAlarmSettings>(DEFAULT_ALARM_SETTINGS)
   const [draft, setDraft] = useState<GlobalAlarmSettings>(DEFAULT_ALARM_SETTINGS)
   const [loading, setLoading] = useState(true)
   const [setupMissing, setSetupMissing] = useState(false)
-  // Table exists but predates the ring_mode column (SQL not re-run yet).
+  // Table exists but predates a newer column (SQL not re-run yet).
   const [ringModeMissing, setRingModeMissing] = useState(false)
+  const [warningMissing, setWarningMissing] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const fileRef = useRef<HTMLInputElement>(null)
 
-  // keepDraft: after an upload/remove, refresh only the SOUND fields of the
-  // draft, so other unsaved edits (on/off, volume…) aren't thrown away.
-  const load = useCallback(async (keepDraft = false) => {
-    if (!keepDraft) setLoading(true)
+  // keepDraftExcept: after an upload/remove, refresh only THAT severity's
+  // sound fields in the draft, so other unsaved edits aren't thrown away.
+  const load = useCallback(async (keepDraftExcept?: AlarmSeverity) => {
+    if (!keepDraftExcept) setLoading(true)
     // A direct check, because loadAlarmSettings() deliberately hides errors
     // (dashboards just treat a missing table as "alarm off").
     const { error: e } = await supabase.from('wfm_alarm_settings').select('id').limit(1)
     setSetupMissing(!!e)
-    // A separate probe for the newer column, so an older table still works.
-    const { error: e2 } = e ? { error: null } : await supabase.from('wfm_alarm_settings').select('ring_mode').limit(1)
-    setRingModeMissing(!!e2)
+    // Separate probes for the newer columns, so an older table still works.
+    const probe = async (col: string) => e ? false : !!(await supabase.from('wfm_alarm_settings').select(col).limit(1)).error
+    setRingModeMissing(await probe('ring_mode'))
+    setWarningMissing(await probe('warning_sound_kind'))
     const s = await loadAlarmSettings()
     setSaved(s)
-    setDraft(d => keepDraft ? { ...d, soundKind: s.soundKind, soundUrl: s.soundUrl, soundName: s.soundName } : s)
+    setDraft(d => {
+      if (!keepDraftExcept) return s
+      const next = { ...d }
+      for (const f of SOUND_FIELDS[keepDraftExcept]) (next as Record<string, unknown>)[f] = s[f]
+      return next
+    })
     setLoading(false)
   }, [])
   useEffect(() => { load() }, [load])
@@ -56,13 +72,16 @@ export default function AlarmTab() {
       body: JSON.stringify({
         enabled: draft.enabled, soundKind: draft.soundKind, builtinKey: draft.builtinKey,
         volume: draft.volume, severity: draft.severity, minGapSeconds: draft.minGapSeconds,
-        // Not sent while the column is missing — the save would be rejected over it.
+        // Not sent while their columns are missing — the save would be rejected over them.
         ...(ringModeMissing ? {} : { ringMode: draft.ringMode }),
+        ...(warningMissing ? {} : {
+          warningSoundKind: draft.warningSoundKind, warningBuiltinKey: draft.warningBuiltinKey, warningVolume: draft.warningVolume,
+        }),
       }),
     })
     await load()
     if (r?.needsMigration) {
-      setError('Saved, except how it rings: the database needs the updated sql/global_alarm.sql first. Run it in the Supabase SQL editor, then save again.')
+      setError('Saved, except the newer settings: the database needs the updated sql/global_alarm.sql first. Run it in the Supabase SQL editor, then save again.')
     } else {
       setNotice(draft.enabled
         ? 'Saved. Every open dashboard picks this up within about two minutes (or straight away on reload).'
@@ -70,23 +89,25 @@ export default function AlarmTab() {
     }
   })
 
-  const upload = (file: File) => run(async () => {
+  const slotQuery = (slot: AlarmSeverity) => slot === 'warning' ? '?slot=warning' : ''
+
+  const upload = (slot: AlarmSeverity, file: File) => run(async () => {
     const fd = new FormData()
     fd.append('file', file)
-    const r = await apiFetch('/api/alarm/sound', { method: 'POST', body: fd })
-    await load(true)
-    setNotice(`Uploaded "${r.name}". It's now the alarm sound.`)
+    const r = await apiFetch(`/api/alarm/sound${slotQuery(slot)}`, { method: 'POST', body: fd })
+    await load(slot)
+    setNotice(`Uploaded "${r.name}". It's now the ${slot} breach sound.`)
   })
 
-  const removeUpload = () => run(async () => {
-    await apiFetch('/api/alarm/sound', { method: 'DELETE' })
-    await load(true)
-    setNotice('Uploaded sound removed — using the built-in sound.')
+  const removeUpload = (slot: AlarmSeverity) => run(async () => {
+    await apiFetch(`/api/alarm/sound${slotQuery(slot)}`, { method: 'DELETE' })
+    await load(slot)
+    setNotice(`Uploaded ${slot} sound removed — using a built-in sound.`)
   })
 
-  const test = async () => {
+  const test = async (slot: AlarmSeverity) => {
     setError(null)
-    const r = await playGlobalAlarm({ ...draft, enabled: true })
+    const r = await playGlobalAlarm(alarmSoundFor(draft, slot))
     if (r === 'blocked') setError('The browser blocked the sound. Click anywhere on the page once, then try again.')
     if (r === 'broken')  setError('That file couldn\'t be played. Try another MP3 or WAV, or use a built-in sound. (If this happens during a real alarm, the built-in sound plays instead.)')
   }
@@ -94,12 +115,13 @@ export default function AlarmTab() {
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved)
 
   // The real prompt + looping sound, on this screen, with the SAVED settings.
-  const preview = () => {
+  const preview = (severity: AlarmSeverity) => {
     setError(null); setNotice(null)
-    window.dispatchEvent(new CustomEvent(ALARM_PREVIEW_EVENT, { detail: saved }))
+    window.dispatchEvent(new CustomEvent<AlarmPreview>(ALARM_PREVIEW_EVENT, { detail: { settings: saved, severity } }))
   }
   const previewBlockedWhy = !saved.enabled ? 'Turn the alarm on and save first.' : dirty ? 'Save your changes first.' : null
   const keepRinging = draft.ringMode === 'until_ack'
+  const warningsRing = draft.severity === 'all'
 
   if (loading) return <p className="sm-desc">Loading…</p>
 
@@ -107,7 +129,7 @@ export default function AlarmTab() {
     <div>
       <div className="sm-section-title">GLOBAL BREACH ALARM</div>
       <p className="sm-desc">
-        One alarm sound for every account. It plays on every signed-in dashboard, for the accounts that person can see.
+        One alarm for every account, with its own sound for critical breaches and for warnings. It plays on every signed-in dashboard, for the accounts that person can see.
       </p>
 
       {setupMissing && (
@@ -127,67 +149,47 @@ export default function AlarmTab() {
         Alarm {draft.enabled ? 'on' : 'off'} for all accounts
       </label>
 
-      {/* ── Sound ───────────────────────────────────────────────────────── */}
-      <div className="ds-mini-label">Sound</div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, margin: '6px 0 18px' }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
-          <input type="radio" name="alarm-kind" checked={draft.soundKind === 'builtin'}
-                 onChange={() => setDraft({ ...draft, soundKind: 'builtin' })} />
-          Built-in
-          <select className="ds-select" value={draft.builtinKey} disabled={draft.soundKind !== 'builtin'}
-                  onChange={e => setDraft({ ...draft, builtinKey: e.target.value })}>
-            {BUILTINS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-          </select>
-        </label>
-
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, flexWrap: 'wrap' }}>
-          <input type="radio" name="alarm-kind" checked={draft.soundKind === 'upload'} disabled={!saved.soundUrl}
-                 onChange={() => setDraft({ ...draft, soundKind: 'upload' })} />
-          Uploaded file
-          {saved.soundUrl
-            ? <span className="sm-metric-sub">{saved.soundName || 'custom sound'}</span>
-            : <span className="sm-metric-sub">none uploaded yet</span>}
-          <button type="button" className="sm-btn-cancel" style={{ padding: '4px 10px', fontSize: 12 }}
-                  disabled={busy || setupMissing} onClick={() => fileRef.current?.click()}>
-            <i className="bx bx-upload" /> {saved.soundUrl ? 'Replace' : 'Upload'}…
-          </button>
-          {saved.soundUrl && (
-            <button type="button" className="sm-btn-cancel" style={{ padding: '4px 10px', fontSize: 12 }}
-                    disabled={busy} onClick={removeUpload}>
-              <i className="bx bx-trash" /> Remove
-            </button>
-          )}
-          <input ref={fileRef} type="file" hidden
-                 accept="audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/mp4,audio/aac,.mp3,.wav,.ogg,.m4a,.aac,.webm"
-                 onChange={e => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = '' }} />
-        </label>
-        <span className="sm-desc" style={{ margin: 0 }}>MP3, WAV, OGG or M4A, up to 2 MB. Short sounds (1–3 seconds) work best.</span>
+      {/* ── Critical breaches ───────────────────────────────────────────── */}
+      <div className="alarm-sev-block crit">
+        <div className="alarm-sev-head"><span className="badge-crit">Critical</span> breaches</div>
+        <SoundChoice slot="critical" draft={draft} saved={saved} setDraft={setDraft} busy={busy} disabled={setupMissing}
+                     onUpload={f => upload('critical', f)} onRemove={() => removeUpload('critical')} />
+        <VolumeRow label="Volume" value={draft.volume} onChange={v => setDraft(d => ({ ...d, volume: v }))} onTest={() => test('critical')} />
       </div>
 
-      {/* ── Volume + test ───────────────────────────────────────────────── */}
-      <div className="ds-mini-label">Volume — {Math.round(draft.volume * 100)}%</div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '6px 0 18px' }}>
-        <input type="range" min={0} max={100} step={5} value={Math.round(draft.volume * 100)}
-               style={{ flex: 1, maxWidth: 260 }}
-               onChange={e => setDraft({ ...draft, volume: Number(e.target.value) / 100 })} />
-        <button type="button" className="sm-btn-cancel" style={{ padding: '5px 12px', fontSize: 12 }} onClick={test}>
-          <i className="bx bx-play" /> Test sound
-        </button>
-      </div>
-
-      {/* ── When ────────────────────────────────────────────────────────── */}
-      <div className="ds-mini-label">Ring for</div>
-      <div style={{ display: 'flex', gap: 16, margin: '6px 0 18px', fontSize: 13 }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <input type="radio" name="alarm-sev" checked={draft.severity === 'all'}
-                 onChange={() => setDraft({ ...draft, severity: 'all' })} />
-          Warning and critical breaches
+      {/* ── Warning breaches ────────────────────────────────────────────── */}
+      <div className="alarm-sev-block warn">
+        <div className="alarm-sev-head"><span className="badge-warn">Warning</span> breaches</div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 10px', fontSize: 13, fontWeight: 600 }}>
+          <span className="sm-toggle">
+            <input type="checkbox" checked={warningsRing} disabled={setupMissing}
+                   onChange={e => setDraft({ ...draft, severity: e.target.checked ? 'all' : 'critical' })} />
+            <span className="sm-toggle-track" />
+          </span>
+          Ring for warning breaches too
         </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <input type="radio" name="alarm-sev" checked={draft.severity === 'critical'}
-                 onChange={() => setDraft({ ...draft, severity: 'critical' })} />
-          Critical only
-        </label>
+        {!warningsRing ? (
+          <p className="sm-desc" style={{ margin: 0 }}>Off — only critical breaches ring.</p>
+        ) : (
+          <>
+            <SoundChoice slot="warning" draft={draft} saved={saved} setDraft={setDraft} busy={busy}
+                         disabled={setupMissing} sameOnly={warningMissing}
+                         onUpload={f => upload('warning', f)} onRemove={() => removeUpload('warning')} />
+            {warningMissing && !setupMissing && (
+              <div className="auth-note auth-note-err" style={{ margin: '0 0 12px' }}>
+                A separate warning sound needs a small database update. Run the updated <code>sql/global_alarm.sql</code> in the Supabase SQL editor (it&apos;s safe to run again), then reopen this tab. Until then warnings use the critical sound.
+              </div>
+            )}
+            {draft.warningSoundKind === 'same' || warningMissing
+              ? <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '0 0 4px' }}>
+                  <span className="sm-metric-sub">Same sound and volume as critical breaches.</span>
+                  <button type="button" className="sm-btn-cancel" style={{ padding: '5px 12px', fontSize: 12 }} onClick={() => test('warning')}>
+                    <i className="bx bx-play" /> Test sound
+                  </button>
+                </div>
+              : <VolumeRow label="Volume" value={draft.warningVolume} onChange={v => setDraft(d => ({ ...d, warningVolume: v }))} onTest={() => test('warning')} />}
+          </>
+        )}
       </div>
 
       {/* ── How it rings ────────────────────────────────────────────────── */}
@@ -229,6 +231,7 @@ export default function AlarmTab() {
         <ul style={{ margin: '6px 0 0 18px', padding: 0, lineHeight: 1.6 }}>
           <li><b>KPI breaches</b> — when the value <i>changes</i> while still breaching (SLA 85% → 74% rings; staying at 85% doesn&apos;t).</li>
           <li><b>Agent status</b> — when a <i>new</i> agent starts breaching, or a new aux/status starts breaching. An agent&apos;s time climbing doesn&apos;t ring.</li>
+          <li><b>Which sound</b> — a critical breach plays the critical sound, a warning the warning sound. When both are waiting, the critical sound plays; a breach that turns from warning to critical switches to the critical sound.</li>
           {keepRinging
             ? <li><b>It keeps ringing until acknowledged.</b> A prompt lists what changed; it rings over and over until someone presses <b>Acknowledge</b> (or the bell) on that screen. Each screen acknowledges for itself. Further changes join the same prompt.</li>
             : <li><b>It rings once per change.</b> One ring, then silence until the next change — and never more often than the minimum gap above.</li>}
@@ -245,12 +248,17 @@ export default function AlarmTab() {
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
         <button type="button" className="sm-btn-cancel" style={{ padding: '6px 12px', fontSize: 12 }}
-                disabled={!!previewBlockedWhy || busy} onClick={preview}>
-          <i className="bx bx-alarm" /> Preview on this screen
+                disabled={!!previewBlockedWhy || busy} onClick={() => preview('critical')}>
+          <i className="bx bx-alarm" /> Preview critical
+        </button>
+        <button type="button" className="sm-btn-cancel" style={{ padding: '6px 12px', fontSize: 12 }}
+                disabled={!!previewBlockedWhy || busy || saved.severity !== 'all'} onClick={() => preview('warning')}
+                title={saved.severity !== 'all' ? 'Warnings don’t ring (saved setting)' : undefined}>
+          <i className="bx bx-alarm" /> Preview warning
         </button>
         <span className="sm-metric-sub">
           {previewBlockedWhy ?? (saved.ringMode === 'until_ack'
-            ? 'Shows the real prompt and rings until you press Acknowledge.'
+            ? 'Shows the real prompt on this screen and rings until you press Acknowledge.'
             : 'Plays the sound once, like a real alarm.')}
         </span>
       </div>
@@ -264,5 +272,91 @@ export default function AlarmTab() {
         </button>
       )}
     </div>
+  )
+}
+
+// ── One severity's sound: built-in / uploaded file (/ same as critical) ─────
+function SoundChoice({ slot, draft, saved, setDraft, busy, disabled, sameOnly, onUpload, onRemove }: {
+  slot: AlarmSeverity
+  draft: GlobalAlarmSettings
+  saved: GlobalAlarmSettings
+  setDraft: Dispatch<SetStateAction<GlobalAlarmSettings>>
+  busy: boolean
+  disabled: boolean
+  /** Warning only, while its columns aren't migrated: just "same as critical". */
+  sameOnly?: boolean
+  onUpload: (f: File) => void
+  onRemove: () => void
+}) {
+  const fileRef = useRef<HTMLInputElement>(null)
+  const w = slot === 'warning'
+  const kind = w ? (sameOnly ? 'same' : draft.warningSoundKind) : draft.soundKind
+  const builtinKey = w ? draft.warningBuiltinKey : draft.builtinKey
+  const uploadedUrl = w ? saved.warningSoundUrl : saved.soundUrl
+  const uploadedName = w ? saved.warningSoundName : saved.soundName
+  const setKind = (k: 'same' | 'builtin' | 'upload') =>
+    setDraft(d => w ? { ...d, warningSoundKind: k } : { ...d, soundKind: k === 'upload' ? 'upload' : 'builtin' })
+  const setBuiltin = (key: string) => setDraft(d => w ? { ...d, warningBuiltinKey: key } : { ...d, builtinKey: key })
+  const name = `alarm-kind-${slot}`
+  const locked = disabled || !!sameOnly
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, margin: '6px 0 14px' }}>
+      {w && (
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+          <input type="radio" name={name} checked={kind === 'same'} disabled={disabled} onChange={() => setKind('same')} />
+          Same sound as critical breaches
+        </label>
+      )}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+        <input type="radio" name={name} checked={kind === 'builtin'} disabled={locked} onChange={() => setKind('builtin')} />
+        <span style={{ whiteSpace: 'nowrap' }}>Built-in</span>
+        <select className="ds-select" value={builtinKey} disabled={locked || kind !== 'builtin'}
+                style={{ width: 'auto', minWidth: 180 }}
+                onChange={e => setBuiltin(e.target.value)}>
+          {BUILTINS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+        </select>
+      </label>
+
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, flexWrap: 'wrap' }}>
+        <input type="radio" name={name} checked={kind === 'upload'} disabled={locked || !uploadedUrl} onChange={() => setKind('upload')} />
+        Uploaded file
+        {uploadedUrl
+          ? <span className="sm-metric-sub">{uploadedName || 'custom sound'}</span>
+          : <span className="sm-metric-sub">none uploaded yet</span>}
+        <button type="button" className="sm-btn-cancel" style={{ padding: '4px 10px', fontSize: 12 }}
+                disabled={busy || locked} onClick={() => fileRef.current?.click()}>
+          <i className="bx bx-upload" /> {uploadedUrl ? 'Replace' : 'Upload'}…
+        </button>
+        {uploadedUrl && (
+          <button type="button" className="sm-btn-cancel" style={{ padding: '4px 10px', fontSize: 12 }}
+                  disabled={busy || locked} onClick={onRemove}>
+            <i className="bx bx-trash" /> Remove
+          </button>
+        )}
+        <input ref={fileRef} type="file" hidden
+               accept="audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/mp4,audio/aac,.mp3,.wav,.ogg,.m4a,.aac,.webm"
+               onChange={e => { const f = e.target.files?.[0]; if (f) onUpload(f); e.target.value = '' }} />
+      </label>
+      {!w && <span className="sm-desc" style={{ margin: 0 }}>MP3, WAV, OGG or M4A, up to 2 MB. Short sounds (1–3 seconds) work best.</span>}
+    </div>
+  )
+}
+
+function VolumeRow({ label, value, onChange, onTest }: {
+  label: string; value: number; onChange: (v: number) => void; onTest: () => void
+}) {
+  return (
+    <>
+      <div className="ds-mini-label">{label} — {Math.round(value * 100)}%</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '6px 0 4px' }}>
+        <input type="range" min={0} max={100} step={5} value={Math.round(value * 100)}
+               style={{ flex: 1, maxWidth: 260 }}
+               onChange={e => onChange(Number(e.target.value) / 100)} />
+        <button type="button" className="sm-btn-cancel" style={{ padding: '5px 12px', fontSize: 12 }} onClick={onTest}>
+          <i className="bx bx-play" /> Test sound
+        </button>
+      </div>
+    </>
   )
 }

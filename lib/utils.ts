@@ -549,16 +549,22 @@ export function formatTime(iso: string | null | undefined): string {
   return new Date(iso).toLocaleTimeString()
 }
 
+// Agent Status pill colour. First match wins, so the reason inside a status
+// beats its state ("Not Ready (Break)" is a break, "Not Ready (Meeting)" a
+// meeting), and "Unavailable"/"Not Ready" are caught before "available"/"ready".
+// Green = working (online/available, on a call), yellow = break/lunch,
+// gray = offline.
 export function getStatusPillClass(status: string | null): string {
   const s = (status || '').toLowerCase()
-  if (s.includes('available') && !s.includes('not')) return 'pill pill-available'
-  if (s.includes('ringing'))                           return 'pill pill-ringing'
-  if (s.includes('in call') || s.includes('incall'))   return 'pill pill-incall'
-  if (s.includes('after call') || s === 'acw')         return 'pill pill-acw'
-  if (s.includes('break') || s.includes('lunch') || s.includes('do not')) return 'pill pill-break'
-  if (s.includes('not available') || s.includes('unavailable'))            return 'pill pill-nav'
-  if (s.includes('offline'))                           return 'pill pill-offline'
-  if (s.includes('training') || s.includes('coaching') || s.includes('meeting') || s.includes('back office')) return 'pill pill-meeting'
+  if (/offline|logged (out|off)|signed out/.test(s))                          return 'pill pill-offline'
+  if (/break|lunch|meal|brb|bathroom|back soon|away|do not disturb/.test(s))  return 'pill pill-break'
+  if (/after (call|chat)|\bacw\b|wrap|follow.?up/.test(s))                   return 'pill pill-acw'
+  if (s.includes('ringing'))                                                return 'pill pill-ringing'
+  if (/meeting|training|coaching|1x1|back office|project|development|\bqa\b|team lead|management/.test(s)) return 'pill pill-meeting'
+  if (/system|technical|refused|rejected|missed|abandoned/.test(s))         return 'pill pill-nav'
+  if (/unavailable|not available|not ready/.test(s))                        return 'pill pill-nav'
+  if (/\b(on|in) (a )?call\b|incall|talking|working contacts|outbound/.test(s)) return 'pill pill-incall'
+  if (/available|online|ready|logged in/.test(s))                           return 'pill pill-available'
   return 'pill pill-default'
 }
 

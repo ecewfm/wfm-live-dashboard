@@ -11,6 +11,15 @@ import { ALARM_SOUNDS } from '@/lib/alarmSounds'
 
 const BUILTIN_KEYS: string[] = ALARM_SOUNDS.map(s => s.key).filter(k => k !== 'none')
 
+// Columns added after the table was first created (sql/global_alarm.sql's
+// upgrade section), as the groups they were added in. PostgREST rejects a
+// whole upsert over one unknown column, so when the table predates a group
+// (SQL not re-run yet), that group is dropped and the rest still saves.
+const NEWER_COLUMN_GROUPS: string[][] = [
+  ['ring_mode'],
+  ['warning_sound_kind', 'warning_builtin_key', 'warning_volume'],
+]
+
 export async function POST(req: Request) {
   try {
     const me = await requireRole(req, ['superuser'])
@@ -44,6 +53,20 @@ export async function POST(req: Request) {
       if (!Number.isFinite(g) || g < 0 || g > 3600) throw new AuthError(400, 'Minimum gap must be 0–3600 seconds.')
       patch.min_gap_seconds = g
     }
+    // The warning breaches' own sound ('same' = use the critical sound).
+    if (b.warningSoundKind !== undefined) {
+      if (!['same', 'builtin', 'upload'].includes(b.warningSoundKind)) throw new AuthError(400, 'warningSoundKind must be same, builtin or upload.')
+      patch.warning_sound_kind = b.warningSoundKind
+    }
+    if (b.warningBuiltinKey !== undefined) {
+      if (!BUILTIN_KEYS.includes(b.warningBuiltinKey)) throw new AuthError(400, `Unknown built-in sound "${b.warningBuiltinKey}".`)
+      patch.warning_builtin_key = b.warningBuiltinKey
+    }
+    if (b.warningVolume !== undefined) {
+      const v = Number(b.warningVolume)
+      if (!Number.isFinite(v) || v < 0 || v > 1) throw new AuthError(400, 'Warning volume must be between 0 and 1.')
+      patch.warning_volume = v
+    }
 
     const db = admin()
     // Can't select "upload" without a file actually uploaded.
@@ -51,18 +74,24 @@ export async function POST(req: Request) {
       const { data } = await db.from('wfm_alarm_settings').select('sound_url').eq('id', 'global').maybeSingle()
       if (!data?.sound_url) throw new AuthError(400, 'Upload a sound file first.')
     }
+    if (patch.warning_sound_kind === 'upload') {
+      const { data } = await db.from('wfm_alarm_settings').select('warning_sound_url').eq('id', 'global').maybeSingle()
+      if (!data?.warning_sound_url) throw new AuthError(400, 'Upload a warning sound file first.')
+    }
 
     let { error } = await db.from('wfm_alarm_settings').upsert({ id: 'global', ...patch })
 
-    // PostgREST rejects a whole upsert over one unknown column. If the table
-    // predates ring_mode (SQL not re-run yet), save everything else and say so,
-    // instead of making every alarm setting unsaveable until the SQL is run.
+    // Table older than some of these columns: save everything else and say
+    // so, instead of making every alarm setting unsaveable until the SQL is
+    // run (see NEWER_COLUMN_GROUPS).
     let needsMigration = false
-    if (error && 'ring_mode' in patch && /ring_mode/i.test(error.message)) {
-      const { ring_mode: _drop, ...rest } = patch
-      void _drop
+    for (let tries = 0; error && tries < NEWER_COLUMN_GROUPS.length; tries++) {
+      const msg = error.message   // names one missing column at a time, in no set order
+      const group = NEWER_COLUMN_GROUPS.find(g => g.some(c => c in patch && new RegExp(c, 'i').test(msg)))
+      if (!group) break
+      for (const c of group) delete patch[c]
       needsMigration = true
-      ;({ error } = await db.from('wfm_alarm_settings').upsert({ id: 'global', ...rest }))
+      ;({ error } = await db.from('wfm_alarm_settings').upsert({ id: 'global', ...patch }))
     }
     if (error) {
       throw new AuthError(500, /does not exist|relation/i.test(error.message)

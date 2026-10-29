@@ -13,8 +13,8 @@ import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
   isMutedHere, setMutedHere, audioAllowed, unlockAudio, onAudioStateChange, DEFAULT_ALARM_SETTINGS,
-  ALARM_PREVIEW_EVENT, PREVIEW_ACCOUNT,
-  type GlobalAlarmSettings, type AlarmBaseline, type PendingAlarm,
+  ALARM_PREVIEW_EVENT, PREVIEW_ACCOUNT, alarmSoundFor, topSeverity,
+  type GlobalAlarmSettings, type AlarmBaseline, type PendingAlarm, type AlarmSound, type AlarmPreview,
 } from '@/lib/globalAlarm'
 import AlarmPrompt from './AlarmPrompt'
 import { loadView, saveView, pickAccount } from '@/lib/viewMemory'
@@ -673,8 +673,8 @@ export default function Dashboard() {
   }, [alarmSettings.enabled])
 
   // One ring, with the bell shaking for a moment (ringMode 'once').
-  const flashAndRing = useCallback((s: GlobalAlarmSettings) => {
-    ringOnce(s).then(r => {
+  const flashAndRing = useCallback((sound: AlarmSound) => {
+    ringOnce(sound).then(r => {
       if (r === 'blocked') { setAlarmBlocked(true); return }
       setAlarmFlash(true)
       setTimeout(() => setAlarmFlash(false), 2500)
@@ -699,11 +699,12 @@ export default function Dashboard() {
     if (mutedRef.current) return
 
     if (s.ringMode === 'once') {
-      // One ring per change, never more often than the minimum gap.
+      // One ring per change, never more often than the minimum gap — with the
+      // critical sound if any of these changes is critical.
       const now = Date.now()
       if (now - lastOnceAt.current < s.minGapSeconds * 1000) return
       lastOnceAt.current = now
-      flashAndRing(s)
+      flashAndRing(alarmSoundFor(s, topSeverity(events.flatMap(e => e.changes))))
       return
     }
     // 'until_ack': onto the prompt; the loop effect below does the ringing.
@@ -711,22 +712,27 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allBreaches])
 
-  // Ring for as long as something is unacknowledged ('until_ack' mode). Restarts
-  // if a super user saves a different sound mid-alarm; the 60s settings poll
-  // returns equal values, which leave `soundSig` unchanged and the loop alone.
+  // Ring for as long as something is unacknowledged ('until_ack' mode), with
+  // the critical sound while anything pending is critical, else the warning
+  // sound. Restarts when that sound changes — a critical joining a prompt of
+  // warnings, or a super user saving a different sound mid-alarm; the 60s
+  // settings poll returns equal values, which leave `soundSig` unchanged and
+  // the loop alone.
   const wantAlarmSound = alarmSettings.enabled && alarmSettings.ringMode === 'until_ack' && !alarmMuted && alarmPending.length > 0
-  const soundSig = `${alarmSettings.soundKind}|${alarmSettings.builtinKey}|${alarmSettings.soundUrl}|${alarmSettings.volume}`
+  const ringSeverity = topSeverity(alarmPending.map(p => p.change))
+  const ringSound = alarmSoundFor(alarmSettings, ringSeverity)
+  const soundSig = `${ringSound.kind}|${ringSound.builtinKey}|${ringSound.url}|${ringSound.volume}`
   useEffect(() => {
     if (!wantAlarmSound) { stopAlarmLoop(); setAlarmPhase('idle'); return }
     const start = () => {
       setAlarmPhase('ringing')
-      startAlarmLoop(alarmRef.current, r => setAlarmBlocked(r === 'blocked'))
+      startAlarmLoop(alarmSoundFor(alarmRef.current, ringSeverity), r => setAlarmBlocked(r === 'blocked'))
     }
     const wait = alarmQuietUntil.current - Date.now()
     let t: ReturnType<typeof setTimeout> | undefined
     if (wait > 0) { setAlarmPhase('quiet'); t = setTimeout(start, wait) } else start()
     return () => { if (t) clearTimeout(t); stopAlarmLoop() }
-  }, [wantAlarmSound, soundSig])
+  }, [wantAlarmSound, soundSig, ringSeverity])
 
   // Muting this screen, switching the alarm off, or switching to 'once' mode
   // drops what's pending — unmuting / switching back later shouldn't ring for
@@ -741,18 +747,22 @@ export default function Dashboard() {
     setAlarmPending([])
   }, [])
 
-  // Settings → Alarm → "Preview on this screen", with the settings the super
-  // user just saved (this screen only reloads them once the Settings modal
-  // closes). 'until_ack': a sample prompt, ringing straight away (no quiet
-  // time). 'once': one ring — there's no prompt in that mode.
+  // Settings → Alarm → "Preview critical / warning", with the settings the
+  // super user just saved (this screen only reloads them once the Settings
+  // modal closes). 'until_ack': a sample prompt line of that severity, ringing
+  // straight away (no quiet time). 'once': one ring — no prompt in that mode.
   useEffect(() => {
     const onPreview = (e: Event) => {
-      const s = (e as CustomEvent<GlobalAlarmSettings>).detail ?? alarmRef.current
+      const detail = (e as CustomEvent<AlarmPreview>).detail
+      const s = detail?.settings ?? alarmRef.current
+      const severity = detail?.severity ?? 'critical'
       setAlarmSettings(s); preloadAlarm(s)
-      if (s.ringMode === 'once') { flashAndRing(s); return }
+      if (s.ringMode === 'once') { flashAndRing(alarmSoundFor(s, severity)); return }
       alarmQuietUntil.current = 0
       setAlarmPending(p => mergePending(p, [{ accountId: PREVIEW_ACCOUNT, changes: [
-        { kind: 'kpi', entity: 'Global', metric: 'SLA %', value: '74%', previous: '85%' },
+        severity === 'critical'
+          ? { kind: 'kpi', entity: 'Global', metric: 'SLA %', value: '74%', previous: '85%', severity }
+          : { kind: 'kpi', entity: 'Global', metric: 'Abandon Rate %', value: '6%', previous: '4%', severity },
       ] }], Date.now()))
     }
     window.addEventListener(ALARM_PREVIEW_EVENT, onPreview)

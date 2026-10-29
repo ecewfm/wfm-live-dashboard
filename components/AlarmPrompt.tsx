@@ -6,7 +6,7 @@
 // pressing Acknowledge stops it and clears the list.
 
 import { createPortal } from 'react-dom'
-import { describeChange, type PendingAlarm } from '@/lib/globalAlarm'
+import { describeChange, topSeverity, type PendingAlarm } from '@/lib/globalAlarm'
 
 export type AlarmPromptStatus = 'ringing' | 'blocked' | 'quiet' | 'muted'
 
@@ -24,26 +24,34 @@ export default function AlarmPrompt({ items, status, isDark, name, onAcknowledge
   name: (accountId: string) => string
   onAcknowledge: () => void
 }) {
-  const newestFirst = [...items].sort((a, b) => b.lastAt - a.lastAt)
+  // Criticals first (theirs is the sound playing), newest first within each.
+  const sorted = [...items].sort((a, b) =>
+    (a.change.severity === b.change.severity ? 0 : a.change.severity === 'critical' ? -1 : 1) || b.lastAt - a.lastAt)
+  const critical = topSeverity(items.map(p => p.change)) === 'critical'
   // Portalled to <body> so it sits above the Settings modal too; the wrapper
   // carries the theme because <body> is outside #layout-wrapper's .dark.
   return createPortal(
     <div className={isDark ? 'dark' : ''}>
-      <div className={`alarm-prompt ${status}`} role="alertdialog" aria-labelledby="alarm-prompt-title" aria-describedby="alarm-prompt-sub">
+      <div className={`alarm-prompt ${status}${critical ? '' : ' sev-warning'}`} role="alertdialog" aria-labelledby="alarm-prompt-title" aria-describedby="alarm-prompt-sub">
         <div className="alarm-prompt-head">
           <i className="bx bx-alarm" aria-hidden />
           <div>
             <div className="alarm-prompt-title" id="alarm-prompt-title">
-              Breach alarm{items.length > 1 ? ` · ${items.length} changes` : ''}
+              {critical ? 'Critical breach alarm' : 'Warning breach alarm'}{items.length > 1 ? ` · ${items.length} changes` : ''}
             </div>
             <div className="alarm-prompt-sub" id="alarm-prompt-sub">{STATUS_TEXT[status]}</div>
           </div>
         </div>
         <ul className="alarm-prompt-list">
-          {newestFirst.map(p => (
+          {sorted.map(p => (
             <li key={p.key}>
               <span className="alarm-prompt-acct">{name(p.accountId)}</span>
-              <span className="alarm-prompt-what">{describeChange(p.change)}</span>
+              <span className="alarm-prompt-what">
+                <span className={p.change.severity === 'critical' ? 'badge-crit' : 'badge-warn'}>
+                  {p.change.severity === 'critical' ? 'Critical' : 'Warning'}
+                </span>{' '}
+                {describeChange(p.change)}
+              </span>
               <time>{new Date(p.lastAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>
             </li>
           ))}

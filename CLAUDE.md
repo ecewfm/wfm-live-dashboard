@@ -628,6 +628,31 @@ in `lib/breaches.ts`: the built-in Agent Status / Duration (`BREACH_COL_STATUS` 
 - Gear shown only to `can.editSettings` roles (superuser / RTA) — it changes what
   everyone watching the account sees. Everyone sees the chosen columns.
 
+## Global breach alarm — separate warning / critical sounds (2026-10-26)
+
+Per the user: the global alarm (Settings → Alarm, super users; rules in
+`lib/globalAlarm.ts`) has its own sound + volume for critical breaches and for
+warnings.
+
+- The original `wfm_alarm_settings` sound columns (`sound_kind`/`builtin_key`/
+  `sound_url`/`volume`) ARE the critical sound. Warnings: `warning_sound_kind`
+  (`same` | `builtin` | `upload`), `warning_builtin_key`, `warning_sound_*`,
+  `warning_volume` — added in `sql/global_alarm.sql`'s upgrade section (safe to
+  re-run). `same` (the default, and what a table without those columns reads
+  as) = warnings use the critical sound, i.e. exactly the old behaviour.
+- `severity` (`all` | `critical`) is now the Warning block's "Ring for warning
+  breaches too" toggle — criticals always ring while the alarm is on.
+- `alarmSoundFor(settings, severity)` is the ONE place a sound is picked.
+  `evaluateAlarm()` tags every change with its breach's severity
+  (`AlarmChange`); a prompt with any critical line plays the critical sound
+  (`topSeverity`), so a critical joining a prompt of warnings switches the loop
+  to the critical sound, and a 'once' ring uses the critical sound if any of
+  that cycle's changes is critical.
+- Uploads: `app/api/alarm/sound?slot=warning` for the warning file (same
+  bucket, `alarm-warning-*`); no `slot` = the critical file. `app/api/alarm`
+  drops a group of not-yet-migrated columns (`NEWER_COLUMN_GROUPS`) and saves
+  the rest, returning `needsMigration`, instead of failing the whole save.
+
 ## `lib/settings.ts` load/save silently dropping fields (fixed 2026-09-28)
 
 Found while chasing why `rta_sites`/`rta_account_name` kept reverting to
