@@ -653,6 +653,35 @@ warnings.
   drops a group of not-yet-migrated columns (`NEWER_COLUMN_GROUPS`) and saves
   the rest, returning `needsMigration`, instead of failing the whole save.
 
+## Settings → Agent Filter tab (2026-11-02)
+
+Per the user (first for Homebase): choose which agents an account shows at all,
+and so which ones can ever reach Cliq.
+
+- Saved as `DataSourceConfig.agentFilter` `{ mode: 'all'|'include'|'exclude',
+  names, pausedMode? }` in the data_source JSONB (no migration, nothing for
+  `lib/settings.ts`'s column tiers to trip on). include = ONLY `names` show (a
+  new agent starts hidden); exclude = everyone but `names` (a new agent starts
+  shown); 'all' = off, `names` + `pausedMode` kept so switching back on brings
+  the same ticks back. Names match ignoring case/surrounding spaces.
+- `applyAgentFilter()` (`lib/breaches.ts`) is called right where agents are
+  collected — `fetchAccount()` in `components/Dashboard.tsx` and
+  `fetchAccountData()` in `lib/cliqScan.ts` (also the RTA test route) — so a
+  filtered-out agent is gone from the Agent Status table, Breach / Anomalies,
+  Overview, the alarm, Cliq, Workforce Logs and RTA Logs alike. Never filter
+  in only one of them. Staleness ("DATA NOT IN SYNC") reads KPI tables only, so
+  hiding agents can't make an account look stale.
+- The tab (`SettingsModal.tsx`, `tab === 'agents'`) lists names straight from
+  the account's agent tables (`agentSourcesFor`, incl. Zoho Breaks & Aux), NOT
+  from the dashboard's agent list (already filtered), plus saved names not on
+  the tables right now. Search (name / section / status), All / Shown / Hidden
+  views, Select all / Deselect all act on what's listed; the list box has its
+  own scroll with a sticky, solid header row. Applies on Save Changes.
+- Modal widened 740 → 820px so the 8 tabs fit.
+- Verified: real `fetchAccountData()` on Homebase's live tables (7 checks), and
+  a browser test on the production build with live read-only data and every
+  write intercepted (24 checks, incl. reload, off/on, mode switch, dark mode).
+
 ## Status Durations minutes beat Data Sources text triggers (2026-11-02)
 
 Per the user: Wyze's "Untracked" status reads "Out of adherence" from its first

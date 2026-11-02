@@ -131,6 +131,26 @@ export function agentSourcesFor(ds: DataSourceConfig, opts: { includeZohoAux?: b
   return out
 }
 
+// ── Which agents an account shows (Settings → Agent Filter) ─────────────────
+// CANONICAL — called by BOTH components/Dashboard.tsx and lib/cliqScan.ts on
+// the agents they just fetched, so the Agent Status table, breaches, the
+// alarm, Cliq, Workforce Logs and RTA Logs all see the same agents.
+export function agentFilterKey(name: unknown): string {
+  return String(name ?? '').trim().toLowerCase()
+}
+
+export function agentFilterActive(ds: DataSourceConfig): boolean {
+  const mode = ds.agentFilter?.mode
+  return mode === 'include' || mode === 'exclude'
+}
+
+export function applyAgentFilter<T extends Record<string, any>>(agents: T[], ds: DataSourceConfig): T[] {
+  if (!agentFilterActive(ds)) return agents
+  const listed = new Set((ds.agentFilter!.names || []).map(agentFilterKey))
+  const include = ds.agentFilter!.mode === 'include'
+  return agents.filter(a => listed.has(agentFilterKey(a._name)) === include)
+}
+
 // ── Which KPI tables does this account's config actually need? ────────────
 // CANONICAL — used by BOTH components/Dashboard.tsx (client fetch) AND
 // lib/cliqScan.ts (server fetch), via fetchKpiSourceRows() below, so there is

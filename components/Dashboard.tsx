@@ -8,7 +8,7 @@ import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, agentTimerKey, agentElapsedSecs, durationIsStatic, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, applyAgentFilter, agentTimerKey, agentElapsedSecs, durationIsStatic, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
@@ -184,7 +184,9 @@ export default function Dashboard() {
       // (titled src.agentTableLabel), its additional sources, and — when this
       // account's Zoho toggle is on — the Zoho Breaks & Aux section.
       const agentSourcesToFetch: AgentSource[] = agentSourcesFor(src)
-      const agents: any[] = (await Promise.all(agentSourcesToFetch.map(as_ => fetchAgentSource(as_, accId)))).flat()
+      // Settings → Agent Filter — same call as lib/cliqScan.ts, so what's hidden
+      // here is also left out of breaches, the alarm and Cliq.
+      const agents: any[] = applyAgentFilter((await Promise.all(agentSourcesToFetch.map(as_ => fetchAgentSource(as_, accId)))).flat(), src)
 
       // Alternate KPI sources — any GROUP (KpiGroup.source) or individual
       // TILE (GroupTile.source) that reads from its own table instead of

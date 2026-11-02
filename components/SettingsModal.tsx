@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice, KpiUnit } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, AgentFilter, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice, KpiUnit } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
@@ -14,7 +14,7 @@ import {
 // Cliq/RTA scan resolve with — imported rather than re-implemented here so
 // the editor's idea of which table a slot binds against cannot disagree with
 // what the runtime actually reads (that mismatch yields '--' with no error).
-import { effectiveKpiSource, kpiSourceKey } from '@/lib/breaches'
+import { effectiveKpiSource, kpiSourceKey, agentSourcesFor, agentFilterKey } from '@/lib/breaches'
 import { addAccount, removeAccount, renameAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
 import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
 import type { GeminiKeyMasked } from '@/lib/geminiKeys'
@@ -25,7 +25,7 @@ import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
 import { includeBreaksOf, includeAuxOf, accountKeysFor, normalizeAccount, parseExtraNames, breakCategory, allowanceMinutesOf, ZOHO_AUX_TABLE, type ZohoAuxConfig } from '@/lib/zohoAuxShared'
 
-type Tab = 'kpi' | 'status' | 'datasource' | 'accounts' | 'cliq' | 'users' | 'alarm'
+type Tab = 'kpi' | 'status' | 'agents' | 'datasource' | 'accounts' | 'cliq' | 'users' | 'alarm'
 
 // ── A free-typed mm:ss input that only reformats/commits on blur — a plain
 // controlled input reformatting on every keystroke would fight the user
@@ -98,7 +98,7 @@ const MODAL_STYLES = `
     background: var(--bg-card, #ffffff);
     border: 1px solid var(--border, #e1e6e4);
     border-radius: 12px;
-    width: 100%; max-width: 740px;
+    width: 100%; max-width: 820px;
     max-height: 90vh;
     display: flex; flex-direction: column;
     box-shadow: 0 24px 64px rgba(0,0,0,0.45);
@@ -173,7 +173,7 @@ const MODAL_STYLES = `
     transition: background 0.15s; line-height: 1;
   }
   .sm-close:hover { background: rgba(255,255,255,0.22); }
-  /* A super user has 7 tabs — sized to fit the modal; on a narrower screen
+  /* A super user has 8 tabs — sized to fit the modal; on a narrower screen
      the row scrolls sideways instead of clipping the last tabs. */
   .sm-tabs {
     display: flex; border-bottom: 1px solid var(--border, #e1e6e4);
@@ -373,6 +373,30 @@ const MODAL_STYLES = `
     transition: opacity 0.15s; font-family: inherit;
   }
   .sm-btn-save:hover { opacity: 0.88; }
+  /* Agent Filter tab — the agent list scrolls in its own box and its header row
+     stays put (a solid background, so rows don't show through it). */
+  .sm-agent-box { max-height: 46vh; overflow: auto; border: 1px solid var(--border, #e1e6e4); border-radius: 8px; }
+  .dark .sm-agent-box { border-color: #2e2e2e; }
+  .sm-agent-box .sm-table thead th { position: sticky; top: 0; z-index: 1; background: var(--bg-card, #ffffff); }
+  .dark .sm-agent-box .sm-table thead th { background: #252525; }
+  .sm-agent-box .sm-table tbody td { padding: 7px 14px; }
+  .sm-agent-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+  .sm-agent-mode {
+    display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border, #e1e6e4); font-size: 12.5px; font-weight: 600; color: var(--text-main, #2c3b36);
+  }
+  .sm-agent-mode input { margin: 2px 0 0; accent-color: #d97a35; }
+  .sm-agent-mode.active { border-color: #d97a35; background: rgba(217,122,53,0.07); }
+  .dark .sm-agent-mode { border-color: #2e2e2e; color: #e0e0e0; }
+  .dark .sm-agent-mode.active { border-color: #d97a35; }
+  .sm-agent-mode .sm-metric-sub { font-weight: 400; }
+  .sm-chip {
+    padding: 4px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: inherit;
+    border: 1px solid var(--border, #e1e6e4); background: transparent; color: var(--text-muted, #687d75);
+  }
+  .sm-chip.active { border-color: #d97a35; color: #d97a35; background: rgba(217,122,53,0.08); }
+  .dark .sm-chip { border-color: #2e2e2e; }
+  @media (max-width: 640px) { .sm-agent-modes { grid-template-columns: 1fr; } }
 `
 
 interface Props {
@@ -2493,6 +2517,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   // Status Durations search — see statusMatches() below.
   const [statusFilter, setStatusFilter] = useState('')
   const [statusConfiguredOnly, setStatusConfiguredOnly] = useState(false)
+  // Agent Filter tab — search box and which rows to list (see agentRowsShown).
+  const [agentSearch, setAgentSearch] = useState('')
+  const [agentView, setAgentView] = useState<'all' | 'shown' | 'hidden'>('all')
   const [cliqScanning, setCliqScanning] = useState(false)
   const [cliqScanLog, setCliqScanLog]   = useState<string[] | null>(null)
   const [wfLogsOn, setWfLogsOn]         = useState(wfLogsEnabled)
@@ -2739,6 +2766,93 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
     return () => { cancelled = true }
   }, [ds.agentTable, ds.agentAccountCol, ds.agentStatusCol, JSON.stringify(ds.agentSources), accountId, statSupaUrl, statSupaKey])
 
+  // ── Agent Filter tab (per the user, 2026-11-02 — Homebase) ──────────────────
+  // Every agent on this account's agent tables right now — the SAME sources the
+  // Dashboard reads (agentSourcesFor, incl. Zoho Breaks & Aux when it's on).
+  // Read straight from the tables, not from the dashboard's own agent list,
+  // which already has the saved filter applied to it.
+  type FoundAgent = { key: string; name: string; sections: string[]; statuses: string[]; live: boolean }
+  const [discoveredAgents, setDiscoveredAgents] = useState<FoundAgent[] | null>(null)
+  const agentSrcList = agentSourcesFor(ds)
+  const agentSrcKey = JSON.stringify(agentSrcList.map(s => [s.table, s.accountCol, s.nameCol, s.statusCol, s.groupByCol, s.label]))
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const found = new Map<string, FoundAgent>()
+      await Promise.all(agentSrcList.map(async src => {
+        if (!src.table || !src.nameCol) return
+        const cols = [src.nameCol, src.statusCol, src.groupByCol].filter(Boolean).map(c => encodeURIComponent(c!)).join(',')
+        try {
+          const res = await fetch(`${statSupaUrl}/rest/v1/${src.table}?select=${cols}&${encodeURIComponent(src.accountCol || 'account_id')}=eq.${encodeURIComponent(accountId)}&limit=5000`,
+            { headers: { apikey: statSupaKey, Authorization: `Bearer ${statSupaKey}` } })
+          const rows = res.ok ? await res.json() : []
+          if (!Array.isArray(rows)) return
+          for (const r of rows) {
+            const name = String(r[src.nameCol] ?? '').trim()
+            if (!name) continue
+            const key = agentFilterKey(name)
+            const a = found.get(key) ?? { key, name, sections: [], statuses: [], live: true }
+            const section = src.groupByCol ? String(r[src.groupByCol] ?? '') : src.label
+            if (section && !a.sections.includes(section)) a.sections.push(section)
+            const status = src.statusCol ? String(r[src.statusCol] ?? '').trim() : ''
+            if (status && !a.statuses.includes(status)) a.statuses.push(status)
+            found.set(key, a)
+          }
+        } catch { /* that source just isn't listed */ }
+      }))
+      if (!cancelled) setDiscoveredAgents([...found.values()].sort((x, y) => x.name.localeCompare(y.name)))
+    })()
+    return () => { cancelled = true }
+  }, [agentSrcKey, accountId, statSupaUrl, statSupaKey])
+
+  const agentFilter: AgentFilter = ds.agentFilter ?? { mode: 'all', names: [] }
+  // Whether `name` shows under a given mode + list (include: listed = shown; exclude: listed = hidden).
+  const shownUnder = (mode: AgentFilter['mode'], listed: Set<string>, name: string) =>
+    mode === 'include' ? listed.has(agentFilterKey(name)) : mode === 'exclude' ? !listed.has(agentFilterKey(name)) : true
+  const agentListed = new Set(agentFilter.names.map(agentFilterKey))
+  const agentShown = (name: string) => shownUnder(agentFilter.mode, agentListed, name)
+  const liveAgentKeys = new Set((discoveredAgents ?? []).map(a => a.key))
+  // A saved name that isn't on the tables right now (off shift, renamed…) stays
+  // listed, so it can still be ticked/unticked instead of being stuck in the filter.
+  const agentRows: FoundAgent[] = [
+    ...(discoveredAgents ?? []),
+    ...agentFilter.names.filter(n => !liveAgentKeys.has(agentFilterKey(n)))
+      .map(n => ({ key: agentFilterKey(n), name: n, sections: [], statuses: [], live: false })),
+  ]
+  const agentFilterOn = agentFilter.mode !== 'all'
+  const agentShownCount = agentRows.filter(a => agentShown(a.name)).length
+  const agentRowsShown = agentRows.filter(a => {
+    if (agentView === 'shown' && !agentShown(a.name)) return false
+    if (agentView === 'hidden' && agentShown(a.name)) return false
+    const q = agentSearch.trim().toLowerCase()
+    return !q || a.name.toLowerCase().includes(q) || a.sections.some(s => s.toLowerCase().includes(q)) || a.statuses.some(s => s.toLowerCase().includes(q))
+  })
+
+  // Show/hide some agents — works the same in both modes (it's the list that differs).
+  const setAgentsShown = (names: string[], show: boolean) => setDs(prev => {
+    const cur = prev.agentFilter ?? { mode: 'all' as const, names: [] }
+    if (cur.mode === 'all') return prev
+    const keys = new Set(names.map(agentFilterKey))
+    const rest = cur.names.filter(n => !keys.has(agentFilterKey(n)))
+    const putOnList = cur.mode === 'include' ? show : !show
+    return { ...prev, agentFilter: { ...cur, names: putOnList ? [...rest, ...names] : rest } }
+  })
+  // Switching mode keeps every agent's tick as it is; only what the list holds
+  // (and what a NEW agent gets) changes. Off keeps the list for switching back.
+  const setAgentFilterMode = (mode: AgentFilter['mode']) => setDs(prev => {
+    const cur = prev.agentFilter ?? { mode: 'all' as const, names: [] }
+    if (mode === cur.mode) return prev
+    if (mode === 'all') return { ...prev, agentFilter: { mode: 'all', names: cur.names, pausedMode: cur.mode === 'all' ? cur.pausedMode : cur.mode } }
+    const from = cur.mode === 'all' ? cur.pausedMode : cur.mode
+    if (cur.mode === 'all' && from === mode) return { ...prev, agentFilter: { mode, names: cur.names } }
+    // Ticks under the old setting (everyone, when it was simply off) carried over.
+    const listed = new Set(cur.names.map(agentFilterKey))
+    const shownBefore = (n: string) => (from ? shownUnder(from, listed, n) : true)
+    const everyone = agentRows.map(a => a.name)
+    const names = mode === 'include' ? everyone.filter(shownBefore) : everyone.filter(n => !shownBefore(n))
+    return { ...prev, agentFilter: { mode, names } }
+  })
+
   // ── Zoho Breaks & Aux types (per the user, 2026-10-23) ──────────────────────
   // While this account shows Zoho breaks & aux, every Zoho type gets its own
   // section below — listed from Zoho's logs (organisation-wide, via
@@ -2981,6 +3095,9 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             </button>
             <button className={`sm-tab${tab === 'status' ? ' active' : ''}`} onClick={() => setTab('status')}>
               <i className="bx bx-user-clock" /> Status Durations
+            </button>
+            <button className={`sm-tab${tab === 'agents' ? ' active' : ''}`} onClick={() => setTab('agents')}>
+              <i className="bx bx-filter-alt" /> Agent Filter
             </button>
             <button className={`sm-tab${tab === 'cliq' ? ' active' : ''}`} onClick={() => setTab('cliq')}>
               <i className="bx bx-bell" /> Zoho Integrations
@@ -3430,6 +3547,123 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 </div>
               </>
             )}
+
+            {tab === 'agents' && (() => {
+              const loading = discoveredAgents === null
+              const q = agentSearch.trim()
+              // Only worth a column when this account's agents come from more than one section.
+              const showSection = new Set(agentRows.flatMap(a => a.sections)).size > 1
+              const cols = showSection ? 4 : 3
+              const listedNames = agentRowsShown.map(a => a.name)
+              const modes: { mode: AgentFilter['mode']; title: string; sub: string }[] = [
+                { mode: 'all',     title: 'Show every agent',            sub: 'No filter (the default)' },
+                { mode: 'include', title: 'Only the ticked agents',      sub: 'Agents who show up later stay hidden until ticked' },
+                { mode: 'exclude', title: 'Everyone except the unticked', sub: 'Agents who show up later are shown until unticked' },
+              ]
+              return (
+                <>
+                  <p className="sm-desc">
+                    Choose which agents <strong>{accountId}</strong>{' '}shows. An unticked agent is hidden from the
+                    Agent Status table and never raises a breach, so it&apos;s also left out of Breach / Anomalies,
+                    the alarm, Cliq, Workforce Logs and RTA Logs. KPI tiles aren&apos;t affected. Changes apply when
+                    you press <strong>Save Changes</strong>.
+                  </p>
+
+                  <div className="sm-agent-modes" role="radiogroup" aria-label="Agent filter">
+                    {modes.map(m => (
+                      <label key={m.mode} className={`sm-agent-mode${agentFilter.mode === m.mode ? ' active' : ''}`}
+                        style={loading && m.mode !== agentFilter.mode ? { opacity: 0.5, cursor: 'wait' } : undefined}>
+                        <input type="radio" name="agent-filter-mode" checked={agentFilter.mode === m.mode}
+                          disabled={loading} onChange={() => setAgentFilterMode(m.mode)} />
+                        <span>{m.title}<div className="sm-metric-sub">{m.sub}</div></span>
+                      </label>
+                    ))}
+                  </div>
+
+                  {agentFilter.mode === 'include' && agentShownCount === 0 && !loading && (
+                    <div className="sm-note" style={{ marginTop: 0, marginBottom: 12, background: 'rgba(217,158,53,0.1)', borderColor: 'rgba(217,158,53,0.35)' }}>
+                      <i className="bx bx-error" style={{ color: '#d99e35' }} />
+                      <span>No agent is ticked — saved like this, {accountId} shows no agents and raises no agent breaches.</span>
+                    </div>
+                  )}
+
+                  {/* Toolbar: search, which rows to list, select / deselect what's listed */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                    <div style={{ position: 'relative', flex: '1 1 220px', minWidth: 180 }}>
+                      <i className="bx bx-search" style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontSize: 14 }} />
+                      <input type="text" className="sm-input" style={{ width: '100%', paddingLeft: 28, textAlign: 'left' }}
+                        placeholder={`Search ${agentRows.length} agent${agentRows.length === 1 ? '' : 's'}…`}
+                        title="Matches the agent's name, section or current status"
+                        value={agentSearch} onChange={e => setAgentSearch(e.target.value)} />
+                      {agentSearch && (
+                        <i className="bx bx-x" title="Clear search"
+                          style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', cursor: 'pointer', color: 'var(--text-muted)' }}
+                          onClick={() => setAgentSearch('')} />
+                      )}
+                    </div>
+                    {([['all', `All ${agentRows.length}`], ['shown', `Shown ${agentShownCount}`], ['hidden', `Hidden ${agentRows.length - agentShownCount}`]] as const).map(([v, label]) => (
+                      <button key={v} type="button" className={`sm-chip${agentView === v ? ' active' : ''}`} onClick={() => setAgentView(v)}>{label}</button>
+                    ))}
+                    <button type="button" className="acc-btn acc-btn-cfg" disabled={!agentFilterOn || listedNames.length === 0}
+                      style={{ opacity: !agentFilterOn || listedNames.length === 0 ? 0.45 : 1 }}
+                      title={q || agentView !== 'all' ? 'Ticks every agent listed below (the search / view above)' : 'Ticks every agent'}
+                      onClick={() => setAgentsShown(listedNames, true)}>
+                      Select all{q || agentView !== 'all' ? ` (${listedNames.length})` : ''}
+                    </button>
+                    <button type="button" className="acc-btn acc-btn-del" disabled={!agentFilterOn || listedNames.length === 0}
+                      style={{ opacity: !agentFilterOn || listedNames.length === 0 ? 0.45 : 1 }}
+                      title={q || agentView !== 'all' ? 'Unticks every agent listed below (the search / view above)' : 'Unticks every agent'}
+                      onClick={() => setAgentsShown(listedNames, false)}>
+                      Deselect all{q || agentView !== 'all' ? ` (${listedNames.length})` : ''}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginBottom: 8 }}>
+                    {agentFilterOn
+                      ? <><strong>{agentShownCount}</strong> of {agentRows.length} agents shown on the dashboard</>
+                      : <>Filter off — all {agentRows.length} agents are shown. Pick an option above to choose agents.</>}
+                    {(q || agentView !== 'all') && <> · listing {agentRowsShown.length}</>}
+                  </div>
+
+                  <div className="sm-agent-box">
+                    <table className="sm-table" aria-label="Agents">
+                      <thead>
+                        <tr>
+                          <th style={{ width: 60, textAlign: 'center' }}>Show</th>
+                          <th>Agent</th>{showSection && <th>Section</th>}<th>Status now</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {loading ? (
+                          <tr><td colSpan={cols} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>Loading this account&apos;s agents…</td></tr>
+                        ) : agentRowsShown.length === 0 ? (
+                          <tr><td colSpan={cols} style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                            {agentRows.length === 0
+                              ? <>No agents on this account&apos;s agent tables — set up an Agent Data Source on the Data Sources tab first (or check back once the scraper has written some data).</>
+                              : <>No agent matches the search / view ({agentRows.length} hidden).</>}
+                          </td></tr>
+                        ) : agentRowsShown.map(a => {
+                          const shown = agentShown(a.name)
+                          return (
+                            <tr key={a.key} style={!shown ? { opacity: 0.55 } : undefined}>
+                              <td style={{ textAlign: 'center' }}>
+                                <input type="checkbox" checked={shown} disabled={!agentFilterOn}
+                                  aria-label={`Show ${a.name}`} onChange={() => setAgentsShown([a.name], !shown)} />
+                              </td>
+                              <td>
+                                <div className="sm-metric">{a.name}</div>
+                                {!a.live && <div className="sm-metric-sub">Not on the agent tables right now — kept because it&apos;s in this filter</div>}
+                              </td>
+                              {showSection && <td style={{ fontSize: 12 }}>{a.sections.join(', ') || '—'}</td>}
+                              <td style={{ fontSize: 12 }}>{a.statuses.join(', ') || '—'}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )
+            })()}
 
             {tab === 'cliq' && (
               <>

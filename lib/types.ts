@@ -377,6 +377,25 @@ export interface DataSourceConfig {
   // no migration of wfm_settings and can't trip the unknown-column fallbacks in
   // lib/settings.ts.
   zohoAux?: ZohoAuxConfig
+
+  // Which agents this account shows at all — Settings → Agent Filter (per the
+  // user, 2026-11-02, first for Homebase). Applied by applyAgentFilter()
+  // (lib/breaches.ts) right where Dashboard.tsx and lib/cliqScan.ts collect the
+  // account's agents, so a filtered-out agent is gone from the Agent Status
+  // table, Breach / Anomalies, the alarm, Cliq, Workforce Logs and RTA Logs
+  // alike. In the data_source JSONB, same reasoning as zohoAux above.
+  agentFilter?: AgentFilter
+}
+
+export interface AgentFilter {
+  // 'all'     — no filter, every agent shows (same as leaving this unset)
+  // 'include' — ONLY the agents in `names` show; a new agent starts hidden
+  // 'exclude' — every agent EXCEPT those in `names` shows; a new agent starts shown
+  mode: 'all' | 'include' | 'exclude'
+  names: string[]   // matched to the agent's name ignoring case and surrounding spaces
+  // Set when the filter is switched off ('all'): the mode `names` belongs to,
+  // so switching it back on brings the same ticks back instead of losing them.
+  pausedMode?: 'include' | 'exclude'
 }
 
 // ── Dashboard panel layout (Dashboard page — KPI groups, Breach, Agent Status)

@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
@@ -81,7 +81,9 @@ export async function fetchAccountData(ds: DataSourceConfig, accountId: string):
       return (r.data as any[]) ?? []
     })
 
-  return { kpi: null, kpiRows, kpiRowsBySource, agents: agentLists.flat(), status: null, calls: [] }
+  // Settings → Agent Filter — the same call Dashboard.tsx makes, so an agent
+  // hidden on the dashboard is never in a Cliq alert / Workforce Log / RTA Log.
+  return { kpi: null, kpiRows, kpiRowsBySource, agents: applyAgentFilter(agentLists.flat(), ds), status: null, calls: [] }
 }
 
 // ── Message formatting — mirrors the old GAS tool's format ──────────────────
