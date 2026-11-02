@@ -640,7 +640,14 @@ export function buildBreaches(
     // (e.g. a ticket count) — there's no meaningful "how long" to threshold.
     // A Zoho Breaks & Aux row is always real time — see durationIsStatic().
     const thSt = statusTh[status]
-    if (thSt && thSt.crit < 999 && !durationIsStatic(ds, a)) {
+    // A status with its own minutes (Settings → Status Durations) decides on
+    // its own: the custom-column text triggers further down (Data Sources —
+    // e.g. Wyze's "Out of adherence") don't fire for an agent in it. Per the
+    // user (2026-11-02): Wyze's "Untracked" reads "Out of adherence" from its
+    // first second, but should only breach once it has been Untracked for its
+    // Status Durations minutes — the duration check just below raises it then.
+    const statusHasMinutes = !!thSt && thSt.crit < 999 && !durationIsStatic(ds, a)
+    if (statusHasMinutes) {
       const secs = agentElapsedSecs(agentTimers, accountId, a)
       const mins = secs / 60
       const dur  = formatSeconds(secs)
@@ -698,11 +705,11 @@ export function buildBreaches(
     // of a duration (e.g. Wyze's Adherence column reading "Out of
     // adherence") — checked against every custom Agent Table column that has
     // a breachText configured (see AgentExtraColumn in lib/types.ts).
-    // Independent of the duration check above — an agent can breach on both
-    // at once, as two separate rows.
+    // Independent of the duration check above — except for a status with its
+    // own minutes (statusHasMinutes), where the minutes alone decide.
     ;(ds.agentExtraCols ?? []).forEach(col => {
       const trigger = (col.breachText || '').trim()
-      if (!trigger) return
+      if (!trigger || statusHasMinutes) return
       const raw = String(a[`_extra_${col.key}`] ?? '')
       if (raw.toLowerCase().includes(trigger.toLowerCase())) {
         // An optional companion duration column (see DataSourceConfig.

@@ -653,6 +653,26 @@ warnings.
   drops a group of not-yet-migrated columns (`NEWER_COLUMN_GROUPS`) and saves
   the rest, returning `needsMigration`, instead of failing the whole save.
 
+## Status Durations minutes beat Data Sources text triggers (2026-11-02)
+
+Per the user: Wyze's "Untracked" status reads "Out of adherence" from its first
+second, so the Data Sources text trigger (`AgentExtraColumn.breachText`, Wyze's
+Adherence column) flagged it at once — but it should only breach after
+Untracked's own Status Durations minutes.
+
+- `buildBreaches()` (`lib/breaches.ts`): when the agent's status has a Critical
+  time (`statusTh[status].crit < 999`, real elapsed time — `statusHasMinutes`),
+  the custom-column text triggers don't fire for that agent; the normal
+  minutes-in-status check is the only one that raises it ("Untracked Duration ·
+  5m 1s · 5m"). Statuses without minutes are unchanged. One function, so the
+  Dashboard, Overview and the Cliq scan all follow it.
+- That check times the STATUS, not the adherence — an Untracked agent who is IN
+  adherence breaches at the same 5 min (as every Status Durations status does).
+- Only Wyze has a text trigger today (checked 2026-11-02), and none of its
+  current statuses has minutes, so nothing changed until Untracked is filled in.
+- Verified on Wyze's real settings + live rows (with Untracked = 5 min Critical:
+  the Untracked agent at 25 s dropped off; 4m59s no breach, 5m1s breach).
+
 ## `lib/settings.ts` load/save silently dropping fields (fixed 2026-09-28)
 
 Found while chasing why `rta_sites`/`rta_account_name` kept reverting to

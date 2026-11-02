@@ -745,7 +745,7 @@ const DsSlotCard = React.memo(({ slotKey, label, hint, isActive, value, onToggle
           style={{ display: 'flex', gap: 4, alignItems: 'center', padding: '5px 8px 7px', borderTop: '1px solid var(--border,#e1e6e4)' }}>
           <input value={breachText ?? ''} onChange={e => onBreachTextChange?.(e.target.value)}
             placeholder="Flag breach if text contains…"
-            title="Case-insensitive — e.g. &quot;Out of adherence&quot;. Leave blank to never breach on this column."
+            title="Case-insensitive — e.g. &quot;Out of adherence&quot;. Leave blank to never breach on this column. Agents in a status with a Critical time under Status Durations go by that time instead."
             style={{ flex: 1, minWidth: 0, fontSize: 10, padding: '3px 6px', borderRadius: 4,
               border: '1px solid var(--border,#e1e6e4)', background: 'var(--bg-body,#f0f2f1)', color: 'var(--text-main)' }} />
           {!!(breachText ?? '').trim() && (
@@ -3204,6 +3204,8 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   <strong> Send to Cliq</strong> controls ONLY the Zoho Cliq channel message — off by default for
                   every status, so pick which ones should actually page the channel (Workforce Logs/RTA Logs are
                   unaffected, they have their own scope settings on the Zoho Integrations tab).
+                  A status with a <strong>Critical</strong> time set here goes by that time only: a Data Sources
+                  text trigger (e.g. "Out of adherence") doesn't flag an agent in that status until it's passed.
                 </p>
                 {(() => {
                   // Shared row renderer for both sections below — identical
