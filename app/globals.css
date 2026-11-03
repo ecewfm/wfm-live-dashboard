@@ -687,3 +687,87 @@ body {
 .bcm-btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
 .bcm-btn.primary:hover { filter: brightness(1.06); }
 .bcm-btn:disabled { opacity: .6; cursor: default; }
+
+/* ── LOGGINGS PAGE (components/LogsPage.tsx, super users) ─────────────────
+   Every Cliq notification / RTA Log the webapp sent. Reuses .table-card and
+   .dash-table; everything here is the page's own pieces. */
+.lg-refresh { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.lg-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
+.lg-stat {
+  display: flex; align-items: center; gap: 10px; min-width: 190px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 10px 14px;
+}
+.lg-stat > i { font-size: 22px; color: var(--primary); }
+.lg-stat.bad > i, .lg-stat.bad .lg-stat-n { color: var(--danger); }
+.lg-stat-n { font-size: 20px; font-weight: 700; line-height: 1.1; }
+.lg-stat-l { font-size: 11px; color: var(--text-muted); }
+.lg-stat-note { font-size: 11px; color: var(--text-muted); }
+.lg-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
+.lg-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-card); }
+.lg-seg button {
+  border: none; background: transparent; color: var(--text-muted); cursor: pointer;
+  font-family: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 12px;
+}
+.lg-seg button + button { border-left: 1px solid var(--border); }
+.lg-seg button.on { background: var(--primary); color: #fff; }
+.lg-seg button:not(.on):hover { background: var(--primary-light); color: var(--text-main); }
+.lg-select, .lg-search input {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); color: var(--text-main);
+  font-family: inherit; font-size: 12.5px; padding: 7px 10px;
+}
+.lg-search { position: relative; flex: 1; min-width: 220px; }
+.lg-search i { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--text-muted); }
+.lg-search input { width: 100%; padding-left: 30px; }
+.lg-banner {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 10px 14px;
+  border-radius: var(--radius); border: 1px solid var(--border); background: var(--primary-light); font-size: 13px;
+}
+.lg-banner.bad { background: rgba(201,92,92,0.10); border-color: rgba(201,92,92,0.35); color: var(--danger); }
+.lg-banner code { font-size: 12px; }
+.lg-table-wrap { overflow-x: auto; }
+.lg-table td { vertical-align: top; }
+.lg-row { cursor: pointer; }
+.lg-row.failed td { background: rgba(201,92,92,0.04); }
+.lg-row.open td { border-bottom-color: transparent; }
+.lg-chev { border: none; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0; }
+.lg-ago { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.lg-acc { font-weight: 600; white-space: nowrap; }
+.lg-sum { line-height: 1.45; min-width: 280px; }
+.lg-type, .lg-res {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px; border-radius: 20px;
+  font-size: 11px; font-weight: 700; white-space: nowrap; border: 1px solid transparent;
+}
+.lg-type.cliq { background: rgba(75,139,156,0.12); color: var(--info); border-color: rgba(75,139,156,0.3); }
+.lg-type.rta  { background: rgba(132,107,154,0.13); color: var(--purple); border-color: rgba(132,107,154,0.3); }
+.dark .lg-type.cliq { color: #7cc4d6; }
+.dark .lg-type.rta  { color: #b9a3d0; }
+.lg-res.ok  { background: rgba(72,127,98,0.12); color: var(--success); border-color: rgba(72,127,98,0.35); }
+.lg-res.bad { background: rgba(201,92,92,0.12); color: var(--danger); border-color: rgba(201,92,92,0.35); }
+.lg-detail-row > td { background: rgba(0,0,0,0.015); }
+.dark .lg-detail-row > td { background: rgba(255,255,255,0.02); }
+.lg-detail { padding: 4px 4px 10px 26px; display: flex; flex-direction: column; gap: 12px; }
+.lg-error {
+  padding: 8px 12px; border-radius: 8px; font-size: 12.5px; line-height: 1.5; word-break: break-word;
+  background: rgba(201,92,92,0.10); border: 1px solid rgba(201,92,92,0.35); color: var(--danger);
+}
+.lg-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 18px; font-size: 12.5px; }
+.lg-facts span {
+  display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-muted); margin-bottom: 1px;
+}
+.lg-block-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 6px; }
+.lg-items { list-style: none; display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
+.lg-items li { display: flex; align-items: baseline; gap: 8px; }
+.lg-pre {
+  white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  line-height: 1.5; background: var(--bg-body); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; max-height: 260px; overflow-y: auto;
+}
+.lg-more { display: flex; justify-content: center; margin-top: 14px; }
+.lg-more-btn {
+  padding: 8px 18px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card);
+  color: var(--text-main); cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 600;
+}
+.lg-more-btn:hover { background: var(--primary-light); }
+.lg-more-btn:disabled { opacity: .6; cursor: default; }

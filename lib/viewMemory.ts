@@ -1,5 +1,6 @@
 // lib/viewMemory.ts
-// What THIS browser tab was last looking at — which page (Overview / Dashboard)
+// What THIS browser tab was last looking at — which page (Overview / Dashboard /
+// Loggings — the last only for super users, see components/Dashboard.tsx)
 // and which account — so a reload puts the person back where they were instead
 // of on the Overview. That matters most for the automatic reload that picks up
 // a new deployment (the version check in components/Dashboard.tsx): without
@@ -17,7 +18,7 @@
 
 const KEY = 'wfm_view'
 
-export type ViewPage = 'overview' | 'dashboard'
+export type ViewPage = 'overview' | 'dashboard' | 'logs'
 export interface ViewMemory { page?: ViewPage; account?: string }
 
 /** The remembered view, or {} when there is none / it is unreadable. Never throws. */
@@ -26,7 +27,7 @@ export function loadView(): ViewMemory {
     const raw = JSON.parse(sessionStorage.getItem(KEY) || '{}')
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
     const out: ViewMemory = {}
-    if (raw.page === 'overview' || raw.page === 'dashboard') out.page = raw.page
+    if (raw.page === 'overview' || raw.page === 'dashboard' || raw.page === 'logs') out.page = raw.page
     if (typeof raw.account === 'string' && raw.account) out.account = raw.account
     return out
   } catch {

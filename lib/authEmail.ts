@@ -116,6 +116,8 @@ export const can = {
   manageAccounts: (r: UserRole) => r === 'superuser',
   /** Import a roster file. */
   importUsers:   (r: UserRole) => r === 'superuser',
+  /** The Loggings page: every Cliq message / RTA Log sent, for every account. */
+  viewLogs:      (r: UserRole) => r === 'superuser',
   /** Which roles this role is allowed to hand out. */
   assignableRoles: (r: UserRole): UserRole[] =>
     r === 'superuser' ? ['superuser', 'rta', 'team_lead']

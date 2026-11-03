@@ -702,6 +702,41 @@ Untracked's own Status Durations minutes.
 - Verified on Wyze's real settings + live rows (with Untracked = 5 min Critical:
   the Untracked agent at 25 s dropped off; 4m59s no breach, 5m1s breach).
 
+## Loggings tab — every Cliq message / RTA Log sent (2026-11-02)
+
+Per the user: super users get a third top-nav tab, **Loggings** (after Overview
+and Dashboard), listing every Zoho Cliq notification and every Workforce RTA
+Logs submission the webapp made — in brief, easy-to-read lines.
+
+- Table `wfm_notification_log` (`sql/notification_log.sql` — **must be run once
+  in Supabase**): one row per attempt, `kind` cliq | rta_log, `status` sent |
+  failed (+ `error`), `source` auto | force | test, a one-line `summary`, and
+  `details` jsonb (Cliq: channel, test mode, the exact message, the breaches;
+  RTA: Zoho account, sites, category / sub-category, mode, the remarks, the
+  items). RLS on, NO policies (like `wfm_cliq_oauth`) — it holds every
+  account's breach details.
+- Written ONLY by `lib/notificationLog.ts` `recordNotification()` (service-role
+  client), which never throws — a missing table or Supabase hiccup must never
+  stop a send. Called next to every send in `lib/cliqScan.ts` (Cliq, RTA
+  AI-grouped / heartbeat / combined, and an AI-categorization failure that
+  stopped an RTA Log) and in `app/api/zoho/test-rta-log` (source `test`). A new
+  send path must log there too. Workforce Logs (the unused direct-write path)
+  is deliberately not logged. Summaries are built by the helpers in that file
+  (`cliqSummary`, `rtaSummary`, `briefRta`…) — one place for the wording.
+- Kept 90 days: `pruneNotificationLog()` at the end of `runCliqScan()`, at most
+  hourly per instance.
+- Read through `app/api/logs` (GET, `requireRole(['superuser'])` on the first
+  line; filters kind / status / account / since, `before=<id>` paging, 24 h
+  counts; an unmigrated table returns `needsMigration` instead of an error).
+- UI: `components/LogsPage.tsx`; tab shown only when `can.viewLogs(role)`
+  (superuser); `lib/viewMemory.ts` remembers `logs`, and a non-superuser with
+  that remembered lands on the Overview.
+- Verified: the real `runCliqScan()` (Force Scan) on the live accounts' data
+  read-only, with every write and Zoho/Gemini call intercepted (14 checks:
+  one row per message/submission, failures carry Zoho's reason, exact message /
+  remarks kept, still sends when the table is missing); the route's role check
+  and filters (8); the page on the production build (27, light + dark).
+
 ## `lib/settings.ts` load/save silently dropping fields (fixed 2026-09-28)
 
 Found while chasing why `rta_sites`/`rta_account_name` kept reverting to

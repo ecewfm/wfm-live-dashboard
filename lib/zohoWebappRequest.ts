@@ -73,8 +73,8 @@ const REQUESTED_BY = 'powerbi@ececontactcenters.net'
 // category/sub_category from Gemini instead (createAccountBreachRtaLog's
 // optional category/subCategory params below) — see
 // sql/gemini_ai_categorization.sql.
-const BREACH_CATEGORY = 'Service Level & Volume Management'
-const BREACH_SUB_CATEGORY = 'Understaffing Alert'
+export const BREACH_CATEGORY = 'Service Level & Volume Management'
+export const BREACH_SUB_CATEGORY = 'Understaffing Alert'
 
 interface WorkforceRtaLogPayload {
   selection_type: 'Site Wide' | 'Account Wide' | 'Employees'

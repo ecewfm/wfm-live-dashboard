@@ -18,7 +18,8 @@
 //     accounts the way they'll really behave, not the old single fixed
 //     submission.
 
-import { testAccountBreachRtaLog } from '@/lib/zohoWebappRequest'
+import { testAccountBreachRtaLog, BREACH_CATEGORY, BREACH_SUB_CATEGORY, type WebappRequestResult } from '@/lib/zohoWebappRequest'
+import { recordNotification, rtaSummary, firstSentence } from '@/lib/notificationLog'
 import { getZohoAuthorizedAccountInfo } from '@/lib/zohoAuth'
 import { classifyBreachesForRtaLog } from '@/lib/geminiClassifier'
 import { loadZohoFieldOptions } from '@/lib/settings'
@@ -27,6 +28,22 @@ import { buildBreaches, collectRtaKpiSignals, type BreachRow } from '@/lib/breac
 import { computeRtaKpiSignalDue } from '@/lib/rtaLogsChangeDetection'
 import type { DataSourceConfig, Thresholds } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
+
+// Every test submission is also a row on the Loggings page (source "test"):
+// it's a real record in Zoho, so it belongs in the record of what was sent.
+function logTest(accountId: string, zohoAccount: string, sites: string[], category: string, subCategory: string, what: string,
+  outcome: { result?: WebappRequestResult; error?: string }) {
+  const ok = !!outcome.result?.ok
+  const error = outcome.error
+    ?? (ok ? null : `Zoho answered HTTP ${outcome.result?.status}: ${JSON.stringify(outcome.result?.responseBody ?? {}).slice(0, 600)}`)
+  let remarks: string | undefined
+  try { remarks = JSON.parse(outcome.result?.requestBody?.data?.Values_field || '{}').remarks } catch { /* nothing sent */ }
+  return recordNotification({
+    kind: 'rta_log', accountId, status: ok ? 'sent' : 'failed', source: 'test',
+    summary: rtaSummary(category, subCategory, what), error,
+    details: { mode: 'test', zohoAccount, sites, category, subCategory, remarks },
+  })
+}
 
 export async function POST(req: Request) {
   let accountId: string | undefined
@@ -68,7 +85,10 @@ export async function POST(req: Request) {
   if (!aiEnabled) {
     const result = await testAccountBreachRtaLog(zohoAccountName || accountId, sites).catch((e: any) => ({ __threw: true, message: e.message }))
     const authorizedAs = await authorizedAsPromise
-    if (result && (result as any).__threw) {
+    const threw = result && (result as any).__threw
+    await logTest(accountId, zohoAccountName || accountId, sites, BREACH_CATEGORY, BREACH_SUB_CATEGORY, 'test submission (connectivity test)',
+      threw ? { error: (result as any).message } : { result: result as WebappRequestResult })
+    if (threw) {
       console.error('[zoho/test-rta-log] failed:', (result as any).message)
       return Response.json({ error: (result as any).message, authorizedAs }, { status: 500 })
     }
@@ -108,6 +128,7 @@ export async function POST(req: Request) {
     for (const g of groups) {
       const result = await testAccountBreachRtaLog(zohoAccountName || accountId, sites, g.category, g.subCategory, g.remarks)
       submissions.push({ category: g.category, subCategory: g.subCategory, ...result })
+      await logTest(accountId, zohoAccountName || accountId, sites, g.category, g.subCategory, `test, AI-grouped — ${firstSentence(g.remarks)}`, { result })
     }
 
     const authorizedAs = await authorizedAsPromise

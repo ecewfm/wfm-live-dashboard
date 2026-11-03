@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } fr
 import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
 import BreachColumnsModal from './BreachColumnsModal'
+import LogsPage from './LogsPage'
 import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
@@ -41,7 +42,8 @@ import {
   type StatusThresholds
 } from '@/lib/utils'
 
-type Page = 'dashboard' | 'overview'
+// 'logs' = the Loggings page (super users only — can.viewLogs)
+type Page = 'dashboard' | 'overview' | 'logs'
 
 // Stable reference (not a fresh {} literal) so passing this as a fallback
 // prop doesn't look like a changed value on every render — an unstable
@@ -84,13 +86,19 @@ export default function Dashboard() {
   // The Breach / Anomalies tables' gear changes what EVERYONE watching that
   // account sees, so it's a settings edit — same roles as the Settings modal.
   const canEditSettings = can.editSettings(profile.role)
+  // The Loggings tab — every Cliq message / RTA Log sent, for every account.
+  // /api/logs checks the role too; this only decides whether the tab shows.
+  const canViewLogs = can.viewLogs(profile.role)
 
   const [isDark, setIsDark]                 = useState(false)
   // The page this TAB was last on (lib/viewMemory.ts) — so a reload, above all the
   // automatic one when a new version is deployed, comes straight back instead of
   // dropping everyone on the Overview. A new tab has no memory: Overview, as before.
   // (Dashboard only mounts after sign-in, on the client, so reading storage here is safe.)
-  const [currentPage, setCurrentPage]       = useState<Page>(() => loadView().page ?? 'overview')
+  const [currentPage, setCurrentPage]       = useState<Page>(() => {
+    const p = loadView().page ?? 'overview'
+    return p === 'logs' && !canViewLogs ? 'overview' : p
+  })
   const [accounts, setAccounts]             = useState<string[]>([])
   // Distinguishes "still loading" from "loaded, and this person has no
   // accounts" — a roster import can create someone before their account
@@ -952,6 +960,11 @@ export default function Dashboard() {
           <div className={`top-nav-item${currentPage === 'dashboard' ? ' active' : ''}`} onClick={() => navigate('dashboard')}>
             <i className="bx bx-home-circle" /> Dashboard
           </div>
+          {canViewLogs && (
+            <div className={`top-nav-item${currentPage === 'logs' ? ' active' : ''}`} onClick={() => navigate('logs')}>
+              <i className="bx bx-list-ul" /> Loggings
+            </div>
+          )}
         </div>
       </div>
 
@@ -964,9 +977,10 @@ export default function Dashboard() {
               <div className="topbar-title">
                 {currentPage === 'dashboard'
                   ? (currentAccount ? `${currentAccount.toUpperCase()} — Real-Time Dashboard` : 'Real-Time Dashboard')
+                  : currentPage === 'logs' ? 'Loggings — Cliq Notifications & RTA Logs'
                   : 'All Accounts Overview'}
               </div>
-              <div className="topbar-sub">{stale ? '⚠ Data may be stale' : 'Live'}</div>
+              <div className="topbar-sub">{currentPage === 'logs' ? 'Sent by the webapp, all accounts' : stale ? '⚠ Data may be stale' : 'Live'}</div>
             </div>
           </div>
           <div className="topbar-right">
@@ -1099,6 +1113,9 @@ export default function Dashboard() {
               rtaLogsEnabledMap={rtaLogsEnabledMap}
               onConfigureBreachCols={canEditSettings ? setBreachColsFor : undefined}
             />
+          )}
+          {currentPage === 'logs' && canViewLogs && (
+            <LogsPage accounts={accounts} displayNames={displayNames} />
           )}
         </div>
       </div>

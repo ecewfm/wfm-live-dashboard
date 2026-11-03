@@ -26,7 +26,8 @@ import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFr
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
-import { createAccountBreachRtaLog } from './zohoWebappRequest'
+import { createAccountBreachRtaLog, BREACH_CATEGORY, BREACH_SUB_CATEGORY } from './zohoWebappRequest'
+import { recordNotification, pruneNotificationLog, cliqSummary, rtaSummary, briefRta, firstSentence, breachDetails, signalAsRow } from './notificationLog'
 import { classifyBreachesForRtaLog } from './geminiClassifier'
 import { loadZohoFieldOptions, type ZohoFieldOption } from './settings'
 import { computeRtaLogsChangeSignal, computeRtaKpiSignalDue, isAgentStatusHeartbeatDue, EMPTY_RTA_LOGS_STATE, type RtaLogsState } from './rtaLogsChangeDetection'
@@ -289,6 +290,7 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
   }
 
   l(`Done. ${sent} sent, ${skipped} skipped.`)
+  await pruneNotificationLog()
   return { accountsScanned: qualifying.length, sent, skipped, log }
 }
 
@@ -305,6 +307,9 @@ async function processAccount(
   const kpiTh = (acc.kpi_thresholds || {}) as Thresholds
   const statusTh = (acc.status_thresholds || {}) as StatusThresholds
   const cooldownMs = globalSettings.frequencyMinutes * 60 * 1000
+  // For the Loggings page (lib/notificationLog.ts): every Cliq message and RTA
+  // Log below is recorded there, sent or failed.
+  const source = forceSend ? 'force' as const : 'auto' as const
 
   const accountData = await fetchAccountData(ds, accountId)
 
@@ -424,6 +429,17 @@ async function processAccount(
         // heartbeat timer stale so it immediately re-fires a moment later.
         const wantsAgentChangeAdvance    = agentDue && reportAgentStatusChange
         const wantsAgentHeartbeatAdvance = agentDue && reportAgentStatusHeartbeat && rtaBreaches.length > 0
+        const logRta = (status: 'sent' | 'failed', mode: 'ai' | 'plain' | 'heartbeat', summary: string, extra: {
+          category?: string; subCategory?: string; remarks?: string; items?: number; error?: string
+        }) => recordNotification({
+          kind: 'rta_log', accountId, status, source, summary, breachCount: extra.items ?? null, error: extra.error ?? null,
+          details: {
+            mode, zohoAccount: zohoAccountName, sites, category: extra.category, subCategory: extra.subCategory, remarks: extra.remarks,
+            items: mode === 'heartbeat' ? breachDetails(kpiDue.dueHealthy.map(signalAsRow))
+              : mode === 'plain' ? breachDetails([...breachRowsForAi, ...kpiDue.dueHealthy.map(signalAsRow)])
+              : breachDetails(breachRowsForAi),
+          },
+        })
 
         if (acc.rta_ai_categorization_enabled) {
           // AI-based per-breach-type grouping (lib/geminiClassifier.ts) —
@@ -438,12 +454,15 @@ async function processAccount(
               const groups = await classifyBreachesForRtaLog(accountId, breachRowsForAi, categoryOptions, subCategoryOptions)
               let anySent = false
               for (const g of groups) {
+                const what = { category: g.category, subCategory: g.subCategory, remarks: g.remarks }
                 try {
                   await createAccountBreachRtaLog(zohoAccountName, g.remarks, sites, g.category, g.subCategory)
                   l(`${accountId}: RTA Log webapp request submitted (AI-grouped: "${g.category} / ${g.subCategory}").`)
                   anySent = true
+                  await logRta('sent', 'ai', rtaSummary(g.category, g.subCategory, firstSentence(g.remarks)), what)
                 } catch (e: any) {
                   l(`${accountId}: RTA Log webapp request failed for AI group "${g.category} / ${g.subCategory}" — ${e.message}`)
+                  await logRta('failed', 'ai', rtaSummary(g.category, g.subCategory, firstSentence(g.remarks)), { ...what, error: e.message })
                 }
               }
               if (anySent) {
@@ -455,30 +474,39 @@ async function processAccount(
               }
             } catch (e: any) {
               l(`${accountId}: AI categorization failed, skipping RTA Logs this cycle (will retry next cycle) — ${e.message}`)
+              await logRta('failed', 'ai', `Not sent — AI categorization failed (tries again next cycle). ${briefRta(breachRowsForAi, [])}`,
+                { items: breachRowsForAi.length, error: e.message })
             }
           }
           // Due-but-healthy readings aren't breaches — always a separate
           // plain (fixed-category) submission, independent of AI mode/success.
           if (kpiDue.dueHealthy.length > 0) {
+            const remarks = formatRtaLogsRemarks(accountId, [], kpiDue.dueHealthy)
+            const summary = rtaSummary(BREACH_CATEGORY, BREACH_SUB_CATEGORY, `hourly readings, ${briefRta([], kpiDue.dueHealthy)}`)
+            const what = { category: BREACH_CATEGORY, subCategory: BREACH_SUB_CATEGORY, remarks, items: kpiDue.dueHealthy.length }
             try {
-              const remarks = formatRtaLogsRemarks(accountId, [], kpiDue.dueHealthy)
               await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
               l(`${accountId}: RTA Log webapp request submitted (heartbeat readings).`)
               updates.rta_logs_last_sent_at = new Date().toISOString()
               kpiHeartbeatAdvance = kpiDue.heartbeatAdvance
               didAnything = true
+              await logRta('sent', 'heartbeat', summary, what)
             } catch (e: any) {
               l(`${accountId}: RTA Log webapp request failed (heartbeat readings) — ${e.message}`)
+              await logRta('failed', 'heartbeat', summary, { ...what, error: e.message })
             }
           }
         } else {
           // Plain path — ONE combined submission per cycle covering every
           // KPI tile due this cycle (whichever mode) plus any due agent
           // breaches, never one submission per KPI.
+          const remarks = formatRtaLogsRemarks(accountId, breachRowsForAi, kpiDue.dueHealthy)
+          const summary = rtaSummary(BREACH_CATEGORY, BREACH_SUB_CATEGORY, briefRta(breachRowsForAi, kpiDue.dueHealthy))
+          const what = { category: BREACH_CATEGORY, subCategory: BREACH_SUB_CATEGORY, remarks, items: breachRowsForAi.length + kpiDue.dueHealthy.length }
           try {
-            const remarks = formatRtaLogsRemarks(accountId, breachRowsForAi, kpiDue.dueHealthy)
             await createAccountBreachRtaLog(zohoAccountName, remarks, sites)
             l(`${accountId}: RTA Log webapp request submitted.`)
+            await logRta('sent', 'plain', summary, what)
             updates.rta_logs_last_sent_at = new Date().toISOString()
             agentAdvanced = wantsAgentChangeAdvance
             agentHeartbeatAdvanced = wantsAgentHeartbeatAdvance
@@ -487,6 +515,7 @@ async function processAccount(
             didAnything = true
           } catch (e: any) {
             l(`${accountId}: RTA Log webapp request failed — ${e.message}`)
+            await logRta('failed', 'plain', summary, { ...what, error: e.message })
           }
         }
 
@@ -570,16 +599,23 @@ async function processAccount(
     } else {
       const lastSent = acc.cliq_last_sent_at ? new Date(acc.cliq_last_sent_at).getTime() : 0
       if (forceSend || Date.now() - lastSent >= cooldownMs) {
+        const message = formatMessage(accountId, cliqBreaches, globalSettings.testMode)
+        const logCliq = (status: 'sent' | 'failed', error?: string) => recordNotification({
+          kind: 'cliq', accountId, status, source, error: error ?? null,
+          summary: cliqSummary(acc.cliq_channel!, cliqBreaches), breachCount: cliqBreaches.length,
+          details: { channel: acc.cliq_channel, testMode: globalSettings.testMode, message, items: breachDetails(cliqBreaches) },
+        })
         try {
-          const message = formatMessage(accountId, cliqBreaches, globalSettings.testMode)
           await sendCliqChannelMessage(acc.cliq_channel, message)
           l(`${accountId}: sent to Cliq #${acc.cliq_channel}.`)
           // Cooldown only advances on a CONFIRMED send — a failed Cliq API call
           // (thrown above) must not silently eat the cooldown window.
           updates.cliq_last_sent_at = new Date().toISOString()
           didAnything = true
+          await logCliq('sent')
         } catch (e: any) {
           l(`${accountId}: Cliq send failed — ${e.message}`)
+          await logCliq('failed', e.message)
         }
       } else {
         l(`${accountId}: Cliq within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)
