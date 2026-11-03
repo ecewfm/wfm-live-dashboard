@@ -606,6 +606,20 @@ project (no `zoho_activity` here), so this app pulls Zoho itself.
   names/report link names are vCORE's, verified in its source 2026-10-22; whether
   OUR consenting Zoho user can read these reports (and the Honduras app) shows up
   in the "Pull now" log. Optional env: `ZOHO_HONDURAS_ENABLED=false`.
+- **Logged In, from the time logs** (per the user, 2026-11-03 — people who just
+  log in and work, choosing no aux): `computeCurrentAux()` also returns everyone
+  logged in on no break/aux as status `ZOHO_LOGGED_IN_STATUS` ("Logged In",
+  category `login`). Rules: only a person's LATEST session (by login) counts —
+  open = logged in (so a forgotten Log_Out followed by a later, closed session is
+  logged out); inside it, their latest-STARTING break/aux decides — no End = on
+  it, ended (or none) = Logged In since that End, else the login (time in status,
+  like a CRM's "Available"). That also stopped a never-closed break hiding a later
+  closed one. Toggle `zohoAux.includeLoggedIn` (default ON, "Include logged in, on
+  no break or aux" in the Zoho panel); Status Durations always lists Logged In first in
+  the ZOHO section (`zohoStatusCategory()`), so it can get its own minutes like any
+  Zoho type. Same rows/table (`category` is free text) — no migration; the section
+  keeps its "Zoho Breaks & Aux" name. Overnight caveat: yesterday is re-pulled
+  every 30 min, so a Log_Out on yesterday's row can take that long to drop someone.
 
 ## Breach / Anomalies columns — the table's gear (2026-10-23)
 

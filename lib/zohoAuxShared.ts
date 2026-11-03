@@ -1,9 +1,9 @@
 // lib/zohoAuxShared.ts
-// Zoho breaks & aux → an account's "Zoho Breaks & Aux" agent section.
+// Zoho time logs, breaks & aux → an account's "Zoho Breaks & Aux" agent section.
 // The PURE half (no I/O, no server-only imports, safe anywhere): which Zoho
 // reports/fields to read, how their timestamps and names are parsed, how a
-// break/aux row is classified, and who is on a break/aux right now. The fetching
-// and caching half is lib/zohoAux.ts (server only).
+// break/aux row is classified, and who is logged in / on a break or aux right
+// now. The fetching and caching half is lib/zohoAux.ts (server only).
 //
 // Ported from Workforce R.E.S.T. vCORE's pipeline (its "Zoho breaks & aux →
 // the Adherence timeline" technical reference, checked against vCORE's source
@@ -44,7 +44,8 @@ export const ZOHO_AUX_SOURCES: ZohoAuxSource[] = [
   },
 ]
 
-/** The table each enabled account's "Zoho Breaks & Aux" agent section reads. */
+/** The table each enabled account's "Zoho Breaks & Aux" agent section reads
+ *  (its Logged In people too — the section keeps its name). */
 export const ZOHO_AUX_TABLE = 'wfm_zoho_agent_status'
 export const ZOHO_AUX_SECTION_LABEL = 'Zoho Breaks & Aux'
 
@@ -53,6 +54,9 @@ export interface ZohoAuxConfig {
   enabled: boolean
   includeBreaks?: boolean   // breaks & lunch — default true
   includeAux?: boolean      // every other aux (Chat, Meeting, Training, …) — default true
+  // Logged in to the Time Tracker and on no break or aux — just working
+  // (ZOHO_LOGGED_IN_STATUS). Default true. Per the user, 2026-11-03.
+  includeLoggedIn?: boolean
   // This account's name in Zoho (the Account on its people's Zoho records),
   // one or more, one per line — only when it isn't the same as the account's
   // display name here. Blank = the display name (and the account id).
@@ -64,6 +68,11 @@ export interface ZohoAuxConfig {
 
 export const includeBreaksOf = (c?: ZohoAuxConfig | null) => c?.includeBreaks !== false
 export const includeAuxOf    = (c?: ZohoAuxConfig | null) => c?.includeAux !== false
+export const includeLoggedInOf = (c?: ZohoAuxConfig | null) => c?.includeLoggedIn !== false
+
+/** The status of someone logged in to the Time Tracker who is on no break or
+ *  aux — its own Status Durations entry, like each Zoho break/aux type. */
+export const ZOHO_LOGGED_IN_STATUS = 'Logged In'
 
 export function parseExtraNames(text: string | undefined | null): string[] {
   const seen = new Set<string>(), out: string[] = []
@@ -147,10 +156,16 @@ export function classifyBreak(type: string): string {
   return type
 }
 
-/** Which of this account's two include-toggles a row falls under. */
+/** Which of this account's two break/aux include-toggles a row falls under. */
 export function breakCategory(type: string): 'break' | 'aux' {
   const c = classifyBreak(type)
   return c === 'Break' || c === 'Lunch' ? 'break' : 'aux'
+}
+
+/** A Zoho section status's kind: Logged In, or a break/aux type's. */
+export type ZohoStatusCategory = 'break' | 'aux' | 'login'
+export function zohoStatusCategory(status: string): ZohoStatusCategory {
+  return status === ZOHO_LOGGED_IN_STATUS ? 'login' : breakCategory(status)
 }
 
 /** The allowance a break/lunch type names, in minutes: "15 Minute Break" → 15,
@@ -263,13 +278,13 @@ export function parseBreakRow(r: Record<string, unknown>, s: ZohoAuxSource, acco
   }
 }
 
-// ── Who is on a break/aux RIGHT NOW ───────────────────────────────────────────
+// ── What everyone logged in is doing RIGHT NOW ────────────────────────────────
 export interface CurrentAux {
   employee: string        // Zoho's own display name
   employeeNorm: string
-  type: string            // the Zoho Type as logged ("15 Minute Break", "Chat", …)
-  category: 'break' | 'aux'
-  since: string           // UTC ISO — when this break/aux started
+  type: string            // the Zoho Type as logged ("15 Minute Break", "Chat", …), or ZOHO_LOGGED_IN_STATUS
+  category: ZohoStatusCategory
+  since: string           // UTC ISO — when this break/aux started; Logged In: the login, or the end of the last break/aux
   source: string
 }
 
@@ -279,35 +294,55 @@ const MAX_OPEN_SESSION_HOURS = 18
 const START_TOLERANCE_MS = 2 * 60 * 1000
 
 /**
- * Someone is on a break/aux only while they are LOGGED IN (a session with a
- * login and no logout) AND have a break/aux with no End that started inside
- * that session. Both conditions matter: Zoho holds hundreds of rows a week
- * whose End was never filled in, and without the session check every one of
- * those forgotten breaks would show as "on break" for days.
+ * Only someone LOGGED IN counts: their LATEST session (by login) has a login
+ * and no logout. Inside that session, their latest-starting break/aux decides:
+ *   - it has no End          → on it, since it started;
+ *   - it ended, or there's none → Logged In (per the user, 2026-11-03: people
+ *     who just log in and work, choosing no aux), since that End or the login —
+ *     time in the status, like a CRM's "Available".
+ * "Latest" on both counts matters: Zoho holds hundreds of rows a week whose
+ * End or Log_Out was never filled in. Without the session check every
+ * forgotten break would show for days; without "latest", a forgotten open
+ * session or break would outrank the newer, properly closed one after it.
  * Pass the sessions/breaks of today AND yesterday so overnight shifts work.
  */
 export function computeCurrentAux(sessions: ZohoSession[], breaks: ZohoBreak[], nowMs: number): Map<string, CurrentAux> {
-  const openSince = new Map<string, number>()   // employeeNorm -> latest open-session login
+  const latest = new Map<string, { login: number; open: boolean; employee: string; source: string }>()
   for (const s of sessions) {
-    if (!s.login || s.logout) continue
+    if (!s.login) continue
     const login = Date.parse(s.login)
-    if (!Number.isFinite(login) || login > nowMs || nowMs - login > MAX_OPEN_SESSION_HOURS * 3600e3) continue
+    if (!Number.isFinite(login) || login > nowMs) continue
     const k = normalizeName(s.employee)
-    if (!k) continue
-    if (!openSince.has(k) || login > (openSince.get(k) as number)) openSince.set(k, login)
+    if (!k || (latest.get(k)?.login ?? -Infinity) >= login) continue
+    latest.set(k, { login, open: !s.logout && nowMs - login <= MAX_OPEN_SESSION_HOURS * 3600e3, employee: s.employee, source: s.source })
+  }
+
+  // Each logged-in person's latest-starting break/aux inside their session
+  // (an open one wins a tie with a closed one).
+  const lastBreak = new Map<string, { b: ZohoBreak; start: number }>()
+  for (const b of breaks) {
+    if (!b.start) continue
+    const k = normalizeName(b.employee)
+    const session = latest.get(k)
+    if (!session?.open) continue
+    const start = Date.parse(b.start)
+    if (!Number.isFinite(start) || start > nowMs || start < session.login - START_TOLERANCE_MS) continue
+    const prev = lastBreak.get(k)
+    if (prev && (prev.start > start || (prev.start === start && !prev.b.end))) continue
+    lastBreak.set(k, { b, start })
   }
 
   const out = new Map<string, CurrentAux>()
-  for (const b of breaks) {
-    if (!b.start || b.end) continue
-    const k = normalizeName(b.employee)
-    const sessionStart = openSince.get(k)
-    if (sessionStart === undefined) continue
-    const start = Date.parse(b.start)
-    if (!Number.isFinite(start) || start > nowMs || start < sessionStart - START_TOLERANCE_MS) continue
-    const prev = out.get(k)
-    if (prev && Date.parse(prev.since) >= start) continue   // the most recent open one wins
-    out.set(k, { employee: b.employee, employeeNorm: k, type: b.type, category: breakCategory(b.type), since: b.start, source: b.source })
+  for (const [k, session] of latest) {
+    if (!session.open) continue
+    const last = lastBreak.get(k)?.b
+    if (last && !last.end) {
+      out.set(k, { employee: last.employee, employeeNorm: k, type: last.type, category: breakCategory(last.type), since: last.start!, source: last.source })
+      continue
+    }
+    const ended = last?.end ? Date.parse(last.end) : NaN
+    const since = Number.isFinite(ended) ? Math.min(Math.max(ended, session.login), nowMs) : session.login
+    out.set(k, { employee: session.employee, employeeNorm: k, type: ZOHO_LOGGED_IN_STATUS, category: 'login', since: new Date(since).toISOString(), source: session.source })
   }
   return out
 }
@@ -320,22 +355,22 @@ export interface ZohoAgentStatusRow {
 
 /**
  * The rows for one account: everyone in `names` (its people in Zoho, plus its
- * extra names) who is on a break/aux right now, of a kind this account shows —
- * listed under their ZOHO name (per the user, 2026-10-23: the Zoho name only).
+ * extra names) who is logged in or on a break/aux right now, of a kind this
+ * account shows — listed under their ZOHO name (per the user, 2026-10-23: the
+ * Zoho name only).
  */
 export function buildAccountStatusRows(
   accountId: string, names: string[], current: Map<string, CurrentAux>,
   cfg: ZohoAuxConfig, nowIso: string,
 ): ZohoAgentStatusRow[] {
-  const wantBreaks = includeBreaksOf(cfg), wantAux = includeAuxOf(cfg)
+  const want: Record<ZohoStatusCategory, boolean> = { break: includeBreaksOf(cfg), aux: includeAuxOf(cfg), login: includeLoggedInOf(cfg) }
   const seen = new Set<string>(), rows: ZohoAgentStatusRow[] = []
   for (const name of names) {
     const k = normalizeName(name)
     if (!k || seen.has(k)) continue
     seen.add(k)
     const c = current.get(k)
-    if (!c) continue
-    if (c.category === 'break' ? !wantBreaks : !wantAux) continue
+    if (!c || !want[c.category]) continue
     rows.push({
       id: `${accountId}:${k}`, account_id: accountId, agent_name: c.employee, zoho_name: c.employee,
       status: c.type, category: c.category, since: c.since, source: c.source, updated_at: nowIso,

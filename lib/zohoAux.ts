@@ -1,8 +1,9 @@
 // lib/zohoAux.ts
 // SERVER ONLY. Pulls Zoho break/aux logs and time logs, caches them, and keeps
 // each enabled account's "Zoho Breaks & Aux" agent section (wfm_zoho_agent_status)
-// up to date. The pure rules (fields, parsing, matching, "on a break right now")
-// are in lib/zohoAuxShared.ts.
+// up to date — who is on a break/aux, and (from the time logs) who is logged in
+// on none. The pure rules (fields, parsing, matching, "what are they doing right
+// now") are in lib/zohoAuxShared.ts.
 //
 // Same shape as Workforce R.E.S.T. vCORE's pipeline (see that file's header):
 //   - pulls are ORGANISATION-WIDE, one date per pull, never per account or per
@@ -29,7 +30,7 @@ import type { DataSourceConfig } from './types'
 import {
   ZOHO_AUX_SOURCES, ZOHO_AUX_TABLE, zohoCriteriaDate, parseSessionRow, parseBreakRow,
   normalizeName, dateInTz, addDays, computeCurrentAux, buildAccountStatusRows, parseExtraNames,
-  pickAccountField, accountKeysFor, zohoPeopleOnAccount, zohoAccountsSeen, zohoTypesSeen,
+  pickAccountField, accountKeysFor, zohoPeopleOnAccount, zohoAccountsSeen, zohoTypesSeen, includeLoggedInOf,
   type ZohoSession, type ZohoBreak, type ZohoAgentStatusRow,
 } from './zohoAuxShared'
 
@@ -213,8 +214,9 @@ export interface AuxSyncResult {
   log: string[]
   pulled: string[]
   // per enabled account: which Zoho account name(s) it was matched on, how many
-  // people Zoho has on it, and how many of them (plus extra names) are on a break/aux now
-  accounts: { id: string; zohoAccounts: string[]; people: number; extraNames: number; onBreakOrAux: number }[]
+  // people Zoho has on it, and how many of them (plus extra names) are on a
+  // break/aux now, and logged in on none (shown as Logged In)
+  accounts: { id: string; zohoAccounts: string[]; people: number; extraNames: number; onBreakOrAux: number; loggedIn: number }[]
 }
 
 export async function runZohoAuxSync(
@@ -280,8 +282,9 @@ export async function runZohoAuxSync(
       const extra = parseExtraNames(cfg.extraNames)
       const rows = buildAccountStatusRows(a.id, [...people.values(), ...extra], current, cfg, nowIso)
       await store.replaceAccountRows(a.id, rows)
-      accounts.push({ id: a.id, zohoAccounts: asked.length ? asked : [displayNames[a.id] || a.id], people: people.size, extraNames: extra.length, onBreakOrAux: rows.length })
-      let line = `${a.id}: Zoho account ${label} — ${people.size} ${people.size === 1 ? 'person' : 'people'} in Zoho's logs${extra.length ? ` (+${extra.length} extra name(s))` : ''}, ${rows.length} on a break/aux now`
+      const loggedIn = rows.filter(r => r.category === 'login').length, onBreakOrAux = rows.length - loggedIn
+      accounts.push({ id: a.id, zohoAccounts: asked.length ? asked : [displayNames[a.id] || a.id], people: people.size, extraNames: extra.length, onBreakOrAux, loggedIn })
+      let line = `${a.id}: Zoho account ${label} — ${people.size} ${people.size === 1 ? 'person' : 'people'} in Zoho's logs${extra.length ? ` (+${extra.length} extra name(s))` : ''}, ${onBreakOrAux} on a break/aux now${includeLoggedInOf(cfg) ? `, ${loggedIn} logged in on none` : ''}`
       if (!people.size) {
         line += seen.length
           ? `. No one in Zoho's logs is on that account — if Zoho calls it something else, pick it under "Zoho account(s) to use" in Settings → Zoho Integrations. Zoho accounts seen: ${seen.slice(0, 40).map(x => x.name).join(', ')}${seen.length > 40 ? `, … (${seen.length} in all)` : ''}`

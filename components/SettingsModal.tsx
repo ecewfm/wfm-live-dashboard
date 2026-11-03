@@ -23,7 +23,7 @@ import UsersTab from './UsersTab'
 import AlarmTab from './AlarmTab'
 import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
-import { includeBreaksOf, includeAuxOf, accountKeysFor, normalizeAccount, parseExtraNames, breakCategory, allowanceMinutesOf, ZOHO_AUX_TABLE, type ZohoAuxConfig } from '@/lib/zohoAuxShared'
+import { includeBreaksOf, includeAuxOf, includeLoggedInOf, accountKeysFor, normalizeAccount, parseExtraNames, zohoStatusCategory, allowanceMinutesOf, ZOHO_AUX_TABLE, ZOHO_LOGGED_IN_STATUS, type ZohoAuxConfig, type ZohoStatusCategory } from '@/lib/zohoAuxShared'
 
 type Tab = 'kpi' | 'status' | 'agents' | 'datasource' | 'accounts' | 'cliq' | 'users' | 'alarm'
 
@@ -2329,11 +2329,11 @@ function ZohoAuxSection({ accountId, displayName, value, onChange }: {
       <div className="sm-section-title" style={{ marginTop: 20 }}>ZOHO BREAKS &amp; AUX — {accountId}</div>
       <p className="sm-desc" style={{ marginBottom: 10 }}>
         Adds a <strong>Zoho Breaks &amp; Aux</strong> section to this account&apos;s Agent Status: everyone
-        whose <strong>account in Zoho</strong> is this account and who is on a Zoho break or aux right now (from
-        the ECE Time Tracker logs), shown under their Zoho name, with how long they&apos;ve been on it. Each
-        Zoho type — 15 Minute Break, 1 Hour Lunch, Chat, Meeting, … — shows up
-        in <strong>Status Durations</strong> once it&apos;s been seen, so it can have its own thresholds; a
-        break that runs too long then appears in Breach / Anomalies like any other status.
+        whose <strong>account in Zoho</strong> is this account and who is logged in to the ECE Time Tracker right
+        now — on a Zoho break or aux, or <strong>Logged In</strong> on none (just working) — shown under their
+        Zoho name, with how long they&apos;ve been in it. Logged In and each Zoho type — 15 Minute Break, 1 Hour
+        Lunch, Chat, Meeting, … — are in <strong>Status Durations</strong>, so each can have its own thresholds;
+        one that runs too long then appears in Breach / Anomalies like any other status.
       </p>
       <table className="sm-table">
         <tbody>
@@ -2356,6 +2356,19 @@ function ZohoAuxSection({ accountId, displayName, value, onChange }: {
             <td style={{ textAlign: 'center' }}>
               <input type="checkbox" aria-label="Include other aux" disabled={off} checked={includeAuxOf(cfg)}
                 onChange={() => set({ includeAux: !includeAuxOf(cfg) })} />
+            </td>
+          </tr>
+          <tr style={{ opacity: off ? 0.5 : 1 }}>
+            <td>
+              <div className="sm-metric">Include logged in, on no break or aux</div>
+              <div className="sm-metric-sub">
+                From the Zoho time logs — shown as <strong>{ZOHO_LOGGED_IN_STATUS}</strong>, timed from the login or
+                from the end of their last break / aux, whichever is later
+              </div>
+            </td>
+            <td style={{ textAlign: 'center' }}>
+              <input type="checkbox" aria-label="Include logged in, on no break or aux" disabled={off} checked={includeLoggedInOf(cfg)}
+                onChange={() => set({ includeLoggedIn: !includeLoggedInOf(cfg) })} />
             </td>
           </tr>
         </tbody>
@@ -2862,7 +2875,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   // status IS its Zoho type, so a too-long one breaches (Breach / Anomalies,
   // Cliq, RTA Logs) exactly like a CRM status does.
   const zohoOn = !!ds.zohoAux?.enabled
-  const [zohoTypes, setZohoTypes] = useState<{ type: string; category: 'break' | 'aux'; count: number }[]>([])
+  const [zohoTypes, setZohoTypes] = useState<{ type: string; category: ZohoStatusCategory; count: number }[]>([])
   const [zohoNow, setZohoNow] = useState<Record<string, number>>({})
   useEffect(() => {
     if (!zohoOn) return   // nothing to load — the section isn't shown (zohoStatusRows is empty while off)
@@ -2880,11 +2893,14 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       }).catch(() => {})
     return () => { cancelled = true }
   }, [zohoOn, accountId, statSupaUrl, statSupaKey])
-  // Breaks/lunches first (the ones with an allowance), then every other aux.
+  // Logged In first (when this account shows it — listed even before anyone is
+  // in it), then breaks/lunches (the ones with an allowance), then every other aux.
   const zohoInfo = new Map(zohoTypes.map(t => [t.type, t]))
-  Object.keys(zohoNow).forEach(t => { if (!zohoInfo.has(t)) zohoInfo.set(t, { type: t, category: breakCategory(t), count: 0 }) })
+  if (includeLoggedInOf(ds.zohoAux)) zohoInfo.set(ZOHO_LOGGED_IN_STATUS, { type: ZOHO_LOGGED_IN_STATUS, category: 'login', count: 0 })
+  Object.keys(zohoNow).forEach(t => { if (!zohoInfo.has(t)) zohoInfo.set(t, { type: t, category: zohoStatusCategory(t), count: 0 }) })
+  const ZOHO_ORDER: Record<ZohoStatusCategory, number> = { login: 0, break: 1, aux: 2 }
   const zohoStatusRows = zohoOn
-    ? [...zohoInfo.values()].sort((a, b) => (a.category === b.category ? 0 : a.category === 'break' ? -1 : 1)).map(t => t.type)
+    ? [...zohoInfo.values()].sort((a, b) => ZOHO_ORDER[a.category] - ZOHO_ORDER[b.category]).map(t => t.type)
     : []
   const zohoKeySet = new Set(zohoStatusRows)
   // "Fill break & lunch thresholds from their names": warning at the named
@@ -3451,10 +3467,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                         <>
                           <div className="sm-section-title" style={{ marginTop: 22 }}>ZOHO BREAKS &amp; AUX</div>
                           <p className="sm-desc" style={{ marginBottom: 10 }}>
-                            Every break and aux type in Zoho&apos;s logs (the <strong>Zoho Breaks &amp; Aux</strong> section of
-                            Agent Status). Give one a Warning / Critical and anyone on it that long shows in{' '}
-                            <strong>Breach / Anomalies</strong> — and Cliq / RTA Logs, per the switches here — timed from when the
-                            break started in Zoho, even on an account whose Duration column isn&apos;t a time.
+                            Every break and aux type in Zoho&apos;s logs, and <strong>{ZOHO_LOGGED_IN_STATUS}</strong> (logged in
+                            on none) — the <strong>Zoho Breaks &amp; Aux</strong> section of Agent Status. Give one a Warning /
+                            Critical and anyone in it that long shows in <strong>Breach / Anomalies</strong> — and Cliq / RTA
+                            Logs, per the switches here — timed from when the break started in Zoho ({ZOHO_LOGGED_IN_STATUS}:
+                            from the login, or the end of the last break / aux), even on an account whose Duration column
+                            isn&apos;t a time.
                           </p>
                           {zohoFillable.length > 0 && (
                             <button type="button" className="acc-btn acc-btn-cfg" style={{ fontSize: 12.5, padding: '7px 14px', marginBottom: 10 }}
@@ -3478,7 +3496,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                 const info = zohoInfo.get(t)
                                 const now = zohoNow[t] ?? 0
                                 return renderStatusRow(t, <>
-                                  {info?.category === 'break' ? 'break' : 'aux'}
+                                  {info?.category === 'login' ? 'logged in, on no break or aux' : info?.category === 'break' ? 'break' : 'aux'}
                                   {now > 0 && <> · <strong style={{ color: 'var(--warning)' }}>{now} on it now</strong></>}
                                   {info && info.count > 0 && <> · seen {info.count.toLocaleString()}× in Zoho&apos;s last 2 days</>}
                                 </>)
