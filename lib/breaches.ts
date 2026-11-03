@@ -808,6 +808,19 @@ export function breachTableExtraCols(ds: DataSourceConfig): { key: string; label
   return breachColumnChoices(ds).filter(c => picked.has(c.key))
 }
 
+/** One breach row's values for those columns, as label/value pairs — what the
+ *  Cliq message adds to each breach line (lib/cliqScan.ts), so it carries the
+ *  same columns as the account's Breach / Anomalies table. A KPI row has none
+ *  (the tables show "—"), and a blank value is left out. */
+export function breachExtraFields(
+  b: { kind?: BreachRow['kind']; extras?: BreachRow['extras'] }, cols: { key: string; label: string }[]
+): { label: string; value: string }[] {
+  if (b.kind !== 'agent') return []
+  return cols
+    .map(c => ({ label: c.label, value: String(b.extras?.[c.key] ?? '').trim() }))
+    .filter(f => f.value)
+}
+
 // ── Section the Breach / Anomalies table by agent group ──────────────────────
 // Used by the Dashboard page, so the breach table is organised the same way the
 // Agent Status table beside it is: one header per group, rows underneath.

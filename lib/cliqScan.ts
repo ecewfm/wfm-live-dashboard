@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiSourceRows, collectRtaKpiSignals, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiSourceRows, collectRtaKpiSignals, breachTableExtraCols, breachExtraFields, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage } from './zohoCliq'
 import { createWorkforceLogRecord } from './zohoCreator'
@@ -88,7 +88,10 @@ export async function fetchAccountData(ds: DataSourceConfig, accountId: string):
 }
 
 // ── Message formatting — mirrors the old GAS tool's format ──────────────────
-function formatMessage(accountId: string, breaches: ReturnType<typeof buildBreaches>, testMode: boolean): string {
+// Each breach line carries the same columns as the account's Breach / Anomalies
+// table (per the user, 2026-11-03): Queue/Agent, Metric, Value, Threshold, then
+// every column picked with the table's gear (e.g. Ticket ID), then Status.
+function formatMessage(accountId: string, breaches: BreachRow[], testMode: boolean, cols: { key: string; label: string }[]): string {
   const prefix = testMode ? '[TEST] ' : ''
   const ts = new Date().toLocaleString('en-US', { timeZoneName: 'short' })
   const lines = [
@@ -100,7 +103,12 @@ function formatMessage(accountId: string, breaches: ReturnType<typeof buildBreac
   ]
   breaches.forEach((b, i) => {
     const icon = b.severity === 'critical' ? '🔴' : '🟡'
-    lines.push(`${icon} ${i + 1}. ${b.entity} — ${b.metric}: ${b.value} (threshold ${b.threshold})`)
+    const cells = [
+      `${b.entity} — ${b.metric}: ${b.value} (threshold ${b.threshold})`,
+      ...breachExtraFields(b, cols).map(f => `${f.label}: ${f.value}`),
+      b.severity === 'critical' ? 'Critical' : 'Warning',
+    ]
+    lines.push(`${icon} ${i + 1}. ${cells.join(' · ')}`)
   })
   if (testMode) {
     lines.push('')
@@ -599,11 +607,12 @@ async function processAccount(
     } else {
       const lastSent = acc.cliq_last_sent_at ? new Date(acc.cliq_last_sent_at).getTime() : 0
       if (forceSend || Date.now() - lastSent >= cooldownMs) {
-        const message = formatMessage(accountId, cliqBreaches, globalSettings.testMode)
+        const breachCols = breachTableExtraCols(ds)
+        const message = formatMessage(accountId, cliqBreaches, globalSettings.testMode, breachCols)
         const logCliq = (status: 'sent' | 'failed', error?: string) => recordNotification({
           kind: 'cliq', accountId, status, source, error: error ?? null,
           summary: cliqSummary(acc.cliq_channel!, cliqBreaches), breachCount: cliqBreaches.length,
-          details: { channel: acc.cliq_channel, testMode: globalSettings.testMode, message, items: breachDetails(cliqBreaches) },
+          details: { channel: acc.cliq_channel, testMode: globalSettings.testMode, message, items: breachDetails(cliqBreaches, breachCols) },
         })
         try {
           await sendCliqChannelMessage(acc.cliq_channel, message)

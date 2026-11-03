@@ -627,6 +627,14 @@ in `lib/breaches.ts`: the built-in Agent Status / Duration (`BREACH_COL_STATUS` 
   account; saving drops them.
 - Gear shown only to `can.editSettings` roles (superuser / RTA) — it changes what
   everyone watching the account sees. Everyone sees the chosen columns.
+- **The Cliq message carries the same columns** (per the user, 2026-11-03):
+  `formatMessage()` in `lib/cliqScan.ts` writes each breach as the card's row —
+  `🔴 1. Agent — Metric: Value (threshold X) · <each picked column>: <value> ·
+  Critical` (e.g. Flex's `ticket id: 7995424`). Values via `breachExtraFields()`
+  (`lib/breaches.ts`), the same `extras` the tables read; a KPI row has none and
+  a blank value is left out (the tables show "—" for both). The Loggings detail
+  (`breachDetails(rows, cols)`) keeps them too. Workforce/RTA Logs remarks are
+  unchanged.
 
 ## Global breach alarm — separate warning / critical sounds (2026-10-26)
 

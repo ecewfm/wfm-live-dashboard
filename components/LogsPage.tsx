@@ -11,7 +11,7 @@ import { apiFetch } from '@/lib/authClient'
 type Kind = 'cliq' | 'rta_log'
 type Status = 'sent' | 'failed'
 type Source = 'auto' | 'force' | 'test'
-interface Item { entity: string; metric: string; value: string; threshold: string; severity: 'warning' | 'critical' | null }
+interface Item { entity: string; metric: string; value: string; threshold: string; severity: 'warning' | 'critical' | null; fields?: { label: string; value: string }[] }
 interface LogRow {
   id: number
   created_at: string
@@ -278,7 +278,8 @@ function Details({ row, accountName }: { row: LogRow; accountName: string }) {
             {items.map((b, i) => (
               <li key={i}>
                 {b.severity && <span className={b.severity === 'critical' ? 'badge-crit' : 'badge-warn'}>{b.severity === 'critical' ? 'Critical' : 'Warning'}</span>}
-                <span><strong>{b.entity}</strong> — {b.metric}: {b.value}{b.threshold ? <span className="text-muted"> (threshold {b.threshold})</span> : null}</span>
+                <span><strong>{b.entity}</strong> — {b.metric}: {b.value}{b.threshold ? <span className="text-muted"> (threshold {b.threshold})</span> : null}
+                  {(b.fields || []).map(f => <span key={f.label} className="text-muted"> · {f.label}: <span style={{ color: 'var(--text-main)' }}>{f.value}</span></span>)}</span>
               </li>
             ))}
           </ul>

@@ -9,7 +9,7 @@
 // a log row must never stop a notification from going out.
 
 import { getSupabaseAdmin } from './supabaseAdmin'
-import type { BreachRow, RtaKpiSignal } from './breaches'
+import { breachExtraFields, type BreachRow, type RtaKpiSignal } from './breaches'
 
 export type NotificationKind = 'cliq' | 'rta_log'
 export type NotificationStatus = 'sent' | 'failed'
@@ -86,7 +86,9 @@ export async function pruneNotificationLog(): Promise<void> {
 }
 
 // ── The plain-English bits ──────────────────────────────────────────────────
-type BreachLike = Pick<BreachRow, 'entity' | 'metric' | 'value' | 'threshold'> & { severity?: BreachRow['severity'] | null }
+type BreachLike = Pick<BreachRow, 'entity' | 'metric' | 'value' | 'threshold'> & {
+  severity?: BreachRow['severity'] | null; kind?: BreachRow['kind']; extras?: BreachRow['extras']
+}
 
 /** "Email SLA — Open tickets: 46 (critical) · Ayla S — Lunch Duration: 45m · +2 more" */
 export function briefBreaches(rows: BreachLike[], max = 3): string {
@@ -124,9 +126,13 @@ export function firstSentence(text: string, max = 180): string {
   return cut.length > max ? `${cut.slice(0, max - 1)}…` : cut
 }
 
-/** What each breach was, for the detail view (capped — a long agent list is rare but possible). */
-export function breachDetails(rows: BreachLike[]) {
-  return rows.slice(0, 60).map(b => ({ entity: b.entity, metric: b.metric, value: b.value, threshold: b.threshold, severity: b.severity ?? null }))
+/** What each breach was, for the detail view (capped — a long agent list is rare but possible).
+ *  `cols` = the Breach / Anomalies columns the Cliq message carried (breachTableExtraCols). */
+export function breachDetails(rows: BreachLike[], cols: { key: string; label: string }[] = []) {
+  return rows.slice(0, 60).map(b => {
+    const fields = breachExtraFields(b, cols)
+    return { entity: b.entity, metric: b.metric, value: b.value, threshold: b.threshold, severity: b.severity ?? null, ...(fields.length ? { fields } : {}) }
+  })
 }
 
 // ── Reading (the /api/logs route) ───────────────────────────────────────────
