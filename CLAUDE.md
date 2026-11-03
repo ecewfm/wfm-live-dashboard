@@ -748,8 +748,20 @@ Logs submission the webapp made — in brief, easy-to-read lines.
 - Kept 90 days: `pruneNotificationLog()` at the end of `runCliqScan()`, at most
   hourly per instance.
 - Read through `app/api/logs` (GET, `requireRole(['superuser'])` on the first
-  line; filters kind / status / account / since, `before=<id>` paging, 24 h
-  counts; an unmigrated table returns `needsMigration` instead of an error).
+  line; filters kind / status / account / since / `q` search, `page` + `upTo`
+  paging, `first=1` adds the total + 24 h counts; an unmigrated table returns
+  `needsMigration` instead of an error).
+- **20 rows a page** (per the user, 2026-11-03): `components/LogsPage.tsx`
+  fetches a page the first time it's opened and keeps it (`pages`), so going
+  back is instant — never all rows at once. Pager = up to 5 numbers (the block
+  holding the page: 1–5, 6–10…) with ‹ / › stepping one page newer / older.
+  Later pages read only rows up to page 1's newest id (`upTo`), so entries
+  logged meanwhile don't shift them; the kept pages are dropped when a filter
+  or the search changes, on Refresh (back to page 1), or when the every-minute
+  refresh (page 1 only) finds new entries. Search runs on the server over every
+  entry (`listNotifications` `search` — summary, account, error, channel,
+  category / sub-category; display names are matched in the browser and sent
+  as `names`), not just the visible page.
 - UI: `components/LogsPage.tsx`; tab shown only when `can.viewLogs(role)`
   (superuser); `lib/viewMemory.ts` remembers `logs`, and a non-superuser with
   that remembered lands on the Overview.

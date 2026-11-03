@@ -1,9 +1,11 @@
 'use client'
 
 // The Loggings page (super users) — every Zoho Cliq notification and Workforce
-// RTA Log the webapp sent, or tried to, newest first. One plain line each;
-// click a row for what exactly went out. Rows come from /api/logs
-// (lib/notificationLog.ts), which only answers super users.
+// RTA Log the webapp sent, or tried to, newest first, 20 to a page. One plain
+// line each; click a row for what exactly went out. Rows come from /api/logs
+// (lib/notificationLog.ts), which only answers super users. A page is fetched
+// the first time it's opened and kept, so going back to it is instant; the
+// kept pages are dropped when the filters change or new entries arrive.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '@/lib/authClient'
@@ -47,7 +49,8 @@ const MODE_LABEL: Record<string, string> = {
   test: 'Test submission from Settings',
 }
 const REFRESH_MS = 60 * 1000
-const PAGE_SIZE = 100
+const PAGE_SIZE = 20
+const PAGE_WINDOW = 5 // page numbers shown at once — the arrows reach the rest
 
 function when(iso: string): { main: string; ago: string; full: string } {
   const d = new Date(iso)
@@ -66,83 +69,125 @@ export default function LogsPage({ accounts, displayNames }: { accounts: string[
   const [account, setAccount] = useState('all')
   const [period, setPeriod]   = useState<PeriodKey>('7d')
   const [search, setSearch]   = useState('')
+  const [query, setQuery]     = useState('') // the search once typing pauses — it runs on the server
 
-  const [rows, setRows]       = useState<LogRow[]>([])
+  // Pages fetched for the current filters, by number (1 = newest). The ref is for
+  // the callbacks, which must see a page kept a moment ago.
+  const [pages, setPagesState] = useState<Record<number, LogRow[]>>({})
+  const pagesRef = useRef<Record<number, LogRow[]>>({})
+  const setPages = useCallback((p: Record<number, LogRow[]>) => { pagesRef.current = p; setPagesState(p) }, [])
+  const [page, setPage]       = useState(1)
+  const [total, setTotal]     = useState(0)
   const [counts, setCounts]   = useState<Counts | null>(null)
-  const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [loadingMore, setLoadingMore] = useState(false)
+  const [fetching, setFetching] = useState<number | null>(null) // a page on its way
   const [error, setError]     = useState<string | null>(null)
   const [needsMigration, setNeedsMigration] = useState(false)
   const [open, setOpen]       = useState<Set<number>>(new Set())
   const [updatedAt, setUpdatedAt] = useState<number | null>(null)
-  // Older pages loaded by hand — the auto refresh (first page only) would drop them.
-  const paged = useRef(false)
 
-  const url = useCallback((before?: number) => {
+  // What the kept pages belong to: a generation (bumped when they're dropped, so
+  // a late answer for the old ones is ignored), the period's cut-off, and page 1's
+  // newest row id — later pages read only rows up to it, so they don't shift.
+  const view = useRef<{ gen: number; since?: string; upTo: number | null }>({ gen: 0, upTo: null })
+  const wanted = useRef(1)                 // the page last clicked — an earlier, slower one doesn't win
+  const busy = useRef<number | null>(null) // mirrors `fetching` for the auto refresh
+  const pageRef = useRef(1)
+  const namesRef = useRef(displayNames)
+  const tableRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { pageRef.current = page }, [page])
+  useEffect(() => { namesRef.current = displayNames }, [displayNames])
+  useEffect(() => { const t = setTimeout(() => setQuery(search.trim()), 350); return () => clearTimeout(t) }, [search])
+
+  const url = useCallback((extra: Record<string, string | number | undefined>) => {
     const p = new URLSearchParams()
     if (kind !== 'all') p.set('kind', kind)
     if (status !== 'all') p.set('status', status)
     if (account !== 'all') p.set('account', account)
-    const ms = PERIODS.find(x => x.key === period)?.ms
-    if (ms) p.set('since', new Date(Date.now() - ms).toISOString())
-    if (before) p.set('before', String(before))
+    if (view.current.since) p.set('since', view.current.since)
+    if (query) {
+      p.set('q', query)
+      // The server only knows account ids, so name the accounts whose display name matches.
+      const q = query.toLowerCase()
+      const ids = Object.keys(namesRef.current).filter(id => (namesRef.current[id] || '').toLowerCase().includes(q))
+      if (ids.length) p.set('names', ids.join(','))
+    }
     p.set('limit', String(PAGE_SIZE))
+    for (const [k, v] of Object.entries(extra)) if (v !== undefined) p.set(k, String(v))
     return `/api/logs?${p}`
-  }, [kind, status, account, period])
+  }, [kind, status, account, query])
 
-  const load = useCallback(async (quiet = false) => {
-    if (!quiet) setLoading(true)
+  // Page 1 fresh, with the page count and the 24 h counts. `quiet` = the auto
+  // refresh: the kept pages stay unless new entries arrived (they'd shift them).
+  const loadFirst = useCallback(async (quiet = false) => {
+    if (!quiet) {
+      view.current = { gen: view.current.gen + 1, upTo: null }
+      busy.current = null; setFetching(null)
+      setLoading(true)
+    }
+    const ms = PERIODS.find(x => x.key === period)?.ms
+    view.current.since = ms ? new Date(Date.now() - ms).toISOString() : undefined
+    const gen = view.current.gen
     try {
-      const r = await apiFetch(url())
+      const r = await apiFetch(url({ first: 1 }))
+      if (view.current.gen !== gen) return
       setNeedsMigration(!!r.needsMigration)
-      setRows(r.rows ?? [])
-      setHasMore(!!r.hasMore)
       setCounts(r.counts ?? null)
+      setTotal(r.total ?? 0)
+      const upTo = r.upTo ?? null
+      if (!quiet || upTo !== view.current.upTo) {
+        view.current = { ...view.current, gen: quiet ? gen + 1 : gen, upTo }
+        setPages({ 1: r.rows ?? [] })
+        wanted.current = 1
+        setPage(1)
+      }
       setError(null)
       setUpdatedAt(Date.now())
-      paged.current = false
     } catch (e: any) {
-      setError(e?.message || 'Couldn\'t load the log.')
+      if (view.current.gen === gen) setError(e?.message || 'Couldn\'t load the log.')
     } finally {
-      setLoading(false)
+      if (!quiet) setLoading(false)
     }
-  }, [url])
+  }, [url, period, setPages])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { loadFirst() }, [loadFirst])
   useEffect(() => {
-    const t = setInterval(() => { if (!paged.current && !document.hidden) load(true) }, REFRESH_MS)
+    const t = setInterval(() => { if (pageRef.current === 1 && busy.current === null && !document.hidden) loadFirst(true) }, REFRESH_MS)
     return () => clearInterval(t)
-  }, [load])
+  }, [loadFirst])
 
-  const loadMore = async () => {
-    const last = rows[rows.length - 1]
-    if (!last) return
-    setLoadingMore(true)
-    try {
-      const r = await apiFetch(url(last.id))
-      setRows(prev => [...prev, ...(r.rows ?? [])])
-      setHasMore(!!r.hasMore)
-      paged.current = true
-    } catch (e: any) {
-      setError(e?.message || 'Couldn\'t load older rows.')
-    } finally {
-      setLoadingMore(false)
+  const goTo = useCallback(async (n: number) => {
+    wanted.current = n
+    const show = () => {
+      setPage(n)
+      requestAnimationFrame(() => { const el = tableRef.current; if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start', behavior: 'smooth' }) })
     }
-  }
+    if (pagesRef.current[n]) { show(); return }
+    const { gen, upTo } = view.current
+    busy.current = n; setFetching(n)
+    try {
+      const r = await apiFetch(url({ page: n, upTo: upTo ?? undefined }))
+      if (view.current.gen !== gen) return
+      setPages({ ...pagesRef.current, [n]: r.rows ?? [] })
+      if (wanted.current === n) { show(); setError(null) }
+    } catch (e: any) {
+      if (view.current.gen === gen && wanted.current === n) setError(e?.message || 'Couldn\'t load that page.')
+    } finally {
+      if (busy.current === n) { busy.current = null; setFetching(null) }
+    }
+  }, [url, setPages])
 
   const name = (id: string) => displayNames[id] || id
-  const shown = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return rows
-    return rows.filter(r => [r.summary, r.account_id, name(r.account_id), r.error || '', r.details?.channel || '', r.details?.category || '', r.details?.subCategory || '']
-      .some(s => s.toLowerCase().includes(q)))
-  }, [rows, search, displayNames]) // eslint-disable-line react-hooks/exhaustive-deps
+  const rows = pages[page] ?? []
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const offset = (page - 1) * PAGE_SIZE
 
   const toggle = (id: number) => setOpen(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
   // Accounts in the log that aren't on this person's list (a removed account) still get a filter entry.
-  const accountChoices = useMemo(() => [...new Set([...accounts, ...rows.map(r => r.account_id)])].sort((a, b) => name(a).localeCompare(name(b))),
-    [accounts, rows, displayNames]) // eslint-disable-line react-hooks/exhaustive-deps
+  const accountChoices = useMemo(() => {
+    const seen = Object.values(pages).flat().map(r => r.account_id)
+    return [...new Set([...accounts, ...seen, ...(account !== 'all' ? [account] : [])])].sort((a, b) => name(a).localeCompare(name(b)))
+  }, [accounts, pages, account, displayNames]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="lg-page">
@@ -153,7 +198,7 @@ export default function LogsPage({ accounts, displayNames }: { accounts: string[
         </div>
         <div className="lg-refresh">
           {updatedAt && <span className="text-muted">Updated {new Date(updatedAt).toLocaleTimeString()}</span>}
-          <button className="btn-icon" onClick={() => load()} title="Refresh now"><i className={`bx bx-refresh${loading ? ' bx-spin' : ''}`} /></button>
+          <button className="btn-icon" onClick={() => loadFirst()} title="Refresh — back to the newest"><i className={`bx bx-refresh${loading ? ' bx-spin' : ''}`} /></button>
         </div>
       </div>
 
@@ -186,7 +231,7 @@ export default function LogsPage({ accounts, displayNames }: { accounts: string[
         </select>
         <div className="lg-search">
           <i className="bx bx-search" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search these rows (breach, channel, error…)" />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search every entry (account, breach, channel, error…)" />
         </div>
       </div>
 
@@ -198,7 +243,7 @@ export default function LogsPage({ accounts, displayNames }: { accounts: string[
       )}
       {error && <div className="lg-banner bad"><i className="bx bx-error" /> {error}</div>}
 
-      <div className="table-card">
+      <div className={`table-card lg-card${(loading && rows.length) || fetching !== null ? ' lg-busy' : ''}`} ref={tableRef}>
         <div className="lg-table-wrap">
           <table className="dash-table lg-table">
             <thead>
@@ -206,12 +251,12 @@ export default function LogsPage({ accounts, displayNames }: { accounts: string[
             </thead>
             <tbody>
               {loading && rows.length === 0 && <tr><td colSpan={7} className="no-data">Loading…</td></tr>}
-              {!loading && shown.length === 0 && !needsMigration && (
+              {!loading && rows.length === 0 && !needsMigration && (
                 <tr><td colSpan={7} className="no-data">
-                  {rows.length ? 'No row matches that search.' : 'Nothing logged for these filters. Rows appear as the scan sends Cliq notifications and RTA Logs (it runs every minute) — anything sent before this page existed isn\'t recorded.'}
+                  {query ? `Nothing matches “${query}” for these filters.` : 'Nothing logged for these filters. Rows appear as the scan sends Cliq notifications and RTA Logs (it runs every minute) — anything sent before this page existed isn\'t recorded.'}
                 </td></tr>
               )}
-              {shown.map(r => {
+              {rows.map(r => {
                 const t = when(r.created_at)
                 const isOpen = open.has(r.id)
                 return (
@@ -241,12 +286,32 @@ export default function LogsPage({ accounts, displayNames }: { accounts: string[
           </table>
         </div>
       </div>
-      {hasMore && (
-        <div className="lg-more">
-          <button className="lg-more-btn" onClick={loadMore} disabled={loadingMore}>{loadingMore ? 'Loading…' : 'Load older'}</button>
+      {total > 0 && rows.length > 0 && (
+        <div className="lg-pager-bar">
+          <span className="text-muted">{offset + 1}–{offset + rows.length} of {total.toLocaleString()} {total === 1 ? 'entry' : 'entries'}</span>
+          {pageCount > 1 && <Pager page={fetching ?? page} count={pageCount} loading={fetching} onGo={goTo} />}
         </div>
       )}
     </div>
+  )
+}
+
+// Up to PAGE_WINDOW page numbers — the block holding the page (1–5, 6–10, …);
+// the arrows step one page newer / older, onto the next block at its edge.
+function Pager({ page, count, loading, onGo }: { page: number; count: number; loading: number | null; onGo: (n: number) => void }) {
+  const start = Math.floor((page - 1) / PAGE_WINDOW) * PAGE_WINDOW + 1
+  const nums = Array.from({ length: Math.min(PAGE_WINDOW, count - start + 1) }, (_, i) => start + i)
+  return (
+    <nav className="lg-pager" aria-label="Pages">
+      <button className="lg-pg" onClick={() => onGo(page - 1)} disabled={page <= 1} aria-label="Newer page" title="Newer"><i className="bx bx-chevron-left" /></button>
+      {nums.map(n => (
+        <button key={n} className={`lg-pg${n === page ? ' on' : ''}`} onClick={() => { if (n !== page) onGo(n) }}
+          aria-label={`Page ${n}`} aria-current={n === page ? 'page' : undefined}>
+          {loading === n ? <i className="bx bx-loader-alt bx-spin" /> : n}
+        </button>
+      ))}
+      <button className="lg-pg" onClick={() => onGo(page + 1)} disabled={page >= count} aria-label="Older page" title="Older"><i className="bx bx-chevron-right" /></button>
+    </nav>
   )
 }
 

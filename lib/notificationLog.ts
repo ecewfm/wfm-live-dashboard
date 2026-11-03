@@ -141,27 +141,47 @@ export interface LogQuery {
   accountId?: string
   status?: NotificationStatus
   sinceIso?: string
-  beforeId?: number
+  /** Matched against the summary, account id, error, Cliq channel and category / sub-category. */
+  search?: string
+  /** Accounts whose display name matched `search` — display names live in the browser, not here. */
+  searchAccountIds?: string[]
+  /** The newest row id of the view's first page: later pages read only rows up to
+   *  it, so entries logged meanwhile don't shift them. */
+  upToId?: number
+  offset: number
   limit: number
+  /** Also count every matching row (the page count) — the first page of a view. */
+  withTotal?: boolean
 }
 
 export class LogTableMissing extends Error {}
 const isMissingTable = (msg: string) => /does not exist|could not find the table|schema cache/i.test(msg)
 
-export async function listNotifications(q: LogQuery): Promise<{ rows: NotificationLogRow[]; hasMore: boolean }> {
+const SEARCH_COLUMNS = ['summary', 'account_id', 'error', 'details->>channel', 'details->>category', 'details->>subCategory']
+// PostgREST or-filter value, quoted so commas / brackets in a search can't break it.
+const pgQuote = (s: string) => `"${s.replace(/[\\"]/g, m => `\\${m}`)}"`
+
+export async function listNotifications(q: LogQuery): Promise<{ rows: NotificationLogRow[]; total: number | null }> {
   let query = getSupabaseAdmin().from(TABLE)
-    .select('id, created_at, kind, account_id, status, source, summary, breach_count, error, details')
+    .select('id, created_at, kind, account_id, status, source, summary, breach_count, error, details', q.withTotal ? { count: 'exact' } : undefined)
     .order('id', { ascending: false })
-    .limit(q.limit + 1)
+    .range(q.offset, q.offset + q.limit - 1)
   if (q.kind) query = query.eq('kind', q.kind)
   if (q.accountId) query = query.eq('account_id', q.accountId)
   if (q.status) query = query.eq('status', q.status)
   if (q.sinceIso) query = query.gte('created_at', q.sinceIso)
-  if (q.beforeId) query = query.lt('id', q.beforeId)
-  const { data, error } = await query
+  if (q.upToId) query = query.lte('id', q.upToId)
+  if (q.search) {
+    const like = pgQuote(`%${q.search}%`)
+    const ors = SEARCH_COLUMNS.map(c => `${c}.ilike.${like}`)
+    if (q.searchAccountIds?.length) ors.push(`account_id.in.(${q.searchAccountIds.map(pgQuote).join(',')})`)
+    query = query.or(ors.join(','))
+  }
+  const { data, error, count } = await query
+  // PGRST103 = a page past the end (the rows it counted have since been pruned).
+  if (error?.code === 'PGRST103') return { rows: [], total: null }
   if (error) throw isMissingTable(error.message) ? new LogTableMissing(error.message) : new Error(error.message)
-  const rows = (data ?? []) as NotificationLogRow[]
-  return { rows: rows.slice(0, q.limit), hasMore: rows.length > q.limit }
+  return { rows: (data ?? []) as NotificationLogRow[], total: q.withTotal ? count ?? 0 : null }
 }
 
 /** The Loggings page's "last 24 hours" counts, across every account. */
