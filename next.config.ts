@@ -14,6 +14,12 @@ const nextConfig: NextConfig = {
   env: {
     NEXT_PUBLIC_BUILD_SHA: process.env.VERCEL_GIT_COMMIT_SHA || 'dev',
   },
+  // The card picture under each Cliq alert (lib/cliqCardImage.tsx) reads its
+  // font from assets/fonts at runtime — ship those files with the scan routes
+  // (/api/cliq/scan, /api/cliq/force-scan) that draw it.
+  outputFileTracingIncludes: {
+    '/api/cliq/*': ['./assets/fonts/*.ttf'],
+  },
 };
 
 export default nextConfig;

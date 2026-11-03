@@ -9,7 +9,7 @@ import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, applyAgentFilter, agentTimerKey, agentElapsedSecs, durationIsStatic, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, applyAgentFilter, agentTimerKey, agentElapsedSecs, durationIsStatic, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, kpiCardGroups, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
@@ -2070,8 +2070,6 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
   rtaLogsEnabled: boolean
   onConfigureBreachCols?: () => void
 }) {
-  const kpiRows = accountData?.kpiRows ?? []
-  const groups  = ds.groups ?? []
   // Cross-source — see the same call on the Dashboard page above.
   const freshestUpdatedAt = freshestAcrossSources(ds, accountData)
   // Same columns as the Dashboard page's breach table (see breachTableExtraCols).
@@ -2168,52 +2166,16 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
           </div>
         )}
 
-        {/* KPI tiles — one set per manually-defined group */}
-        {groups.map(group => {
-          // ONE resolver — the SAME function KpiGrid() and the server-side
-          // breach scan use, so this page and the Dashboard page can never
-          // disagree about which table a tile reads. Holds the
-          // tile.source -> group.source -> account-wide precedence.
-          const rc = makeKpiCellResolver(ds, group, accountData)
-
-          // Independent-tiles group (see GroupTile) — own labels/bindings/
-          // thresholds, separate from every other group on this account.
-          // Each tile may ALSO carry its own `source`, so pass the tile.
-          if (group.tiles && group.tiles.length) {
-            return (
-              <div key={group.id} style={{ marginBottom: 10 }}>
-                <div className="ov-section-label">{group.name || 'Global'}</div>
-                <div className="ov-kpi-tiles">
-                  {group.tiles.map(t => {
-                    const raw = rc(t.cell || undefined, t)
-                    return <OvKpiTile key={t.key} label={t.label} value={raw} colorClass={getKpiColorClass(extractKpiValue(raw, t.kpiUnit).num, t)} />
-                  })}
-                </div>
-              </div>
-            )
-          }
-
-          const slaVal  = rc(group.cells.sla).replace(/\s+/g,'')
-          const waitVal = rc(group.cells.wait)
-          const ahtVal  = rc(group.cells.aht)
-          const abnVal  = rc(group.cells.abn)
-          return (
-            <div key={group.id} style={{ marginBottom: 10 }}>
-              <div className="ov-section-label">{group.name || 'Global'}</div>
-              <div className="ov-kpi-tiles">
-                {group.cells.sla  && <OvKpiTile label={ds.kpiLabels.sla}  value={slaVal}  colorClass={getKpiColorClass(extractKpiValue(slaVal, kpiTh.sla.kpiUnit).num, kpiTh.sla)} />}
-                {group.cells.wait && <OvKpiTile label={ds.kpiLabels.wait} value={waitVal} colorClass={getKpiColorClass(extractKpiValue(waitVal, kpiTh.wait.kpiUnit).num, kpiTh.wait)} />}
-                {group.cells.aht  && <OvKpiTile label={ds.kpiLabels.aht}  value={ahtVal}  colorClass={getKpiColorClass(extractKpiValue(ahtVal, kpiTh.aht.kpiUnit).num, kpiTh.aht)} />}
-                {group.cells.abn  && <OvKpiTile label={ds.kpiLabels.abn}  value={abnVal}  colorClass={getKpiColorClass(extractKpiValue(abnVal, kpiTh.abn.kpiUnit).num, kpiTh.abn)} />}
-                {(ds.extraTiles ?? []).map(t => {
-                  if (!group.cells[t.key]) return null
-                  const raw = rc(group.cells[t.key])
-                  return <OvKpiTile key={t.key} label={t.label} value={raw} colorClass={getExtraTileColorClass(extractKpiValue(raw, t.kpiUnit).num, t)} />
-                })}
-              </div>
+        {/* KPI tiles — one set per manually-defined group. kpiCardGroups()
+            is shared with the picture attached to Cliq alerts. */}
+        {kpiCardGroups(ds, accountData, kpiTh).map(group => (
+          <div key={group.id} style={{ marginBottom: 10 }}>
+            <div className="ov-section-label">{group.name}</div>
+            <div className="ov-kpi-tiles">
+              {group.tiles.map(t => <OvKpiTile key={t.key} label={t.label} value={t.value} colorClass={t.colorClass} />)}
             </div>
-          )
-        })}
+          </div>
+        ))}
       </div>
 
       {/* Breach table */}

@@ -22,9 +22,10 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiSourceRows, collectRtaKpiSignals, breachTableExtraCols, breachExtraFields, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiSourceRows, collectRtaKpiSignals, breachTableExtraCols, breachExtraFields, kpiCardGroups, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
-import { sendCliqChannelMessage } from './zohoCliq'
+import { sendCliqChannelMessage, sendCliqChannelFile } from './zohoCliq'
+import { renderAccountCardPng } from './cliqCardImage'
 import { createWorkforceLogRecord } from './zohoCreator'
 import { createAccountBreachRtaLog, BREACH_CATEGORY, BREACH_SUB_CATEGORY } from './zohoWebappRequest'
 import { recordNotification, pruneNotificationLog, cliqSummary, rtaSummary, briefRta, firstSentence, breachDetails, signalAsRow } from './notificationLog'
@@ -195,6 +196,13 @@ interface AccountSettingsRow {
   rta_report_agent_status: boolean | null
 }
 
+// The card picture posted under each Cliq alert (lib/cliqCardImage.tsx).
+// Cliq allows 20 file uploads a minute per user, with a 10-minute lock past
+// that, so one scan posts at most MAX_CARD_PICTURES — the text alerts are
+// separate and never held back by this.
+const MAX_CARD_PICTURES = 15
+interface CardPictures { names: Record<string, string>; left: number }
+
 export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<ScanResult> {
   const forceSend = !!opts.forceSend
   const log: string[] = []
@@ -286,9 +294,17 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
     ? await Promise.all([loadZohoFieldOptions('Category'), loadZohoFieldOptions('Sub_Categories')])
     : [[], []]
 
+  // Display names for the card pictures' headers — once per scan, only while
+  // Cliq is on. A failed read just means the pictures show the account id.
+  const pictures: CardPictures = { names: {}, left: MAX_CARD_PICTURES }
+  if (globalSettings.enabled && qualifying.some(a => !!a.cliq_channel)) {
+    const { data: nameRows } = await supabase.from('wfm_accounts').select('id, display_name')
+    for (const r of (nameRows as { id: string; display_name: string | null }[] | null) ?? []) pictures.names[r.id] = r.display_name || r.id
+  }
+
   for (const acc of qualifying) {
     try {
-      const didSend = await processAccount(acc, globalSettings, forceSend, l, categoryOptions, subCategoryOptions)
+      const didSend = await processAccount(acc, globalSettings, forceSend, l, categoryOptions, subCategoryOptions, pictures)
       if (didSend) sent++; else skipped++
     } catch (e: any) {
       // Per-account try/catch — one account's failure must not skip everyone else.
@@ -308,7 +324,8 @@ async function processAccount(
   forceSend: boolean,
   l: (msg: string) => void,
   categoryOptions: ZohoFieldOption[],
-  subCategoryOptions: ZohoFieldOption[]
+  subCategoryOptions: ZohoFieldOption[],
+  pictures: CardPictures
 ): Promise<boolean> {
   const accountId = acc.id
   const ds = acc.data_source as DataSourceConfig
@@ -625,6 +642,31 @@ async function processAccount(
         } catch (e: any) {
           l(`${accountId}: Cliq send failed — ${e.message}`)
           await logCliq('failed', e.message)
+        }
+
+        // The account's card as a picture, right under the alert (per the
+        // user, 2026-11-03): its KPI tiles plus a Breach / Anomalies table of
+        // the same breaches as the message. Only once the text went through.
+        // Made in memory and dropped after the upload — never stored, and not
+        // in the Loggings tab; a picture that fails is a scan-log line only,
+        // never a failed alert.
+        if (updates.cliq_last_sent_at) {
+          if (pictures.left <= 0) {
+            l(`${accountId}: card picture skipped — ${MAX_CARD_PICTURES} already posted this scan (Cliq allows 20 uploads a minute).`)
+          } else {
+            pictures.left--
+            try {
+              const png = await renderAccountCardPng({
+                accountId, displayName: pictures.names[accountId] || accountId,
+                groups: kpiCardGroups(ds, accountData, kpiTh), breaches: cliqBreaches, cols: breachCols,
+                updatedAt: freshest, testMode: globalSettings.testMode,
+              })
+              await sendCliqChannelFile(acc.cliq_channel, png, `${accountId}-breach-alert.png`, 'image/png')
+              l(`${accountId}: card picture posted to Cliq.`)
+            } catch (e: any) {
+              l(`${accountId}: card picture not posted — ${e.message}`)
+            }
+          }
         }
       } else {
         l(`${accountId}: Cliq within cooldown (${globalSettings.frequencyMinutes}m) — skipping.`)

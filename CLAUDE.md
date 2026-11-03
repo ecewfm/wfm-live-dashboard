@@ -650,6 +650,50 @@ in `lib/breaches.ts`: the built-in Agent Status / Duration (`BREACH_COL_STATUS` 
   (`breachDetails(rows, cols)`) keeps them too. Workforce/RTA Logs remarks are
   unchanged.
 
+## Cliq alert picture — the account's card as an image (2026-11-03)
+
+Per the user: every Cliq breach alert is followed by a picture of the account's
+Overview card (KPI tiles + Breach / Anomalies table), like vCORE's mismatch
+alerts. The picture is never saved and is not in the Loggings tab (also per the
+user).
+
+- `lib/cliqCardImage.tsx` `renderAccountCardPng()` draws it with `next/og`'s
+  `ImageResponse` (Satori + Resvg, no browser) — dark theme, Poppins from
+  `assets/fonts` (OFL), Boxicons paths inline, 2x scale. Bytes stay in memory.
+- `lib/zohoCliq.ts` `sendCliqChannelFile()` uploads it (multipart,
+  `POST /channelsbyname/{channel}/files`, scope `ZohoCliq.Webhooks.CREATE` —
+  already granted, no re-authorize). Zoho's docs disagree on the form field
+  (`files` in the parameter list, `file` in the example): sends `file`, a 400
+  retries once with `files`. **Not yet verified against live Cliq.**
+- `lib/cliqScan.ts`: only after the text message was sent, same channel, same
+  breaches as the message (`cliqBreaches`, not every breach on the card), the
+  account's gear columns, `freshestAcrossSources()` as "Updated". A failed
+  picture is a scan-log line only — the alert still counts as sent (cooldown,
+  Loggings row). Display names: one `wfm_accounts` read per scan. At most
+  `MAX_CARD_PICTURES` (15) per scan — Cliq allows 20 uploads a minute, then
+  locks uploads for 10 minutes.
+- Tiles come from `kpiCardGroups()` (`lib/breaches.ts`) — now the ONE source for
+  the Overview card's tiles too (`OverviewCard` in `components/Dashboard.tsx`
+  maps it), so the picture can't drift from the card. Checked identical to the
+  old inline code on every account (192 tiles).
+- Satori rules this depends on: every `div` with 2+ children needs
+  `display: flex`; a style value of `undefined` throws; no `<table>`, so rows
+  are fixed-height flex rows and `cardHeight()` adds them up (the image height
+  must be known up front); `overflow: hidden` under the scale transform drops
+  the icons, so the card rounds its header/footer corners instead. Columns are
+  sized from a text-width estimate (`textPx`), 560–1000px card.
+- Emoji are fetched from a CDN at render time and a failed fetch fails the
+  picture, so a failed render is retried once with emoji stripped. Non-Latin
+  scripts load from Google Fonts (a failure only drops those letters).
+- `next.config.ts` `outputFileTracingIncludes` ships `assets/fonts` with
+  `/api/cliq/*` (checked in the build's `.nft.json`).
+- Verified: real `runCliqScan()` on live data with every write and Zoho call
+  intercepted (23 checks: picture after each message, upload shape, `files`
+  fallback, failures, the 15 cap, nothing in Loggings or storage); edge renders
+  (Test Mode pill, 27 breaches → 20 + "+7 more", 1000px cap, empty, accents /
+  emoji / Chinese with no network); the production build's Force Scan with a
+  fetch-intercepting `--import` preload.
+
 ## Global breach alarm — separate warning / critical sounds (2026-10-26)
 
 Per the user: the global alarm (Settings → Alarm, super users; rules in

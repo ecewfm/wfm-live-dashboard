@@ -14,6 +14,19 @@ import { getZohoAccessToken } from './zohoAuth'
 
 const CLIQ_MESSAGE_URL = (channel: string) =>
   `https://cliq.zoho.com/api/v2/channelsbyname/${encodeURIComponent(channel)}/message`
+const CLIQ_FILES_URL = (channel: string) =>
+  `https://cliq.zoho.com/api/v2/channelsbyname/${encodeURIComponent(channel)}/files`
+
+// Zoho returns 204 No Content on success — guard against an empty body.
+async function checkCliqResponse(res: Response, what: string): Promise<void> {
+  const text = await res.text()
+  let body: any
+  try { body = text.trim() ? JSON.parse(text) : { success: true, status: res.status } }
+  catch { body = { status: res.status, body: text.slice(0, 300) } }
+  const isApiError = !res.ok || body.error || body.status === 'failure' ||
+    (body.code && String(body.code).toLowerCase() !== 'null' && String(body.code) !== '')
+  if (isApiError) throw new Error(`${what} failed: ${JSON.stringify(body)}`)
+}
 
 export async function sendCliqChannelMessage(channel: string, message: string): Promise<void> {
   const token = await getZohoAccessToken()
@@ -22,11 +35,24 @@ export async function sendCliqChannelMessage(channel: string, message: string): 
     headers: { Authorization: `Zoho-oauthtoken ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: message }),
   })
+  await checkCliqResponse(res, 'Cliq send')
+}
 
-  // Zoho returns 204 No Content on success — guard against an empty body.
-  const text = await res.text()
-  const body: any = text.trim() ? JSON.parse(text) : { success: true, status: res.status }
-  const isApiError = !res.ok || body.error || body.status === 'failure' ||
-    (body.code && String(body.code).toLowerCase() !== 'null' && String(body.code) !== '')
-  if (isApiError) throw new Error(`Cliq send failed: ${JSON.stringify(body)}`)
+// Posts one file to the channel as its own message (Cliq's "Share files to a
+// channel", scope ZohoCliq.Webhooks.CREATE — already granted for messages).
+// Used for the card picture lib/cliqCardImage.tsx draws: the bytes go straight
+// from memory into the upload, nothing is written anywhere on our side.
+// Zoho's docs name the form field `files` in the parameter list but `file` in
+// their own request example, so `file` is tried first and a 400 retries once
+// with `files`. Cliq allows 20 uploads a minute per user.
+export async function sendCliqChannelFile(channel: string, data: Uint8Array, fileName: string, contentType: string): Promise<void> {
+  const token = await getZohoAccessToken()
+  const upload = (field: string) => {
+    const form = new FormData()
+    form.append(field, new Blob([data as BlobPart], { type: contentType }), fileName)
+    return fetch(CLIQ_FILES_URL(channel), { method: 'POST', headers: { Authorization: `Zoho-oauthtoken ${token}` }, body: form })
+  }
+  let res = await upload('file')
+  if (res.status === 400) res = await upload('files')
+  await checkCliqResponse(res, 'Cliq file upload')
 }

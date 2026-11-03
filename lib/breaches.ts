@@ -7,7 +7,7 @@
 // Cliq alert used to decide whether to fire.
 
 import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags, KpiUnit, KpiGroup, GroupTile, CellBinding, KpiGroupSource } from './types'
-import { extractPercent, parseDurationToSeconds, formatSeconds, extractKpiValue, formatKpiThresholdLabel, resolveCell, type StatusThresholds } from './utils'
+import { extractPercent, parseDurationToSeconds, formatSeconds, extractKpiValue, formatKpiThresholdLabel, resolveCell, getKpiColorClass, getExtraTileColorClass, type StatusThresholds } from './utils'
 import { ZOHO_AUX_TABLE, ZOHO_AUX_SECTION_LABEL } from './zohoAuxShared'
 
 // ── Normalize one raw agent row from a configured AgentSource ────────────────
@@ -280,6 +280,51 @@ export function makeKpiCellResolver(
     // whichever rows a given poll happened to return.
     return resolveCell(rows, binding ?? undefined)
   }
+}
+
+// ── The Overview card's KPI tiles — what each group shows, its value and its
+// colour (text-success/-warning/-danger/-muted). ONE list for the Overview
+// card (components/Dashboard.tsx) and the picture attached to a Cliq alert
+// (lib/cliqCardImage.tsx), so the picture always shows what the card does.
+export interface KpiCardTile { key: string; label: string; value: string; colorClass: string }
+export interface KpiCardGroup { id: string; name: string; tiles: KpiCardTile[] }
+
+export function kpiCardGroups(ds: DataSourceConfig, accountData: AccountData | undefined, kpiTh: Thresholds): KpiCardGroup[] {
+  return (ds.groups ?? []).map(group => {
+    // ONE resolver — the SAME function KpiGrid() and the breach scan use, so
+    // the card and the Dashboard page can never disagree about which table a
+    // tile reads. Holds the tile.source -> group.source -> account-wide
+    // precedence.
+    const rc = makeKpiCellResolver(ds, group, accountData)
+    const name = group.name || 'Global'
+
+    // Independent-tiles group (see GroupTile) — own labels/bindings/
+    // thresholds, separate from every other group on this account. Each tile
+    // may ALSO carry its own `source`, so pass the tile.
+    if (group.tiles && group.tiles.length) {
+      return {
+        id: group.id, name,
+        tiles: group.tiles.map(t => {
+          const raw = rc(t.cell || undefined, t)
+          return { key: t.key, label: t.label, value: raw, colorClass: getKpiColorClass(extractKpiValue(raw, t.kpiUnit).num, t) }
+        }),
+      }
+    }
+
+    const tiles: KpiCardTile[] = []
+    const fixed = (key: 'sla' | 'wait' | 'aht' | 'abn', value: string) =>
+      tiles.push({ key, label: ds.kpiLabels[key], value, colorClass: getKpiColorClass(extractKpiValue(value, kpiTh[key].kpiUnit).num, kpiTh[key]) })
+    if (group.cells.sla)  fixed('sla',  rc(group.cells.sla).replace(/\s+/g, ''))
+    if (group.cells.wait) fixed('wait', rc(group.cells.wait))
+    if (group.cells.aht)  fixed('aht',  rc(group.cells.aht))
+    if (group.cells.abn)  fixed('abn',  rc(group.cells.abn))
+    for (const t of ds.extraTiles ?? []) {
+      if (!group.cells[t.key]) continue
+      const raw = rc(group.cells[t.key])
+      tiles.push({ key: t.key, label: t.label, value: raw, colorClass: getExtraTileColorClass(extractKpiValue(raw, t.kpiUnit).num, t) })
+    }
+    return { id: group.id, name, tiles }
+  })
 }
 
 // ── Shared warn/crit evaluation — used by both the breach-row builder below
