@@ -621,6 +621,69 @@ project (no `zoho_activity` here), so this app pulls Zoho itself.
   keeps its "Zoho Breaks & Aux" name. Overnight caveat: yesterday is re-pulled
   every 30 min, so a Log_Out on yesterday's row can take that long to drop someone.
 
+## Zoho ↔ CRM status match — Settings → Zoho ↔ CRM (2026-11-04)
+
+Per the user: flag an agent whose CRM status doesn't mean the same as their
+Zoho Time Tracker status (e.g. "Management" in the CRM while on a Zoho "15 Minute
+Break"). Names and status titles differ between the two ("John C." / "John
+Cane", "Taking a Break" / "15 Minute Break"), so both are matched by hand.
+
+- Config `DataSourceConfig.zohoCrmMatch` (data_source JSONB, no `wfm_settings`
+  column): `enabled`, `crmField` (unset = the Agent Status; else an
+  `AgentExtraColumn` key — Gorgias's availability column is where its breaks
+  show), `pairs` (`{ zoho, crm }`, names compared like `normalizeName`), `sameAs`
+  (Zoho status → the CRM values that mean the same; a Zoho status with none
+  ticked isn't checked), `checkNotInZoho` (adds the Zoho status "Not logged in to
+  Zoho"), `warnMins`/`critMins` (5 / 10), `sendToCliq`. Defaults per the user:
+  check, Cliq and not-in-Zoho all OFF. Rules in `lib/zohoCrmMatch.ts` (pure).
+- **Gate (per the user):** usable only while the account has Zoho Breaks & Aux on
+  AND "Include logged in" (`zohoCrmMatchAvailable`); otherwise the tab is greyed
+  (`sm-tab-off`) and opens to a note saying which switch is off. Live off the
+  modal's unsaved state.
+- **Who is out of sync is decided on the SERVER, every minute**, in the Zoho
+  sync (`checkZohoCrm()` in `lib/zohoAux.ts`, after each account's Zoho rows),
+  and stored with WHEN it started in `wfm_zoho_crm_mismatch`
+  (`sql/zoho_crm_match.sql` — **must be run once**; RLS off like
+  `wfm_zoho_agent_status`). Why not in the browser like other breaches: the two
+  accounts using Zoho (Guardian Bikes, Rocco Ridge — Gorgias) have NO time in
+  status on their CRM rows (Duration = tickets), so a mismatch can only be timed
+  by remembering when it was first seen. `since` is kept while the agent stays
+  out of sync (even if a status changes), and restarts if the row wasn't
+  re-confirmed for 5 min (`nextMismatchRows`).
+- Compared against EVERYONE's current Zoho status (`computeCurrentAux`), not the
+  account's displayed Zoho rows — the include-toggles only decide what Agent
+  Status lists — and against the CRM rows before the Agent Filter.
+- Paused (rows cleared, so nothing breaches) while Zoho's data for today is over
+  15 min old (a broken pull would flag everyone), the CRM rows' `updated_at` is
+  over 5 min old, or there are no CRM rows. A missing table only logs a line
+  pointing at the SQL file — the Zoho section keeps working.
+- **The breach:** `buildBreaches()` turns each stored row into a 'kind:agent'
+  row (metric `Zoho / CRM Mismatch`, constant so RTA Logs / the alarm treat it as
+  one breach type; value `CRM: X · Zoho: Y · 12m 3s`; `zohoCrm` carries both
+  statuses + the Zoho name, shown on hover in both Breach / Anomalies tables) once
+  it's lasted the account's minutes. Rows the sync hasn't confirmed for 5 min are
+  ignored. Not subject to a status's Exclude (Offline-in-the-CRM-while-logged-in
+  is exactly the point). Fetched by `fetchZohoCrmMismatches()` from BOTH
+  Dashboard.tsx and cliqScan.ts (Agent Filter applied there, by CRM name).
+- Cliq: its own `sendToCliq` (the Cliq filter checks `b.zohoCrm` before the
+  Status Durations toggle). RTA Logs: like any agent breach (only with the
+  account's Agent Status reporting on). Frozen-scraper detection ignores these
+  rows (`agentBreachSignature`) — their clock keeps ticking on a frozen CRM.
+- UI: `components/ZohoCrmMatchTab.tsx` — settings, **1 · Match names** (suggested
+  pairs from `suggestZohoCrmPairs()` — "Jade D" ↔ "Jade Juben Enojo Dagooc",
+  "Ann Basilio" ↔ "Kenneth Ann Leonor Basilio"; only unambiguous both ways;
+  accept one / all, or pair by hand), **2 · Match statuses** (a chip per CRM
+  value under each Zoho status; this account's Zoho types first, "Show all" for
+  the organisation's), **3 · Right now** (the same `findZohoCrmMismatches()` on
+  the unsaved settings, plus what the server last stored). Zoho side from
+  `app/api/zoho/crm-match` (`requireRole` superuser/RTA, an RTA only for their
+  own accounts — the Zoho cache is service-role only); CRM side read in the
+  browser like the Agent Filter tab.
+- Verified: rules (45 checks, incl. the user's examples and the real Guardian
+  Bikes / Rocco Ridge names), the sync minute by minute with a fake Zoho and
+  store (30), the route's role check (9), the real Cliq scan on live data with
+  writes intercepted (7), and the tab + breach on the production build (47).
+
 ## Breach / Anomalies columns — the table's gear (2026-10-23)
 
 Per the user: a gear on the Breach / Anomalies header (Dashboard page panel AND
@@ -743,7 +806,7 @@ and so which ones can ever reach Cliq.
   the tables right now. Search (name / section / status), All / Shown / Hidden
   views, Select all / Deselect all act on what's listed; the list box has its
   own scroll with a sticky, solid header row. Applies on Save Changes.
-- Modal widened 740 → 820px so the 8 tabs fit.
+- Modal widened 740 → 820px so the 8 tabs fit (→ 1080px with the 9th, Zoho ↔ CRM).
 - Verified: real `fetchAccountData()` on Homebase's live tables (7 checks), and
   a browser test on the production build with live read-only data and every
   write intercepted (24 checks, incl. reload, off/on, mode switch, dark mode).

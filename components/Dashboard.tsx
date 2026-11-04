@@ -9,7 +9,7 @@ import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, applyAgentFilter, agentTimerKey, agentElapsedSecs, durationIsStatic, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, makeKpiCellResolver, kpiCardGroups, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, applyAgentFilter, agentTimerKey, agentElapsedSecs, durationIsStatic, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, fetchZohoCrmMismatches, makeKpiCellResolver, kpiCardGroups, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
@@ -204,11 +204,13 @@ export default function Dashboard() {
       // lib/cliqScan.ts calls the exact same function with the server client,
       // so the two cannot drift — this used to be a hand-written loop copied
       // into both files, and that pair had already drifted by a token.
-      const kpiRowsBySource = await fetchKpiSourceRows(src, accId,
-        async (table, accountCol, accountId) => {
-          const r = await supabase.from(table as any).select('*').eq(accountCol, accountId)
-          return (r.data as any[]) ?? []
-        })
+      const fetchRows = async (table: string, accountCol: string, accountId: string) => {
+        const r = await supabase.from(table as any).select('*').eq(accountCol, accountId)
+        return (r.data as any[]) ?? []
+      }
+      const kpiRowsBySource = await fetchKpiSourceRows(src, accId, fetchRows)
+      // Zoho ↔ CRM mismatches (Settings → Zoho ↔ CRM) — same call as lib/cliqScan.ts.
+      const zohoMismatches = await fetchZohoCrmMismatches(src, accId, fetchRows)
 
       const kpiRows = (kpiRes.data as any[]) ?? []
 
@@ -219,6 +221,7 @@ export default function Dashboard() {
           kpiRows: kpiRows,
           kpiRowsBySource,
           agents:  agents,
+          zohoMismatches,
           status:  null,
           calls:   [],
           syncing: false,
@@ -1574,7 +1577,7 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutM
                       </td>
                       <td style={{ fontWeight: 600 }}>{b.entity}</td>
                       <td>{b.metric}</td>
-                      <td><span className={b.severity === 'critical' ? 'badge-crit' : 'badge-warn'}>{b.value}</span></td>
+                      <td><span className={b.severity === 'critical' ? 'badge-crit' : 'badge-warn'} title={b.zohoCrm ? `In Zoho: ${b.zohoCrm.zohoName}` : undefined}>{b.value}</span></td>
                       <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{b.threshold}</td>
                       {breachExtraCols.map(col => (
                         <td key={col.key}>{b.kind === 'agent' ? (b.extras?.[col.key] || '—') : '—'}</td>
@@ -2198,7 +2201,7 @@ function OverviewCard({ accId, displayName, accountData, agentTimers, breaches, 
               <tr key={i}>
                 <td style={{ fontWeight: 500 }}>{b.entity}</td>
                 <td>{b.metric}</td>
-                <td><span className={`ov-breach-value ${b.severity}`}>{b.value}</span></td>
+                <td><span className={`ov-breach-value ${b.severity}`} title={b.zohoCrm ? `In Zoho: ${b.zohoCrm.zohoName}` : undefined}>{b.value}</span></td>
                 <td style={{ color: 'var(--text-muted)' }}>{b.threshold}</td>
                 {ovBreachExtraCols.map(col => (
                   <td key={col.key}>{b.kind === 'agent' ? (b.extras?.[col.key] || '—') : '—'}</td>

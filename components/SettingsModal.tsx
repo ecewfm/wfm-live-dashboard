@@ -24,8 +24,10 @@ import AlarmTab from './AlarmTab'
 import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
 import { includeBreaksOf, includeAuxOf, includeLoggedInOf, accountKeysFor, normalizeAccount, parseExtraNames, zohoStatusCategory, allowanceMinutesOf, ZOHO_AUX_TABLE, ZOHO_LOGGED_IN_STATUS, type ZohoAuxConfig, type ZohoStatusCategory } from '@/lib/zohoAuxShared'
+import { zohoCrmMatchAvailable } from '@/lib/zohoCrmMatch'
+import ZohoCrmMatchTab from './ZohoCrmMatchTab'
 
-type Tab = 'kpi' | 'status' | 'agents' | 'datasource' | 'accounts' | 'cliq' | 'users' | 'alarm'
+type Tab = 'kpi' | 'status' | 'agents' | 'datasource' | 'accounts' | 'cliq' | 'zohomatch' | 'users' | 'alarm'
 
 // ── A free-typed mm:ss input that only reformats/commits on blur — a plain
 // controlled input reformatting on every keystroke would fight the user
@@ -98,7 +100,7 @@ const MODAL_STYLES = `
     background: var(--bg-card, #ffffff);
     border: 1px solid var(--border, #e1e6e4);
     border-radius: 12px;
-    width: 100%; max-width: 820px;
+    width: 100%; max-width: 1080px;
     max-height: 90vh;
     display: flex; flex-direction: column;
     box-shadow: 0 24px 64px rgba(0,0,0,0.45);
@@ -173,18 +175,18 @@ const MODAL_STYLES = `
     transition: background 0.15s; line-height: 1;
   }
   .sm-close:hover { background: rgba(255,255,255,0.22); }
-  /* A super user has 8 tabs — sized to fit the modal; on a narrower screen
+  /* A super user has 9 tabs — sized to fit the modal; on a narrower screen
      the row scrolls sideways instead of clipping the last tabs. */
   .sm-tabs {
     display: flex; border-bottom: 1px solid var(--border, #e1e6e4);
-    padding: 0 24px; flex-shrink: 0;
+    padding: 0 16px; flex-shrink: 0;
     background: var(--bg-body, #f0f2f1);
     overflow-x: auto; scrollbar-width: thin;
   }
   .dark .sm-tabs { background: #111; border-bottom-color: #2e2e2e; }
   .sm-tab {
     display: flex; align-items: center; gap: 6px;
-    padding: 12px 10px; font-size: 13px; font-weight: 500;
+    padding: 12px 8px; font-size: 13px; font-weight: 500;
     color: var(--text-muted, #687d75);
     background: transparent; border: none;
     border-bottom: 2px solid transparent;
@@ -195,6 +197,9 @@ const MODAL_STYLES = `
   .sm-tab i { font-size: 15px; }
   .sm-tab:hover { color: var(--text-main, #2c3b36); }
   .sm-tab.active { color: #d97a35; border-bottom-color: #d97a35; font-weight: 600; }
+  .sm-tab { white-space: nowrap; flex-shrink: 0; }
+  /* Not usable yet for this account (Zoho ↔ CRM before Zoho is on) — still opens, to say why. */
+  .sm-tab.sm-tab-off { opacity: 0.45; }
   .dark .sm-tab:hover { color: #f0f0f0; }
   .sm-body { flex: 1; overflow-y: auto; padding: 22px 24px; }
   .sm-desc { font-size: 12px; color: var(--text-muted, #687d75); margin-bottom: 16px; line-height: 1.65; }
@@ -3118,6 +3123,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             <button className={`sm-tab${tab === 'cliq' ? ' active' : ''}`} onClick={() => setTab('cliq')}>
               <i className="bx bx-bell" /> Zoho Integrations
             </button>
+            {/* Greyed out until Zoho Breaks & Aux is on with its time log (per the user) — opens to say so. */}
+            <button className={`sm-tab${tab === 'zohomatch' ? ' active' : ''}${zohoCrmMatchAvailable(ds) ? '' : ' sm-tab-off'}`}
+              onClick={() => setTab('zohomatch')}
+              title={zohoCrmMatchAvailable(ds) ? 'Compare Zoho break / aux statuses with the CRM' : 'Needs Zoho Breaks & Aux on, with "Include logged in" (Zoho Integrations)'}>
+              <i className="bx bx-git-compare" /> Zoho ↔ CRM
+            </button>
             {canManageUsers && (
               <button className={`sm-tab${tab === 'users' ? ' active' : ''}`} onClick={() => setTab('users')}>
                 <i className="bx bx-user" /> Users
@@ -3682,6 +3693,12 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 </>
               )
             })()}
+
+            {tab === 'zohomatch' && (
+              <ZohoCrmMatchTab accountId={accountId} ds={ds} setDs={setDs}
+                knownCrmStatuses={[...currentStatusRows, ...pastStatusRows]}
+                onOpenZohoSettings={() => setTab('cliq')} />
+            )}
 
             {tab === 'cliq' && (
               <>

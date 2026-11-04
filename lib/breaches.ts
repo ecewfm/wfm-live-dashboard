@@ -8,7 +8,11 @@
 
 import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags, KpiUnit, KpiGroup, GroupTile, CellBinding, KpiGroupSource } from './types'
 import { extractPercent, parseDurationToSeconds, formatSeconds, extractKpiValue, formatKpiThresholdLabel, resolveCell, getKpiColorClass, getExtraTileColorClass, type StatusThresholds } from './utils'
-import { ZOHO_AUX_TABLE, ZOHO_AUX_SECTION_LABEL } from './zohoAuxShared'
+import { ZOHO_AUX_TABLE, ZOHO_AUX_SECTION_LABEL, normalizeName } from './zohoAuxShared'
+import {
+  ZOHO_CRM_MISMATCH_TABLE, ZOHO_CRM_MISMATCH_METRIC, zohoCrmMatchActive, mismatchWarnMins, mismatchCritMins,
+  mismatchRowFresh, type ZohoCrmMismatchRow,
+} from './zohoCrmMatch'
 
 // ── Normalize one raw agent row from a configured AgentSource ────────────────
 // CANONICAL — used by BOTH components/Dashboard.tsx (client, live polling)
@@ -464,6 +468,10 @@ export interface BreachRow {
   // keyed by column key. The tables show the ones picked with their gear (see
   // breachTableExtraCols). Absent on KPI rows.
   extras?: Record<string, string>
+  // Only on a Zoho ↔ CRM mismatch row (kind 'agent', no `status` — see the end
+  // of buildBreaches): both sides' statuses and the Zoho name. Its Cliq toggle
+  // is `sendToCliq` above (the tab's "Send to Cliq"), not a Status Durations one.
+  zohoCrm?: { crmStatus: string; zohoStatus: string; zohoName: string }
 }
 
 // ── Freshest updated_at across all of an account's KPI rows ───────────────────
@@ -585,7 +593,9 @@ const CLOCKLIKE = /\d+\s*:\s*\d{2}|\d+\s*[smhd]\b/i
  *  enough signal to judge (no clock-like agent breach this scan). */
 export function agentBreachSignature(breaches: BreachRow[]): string {
   const parts = breaches
-    .filter(b => b.kind === 'agent' && CLOCKLIKE.test(String(b.value ?? '')))
+    // Not a Zoho ↔ CRM mismatch: its clock is the Zoho sync's, so it keeps
+    // ticking while a frozen CRM page doesn't — and would hide the freeze.
+    .filter(b => b.kind === 'agent' && !b.zohoCrm && CLOCKLIKE.test(String(b.value ?? '')))
     .map(b => `${b.entity}|${b.metric}|${b.value}`)
     .sort()
   return parts.length ? parts.join('~') : ''
@@ -678,6 +688,20 @@ export function buildBreaches(
       checkKpi(rc(group.cells[t.key]), t.targ, { warn: t.warn, crit: t.crit, direction: dir }, g, t.label, t.kpiUnit, t.sendToCliq)
     })
   })
+
+  // An agent's value for every column a Breach / Anomalies table can show
+  // (BreachRow.extras): Status/Duration exactly as the Agent Status table shows
+  // them, and each custom column.
+  const agentExtras = (a: Record<string, any>): Record<string, string> => {
+    const extras: Record<string, string> = {
+      [BREACH_COL_STATUS]:   String(a._status ?? ''),
+      [BREACH_COL_DURATION]: durationIsStatic(ds, a)
+        ? String(a._duration ?? '')
+        : formatSeconds(agentElapsedSecs(agentTimers, accountId, a)),
+    }
+    for (const col of ds.agentExtraCols ?? []) extras[col.key] = String(a[`_extra_${col.key}`] ?? '')
+    return extras
+  }
 
   // Agent status breaches — agents are pre-normalized in fetchAccount to
   // _name/_status/_duration regardless of single-table vs agentSources.
@@ -806,20 +830,64 @@ export function buildBreaches(
     })
 
     if (rows.length > firstRowOfAgent) {
-      // Status/Duration exactly as the Agent Status table shows them.
-      const rawDur = String(a._duration ?? '')
-      const extras: Record<string, string> = {
-        [BREACH_COL_STATUS]:   status,
-        [BREACH_COL_DURATION]: durationIsStatic(ds, a)
-          ? rawDur
-          : formatSeconds(agentElapsedSecs(agentTimers, accountId, a)),
-      }
-      for (const col of ds.agentExtraCols ?? []) extras[col.key] = String(a[`_extra_${col.key}`] ?? '')
+      const extras = agentExtras(a)
       for (let i = firstRowOfAgent; i < rows.length; i++) rows[i].extras = extras
     }
   })
 
+  // Zoho ↔ CRM mismatches (Settings → Zoho ↔ CRM — lib/zohoCrmMatch.ts). WHO is
+  // out of sync, and since when, comes from the Zoho sync's every-minute check
+  // (accountData.zohoMismatches); how long that is, against this account's
+  // minutes, decides here. Deliberately not subject to a status's Exclude:
+  // "Offline in the CRM while logged in to Zoho" is exactly what this catches —
+  // whether a value is fine is the tab's own "same as" ticks.
+  if (zohoCrmMatchActive(ds) && accountData.zohoMismatches?.length) {
+    const cfg = ds.zohoCrmMatch!
+    const warn = mismatchWarnMins(cfg), crit = mismatchCritMins(cfg)
+    const now = Date.now()
+    const crmRow = (name: string) => accountData.agents.find(a => !a._durationFromSince && normalizeName(a._name) === normalizeName(name))
+    for (const m of accountData.zohoMismatches) {
+      if (!mismatchRowFresh(m, now)) continue
+      const secs = Math.max(0, Math.round((now - Date.parse(m.since)) / 1000))
+      const mins = secs / 60
+      const severity = mins >= crit ? 'critical' : mins >= warn ? 'warning' : null
+      if (!severity) continue
+      const a = crmRow(m.crm_name)
+      rows.push({
+        // The Zoho name stays out of the value (it rarely fits the Breach /
+        // Anomalies column) — the tables show it on hover, from zohoCrm.
+        entity: m.crm_name, metric: ZOHO_CRM_MISMATCH_METRIC,
+        value: `CRM: ${m.crm_status} · Zoho: ${m.zoho_status} · ${formatSeconds(secs)}`,
+        threshold: `${severity === 'critical' ? crit : warn}m`, severity, kind: 'agent',
+        group: String(a?._agentGroup ?? '') || m.crm_group || undefined,
+        sendToCliq: !!cfg.sendToCliq,
+        extras: a ? agentExtras(a) : undefined,
+        zohoCrm: { crmStatus: m.crm_status, zohoStatus: m.zoho_status, zohoName: m.zoho_name },
+      })
+    }
+  }
+
   return rows
+}
+
+// ── This account's stored Zoho ↔ CRM mismatches ───────────────────────────────
+// CANONICAL — called by BOTH components/Dashboard.tsx and lib/cliqScan.ts with
+// their own Supabase client (`fetchRows`, the same callback they hand
+// fetchKpiSourceRows), so the Agent Filter is applied in one place: a mismatch
+// of a hidden CRM agent is left out, like every other breach of theirs. Nothing
+// is fetched while the check is off; a missing table (sql/zoho_crm_match.sql not
+// run yet) or failed read is simply no mismatches.
+export async function fetchZohoCrmMismatches(
+  ds: DataSourceConfig, accountId: string,
+  fetchRows: (table: string, accountCol: string, accountId: string) => Promise<Record<string, any>[]>,
+): Promise<ZohoCrmMismatchRow[]> {
+  if (!zohoCrmMatchActive(ds)) return []
+  try {
+    const rows = (await fetchRows(ZOHO_CRM_MISMATCH_TABLE, 'account_id', accountId)) as ZohoCrmMismatchRow[]
+    return applyAgentFilter(rows.map(r => ({ ...r, _name: r.crm_name })), ds)
+  } catch {
+    return []
+  }
 }
 
 // ── Agent Status columns shown in the Breach / Anomalies table ──────────────

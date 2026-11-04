@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiSourceRows, collectRtaKpiSignals, breachTableExtraCols, breachExtraFields, kpiCardGroups, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiSourceRows, fetchZohoCrmMismatches, collectRtaKpiSignals, breachTableExtraCols, breachExtraFields, kpiCardGroups, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage, sendCliqChannelFile } from './zohoCliq'
 import { renderAccountCardPng } from './cliqCardImage'
@@ -77,15 +77,17 @@ export async function fetchAccountData(ds: DataSourceConfig, accountId: string):
   // drifted — so the loop is deliberately gone from both rather than
   // "mirrored carefully". Result: Cliq/Workforce Logs/RTA Logs breach-check
   // exactly the data the live Dashboard/Overview pages show.
-  const kpiRowsBySource = await fetchKpiSourceRows(ds, accountId,
-    async (table, accountCol, accId) => {
-      const r = await supabase.from(table as any).select('*').eq(accountCol, accId)
-      return (r.data as any[]) ?? []
-    })
+  const fetchRows = async (table: string, accountCol: string, accId: string) => {
+    const r = await supabase.from(table as any).select('*').eq(accountCol, accId)
+    return (r.data as any[]) ?? []
+  }
+  const kpiRowsBySource = await fetchKpiSourceRows(ds, accountId, fetchRows)
+  // Zoho ↔ CRM mismatches (Settings → Zoho ↔ CRM) — same call as Dashboard.tsx.
+  const zohoMismatches = await fetchZohoCrmMismatches(ds, accountId, fetchRows)
 
   // Settings → Agent Filter — the same call Dashboard.tsx makes, so an agent
   // hidden on the dashboard is never in a Cliq alert / Workforce Log / RTA Log.
-  return { kpi: null, kpiRows, kpiRowsBySource, agents: applyAgentFilter(agentLists.flat(), ds), status: null, calls: [] }
+  return { kpi: null, kpiRows, kpiRowsBySource, agents: applyAgentFilter(agentLists.flat(), ds), zohoMismatches, status: null, calls: [] }
 }
 
 // ── Message formatting — mirrors the old GAS tool's format ──────────────────
@@ -617,6 +619,8 @@ async function processAccount(
       // agent roster must not silence an SLA alert. Nothing is posted about
       // the freeze itself; both were the user's explicit choices.
       if (agentFrozen) return false
+      // A Zoho ↔ CRM mismatch has its own "Send to Cliq" (Settings → Zoho ↔ CRM, off by default).
+      if (b.zohoCrm) return !!b.sendToCliq
       return !b.status || statusTh[b.status]?.sendToCliq
     })
     if (cliqBreaches.length === 0) {

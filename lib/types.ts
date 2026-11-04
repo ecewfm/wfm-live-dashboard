@@ -2,7 +2,8 @@
 // this is found at lib/types.ts because it is used by both the dashboard and the API routes.
 
 import type { ZohoAuxConfig } from './zohoAuxShared'
-export type { ZohoAuxConfig }
+import type { ZohoCrmMatchConfig, ZohoCrmMismatchRow } from './zohoCrmMatch'
+export type { ZohoAuxConfig, ZohoCrmMatchConfig }
 
 export interface KpiSnapshot {
   id?: string
@@ -93,6 +94,11 @@ export interface AccountData {
   // KpiGroup.id) is purely in-memory — nothing saved in Supabase or
   // localStorage changes shape.
   kpiRowsBySource?: Record<string, Record<string, any>[]>
+  // This account's Zoho ↔ CRM mismatches as the Zoho sync last stored them
+  // (wfm_zoho_crm_mismatch) — fetched only while the check is on, through
+  // lib/breaches.ts's fetchZohoCrmMismatches() (Agent Filter applied), and
+  // turned into breaches by buildBreaches(). See lib/zohoCrmMatch.ts.
+  zohoMismatches?: ZohoCrmMismatchRow[]
 }
 
 // Per-KPI Workforce RTA Logs (Zoho) reporting flags — both absent/false means
@@ -377,6 +383,13 @@ export interface DataSourceConfig {
   // no migration of wfm_settings and can't trip the unknown-column fallbacks in
   // lib/settings.ts.
   zohoAux?: ZohoAuxConfig
+
+  // Zoho ↔ CRM status match (Settings → Zoho ↔ CRM, per the user 2026-11-04):
+  // which Zoho person is which CRM agent, which CRM statuses mean the same as
+  // each Zoho status, and when a mismatch becomes a breach. Usable only while
+  // zohoAux is on with its time log — see lib/zohoCrmMatch.ts. In this JSONB
+  // for the same reason as zohoAux.
+  zohoCrmMatch?: ZohoCrmMatchConfig
 
   // Which agents this account shows at all — Settings → Agent Filter (per the
   // user, 2026-11-02, first for Homebase). Applied by applyAgentFilter()

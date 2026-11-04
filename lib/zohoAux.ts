@@ -22,17 +22,27 @@
 // happens when today's copy is older than the pull interval, and nothing at all
 // is pulled while no account has the feature on) and app/api/zoho/aux-sync-now
 // (the "Pull Zoho now" button in Settings → Zoho Integrations).
+//
+// Each run also does the Zoho ↔ CRM check (Settings → Zoho ↔ CRM,
+// lib/zohoCrmMatch.ts) for the accounts that have it on: everyone's current Zoho
+// status is right here, so this is where who-is-out-of-sync is worked out and
+// stored with when it started (wfm_zoho_crm_mismatch).
 
 import { getZohoAccessToken } from './zohoAuth'
 import { getSupabaseAdmin } from './supabaseAdmin'
 import { OWNER_NAME } from './zohoCreator'
 import type { DataSourceConfig } from './types'
+import { agentSourcesFor, normalizeAgentRow, mostRecentUpdatedAt } from './breaches'
 import {
   ZOHO_AUX_SOURCES, ZOHO_AUX_TABLE, zohoCriteriaDate, parseSessionRow, parseBreakRow,
   normalizeName, dateInTz, addDays, computeCurrentAux, buildAccountStatusRows, parseExtraNames,
   pickAccountField, accountKeysFor, zohoPeopleOnAccount, zohoAccountsSeen, zohoTypesSeen, includeLoggedInOf,
-  type ZohoSession, type ZohoBreak, type ZohoAgentStatusRow,
+  type ZohoSession, type ZohoBreak, type ZohoAgentStatusRow, type CurrentAux, type ZohoAuxConfig,
 } from './zohoAuxShared'
+import {
+  ZOHO_CRM_MISMATCH_TABLE, ZOHO_MATCH_MAX_ZOHO_AGE_MIN, zohoCrmMatchActive, findZohoCrmMismatches, nextMismatchRows,
+  type ZohoCrmMismatchRow, type ZohoNow, type ZohoCrmMatchInfo,
+} from './zohoCrmMatch'
 
 const CREATOR_API_BASE = 'https://www.zohoapis.com/creator/v2.1'
 export const ZOHO_AUX_CACHE_TABLE = 'wfm_zoho_activity'
@@ -97,6 +107,12 @@ export interface AuxStore {
   accountNames(): Promise<Record<string, string>>
   replaceAccountRows(accountId: string, rows: ZohoAgentStatusRow[]): Promise<void>
   clearAccountsExcept(keepIds: string[]): Promise<void>
+  // ── The Zoho ↔ CRM check ──
+  /** The account's CRM agent rows, normalized (normalizeAgentRow) — its agent sources minus the Zoho section. */
+  crmAgents(accountId: string, ds: DataSourceConfig): Promise<Record<string, any>[]>
+  readMismatches(accountId: string): Promise<ZohoCrmMismatchRow[]>
+  replaceMismatches(accountId: string, rows: ZohoCrmMismatchRow[]): Promise<void>
+  clearMismatchesExcept(keepIds: string[]): Promise<void>
 }
 
 export function supabaseAuxStore(): AuxStore {
@@ -156,8 +172,74 @@ export function supabaseAuxStore(): AuxStore {
       const stale = [...new Set((existing ?? []).map(r => r.account_id))].filter(id => !keepIds.includes(id))
       if (stale.length) must(await db.from(ZOHO_AUX_TABLE).delete().in('account_id', stale), 'clearing accounts that turned Zoho off')
     },
+    async crmAgents(accountId, ds) {
+      const lists = await Promise.all(agentSourcesFor(ds, { includeZohoAux: false }).map(async src => {
+        if (!src.table) return []
+        const rows = must(await db.from(src.table).select('*').eq(src.accountCol || 'account_id', accountId), `reading ${src.table}`) as Record<string, any>[]
+        return (rows ?? []).map(r => normalizeAgentRow(r, src))
+      }))
+      return lists.flat()
+    },
+    async readMismatches(accountId) {
+      return (must(await db.from(ZOHO_CRM_MISMATCH_TABLE).select('*').eq('account_id', accountId), 'reading Zoho / CRM mismatches') ?? []) as ZohoCrmMismatchRow[]
+    },
+    async replaceMismatches(accountId, rows) {
+      if (rows.length) must(await db.from(ZOHO_CRM_MISMATCH_TABLE).upsert(rows, { onConflict: 'id' }), 'writing Zoho / CRM mismatches')
+      const existing = must(await db.from(ZOHO_CRM_MISMATCH_TABLE).select('id').eq('account_id', accountId), 'reading Zoho / CRM mismatches') as { id: string }[]
+      const keep = new Set(rows.map(r => r.id))
+      const stale = (existing ?? []).map(r => r.id).filter(id => !keep.has(id))
+      if (stale.length) must(await db.from(ZOHO_CRM_MISMATCH_TABLE).delete().in('id', stale), 'removing resolved Zoho / CRM mismatches')
+    },
+    async clearMismatchesExcept(keepIds) {
+      const existing = must(await db.from(ZOHO_CRM_MISMATCH_TABLE).select('account_id'), 'reading Zoho / CRM mismatch accounts') as { account_id: string }[]
+      const stale = [...new Set((existing ?? []).map(r => r.account_id))].filter(id => !keepIds.includes(id))
+      if (stale.length) must(await db.from(ZOHO_CRM_MISMATCH_TABLE).delete().in('account_id', stale), 'clearing accounts that turned the Zoho / CRM check off')
+    },
   }
 }
+
+// ── The Zoho ↔ CRM check, for one account ─────────────────────────────────────
+// Paused — the account's stored mismatches cleared, so nothing breaches — while
+// Zoho's data for today is too old (a broken pull would otherwise make everyone
+// look out of sync) or the CRM rows are stale (the scraper is down: frozen
+// statuses against a live Zoho). Returns its log line.
+const MISMATCH_TABLE_HINT = 'run sql/zoho_crm_match.sql once in Supabase (SQL Editor) to create it'
+const CRM_STALE_MS = 5 * 60 * 1000
+
+export function zohoNowOf(current: Map<string, CurrentAux>): ZohoNow {
+  return new Map([...current].map(([k, c]) => [k, { name: c.employee, status: c.type }]))
+}
+
+async function checkZohoCrm(
+  a: { id: string; ds: DataSourceConfig }, zohoNow: ZohoNow, zohoAgeMin: number, store: AuxStore, nowIso: string,
+): Promise<{ line: string; mismatches: number }> {
+  const cfg = a.ds.zohoCrmMatch!
+  const pause = async (why: string) => {
+    await store.replaceMismatches(a.id, [])
+    return { line: `${a.id}: Zoho ↔ CRM check paused — ${why}.`, mismatches: 0 }
+  }
+  if (!(zohoAgeMin <= ZOHO_MATCH_MAX_ZOHO_AGE_MIN)) {
+    return pause(Number.isFinite(zohoAgeMin) ? `Zoho's data is ${Math.round(zohoAgeMin)} min old` : 'Zoho hasn\'t been pulled today yet')
+  }
+  const crm = await store.crmAgents(a.id, a.ds)
+  if (!crm.length) return pause('no agents on the CRM tables')
+  // Same 5 minutes as the dashboard's "DATA NOT IN SYNC" (isDataStale), on this run's clock.
+  const crmUpdated = mostRecentUpdatedAt(crm, 'updated_at')
+  if (crmUpdated && Date.parse(nowIso) - Date.parse(crmUpdated) > CRM_STALE_MS) {
+    return pause(`the CRM agent data is ${Math.round((Date.parse(nowIso) - Date.parse(crmUpdated)) / 60000)} min old`)
+  }
+
+  const found = findZohoCrmMismatches(cfg, crm, zohoNow)
+  const rows = nextMismatchRows(a.id, found, await store.readMismatches(a.id), nowIso)
+  await store.replaceMismatches(a.id, rows)
+  const list = found.slice(0, 8).map(m => `${m.crmName} (CRM ${m.crmStatus} / Zoho ${m.zohoStatus})`).join(', ')
+  return {
+    line: `${a.id}: Zoho ↔ CRM — ${cfg.pairs.length} pair(s), ${found.length} out of sync now${found.length ? `: ${list}${found.length > 8 ? ', …' : ''}` : ''}.`,
+    mismatches: found.length,
+  }
+}
+
+const isMissingTable = (e: unknown) => /wfm_zoho_crm_mismatch|PGRST205|does not exist|schema cache/i.test(e instanceof Error ? e.message : String(e))
 
 // ── One date, both Zoho apps ──────────────────────────────────────────────────
 async function pullDate(date: string, token: string, store: AuxStore, f: FetchLike, nowIso: string, l: (m: string) => void): Promise<boolean> {
@@ -215,8 +297,9 @@ export interface AuxSyncResult {
   pulled: string[]
   // per enabled account: which Zoho account name(s) it was matched on, how many
   // people Zoho has on it, and how many of them (plus extra names) are on a
-  // break/aux now, and logged in on none (shown as Logged In)
-  accounts: { id: string; zohoAccounts: string[]; people: number; extraNames: number; onBreakOrAux: number; loggedIn: number }[]
+  // break/aux now, and logged in on none (shown as Logged In); and, with the
+  // Zoho ↔ CRM check on, how many of its agents are out of sync
+  accounts: { id: string; zohoAccounts: string[]; people: number; extraNames: number; onBreakOrAux: number; loggedIn: number; mismatches?: number }[]
 }
 
 export async function runZohoAuxSync(
@@ -235,6 +318,13 @@ export async function runZohoAuxSync(
   // An account that turned this off stops showing it at once anyway (the
   // dashboard only adds the section while it's on); clear its rows too.
   await store.clearAccountsExcept(enabled.map(a => a.id))
+  // Same for the Zoho ↔ CRM check (its rows are ignored while it's off anyway).
+  // Only worth a log line when some account uses it — before then the table may
+  // not even exist yet.
+  const matching = enabled.filter(a => zohoCrmMatchActive(a.ds))
+  try { await store.clearMismatchesExcept(matching.map(a => a.id)) } catch (e) {
+    if (matching.length) l(`Zoho ↔ CRM: ${isMissingTable(e) ? `its table is missing — ${MISMATCH_TABLE_HINT}` : e instanceof Error ? e.message : String(e)}`)
+  }
   if (enabled.length === 0) {
     l('No account has Zoho Breaks & Aux turned on — nothing pulled from Zoho.')
     return { log, pulled: [], accounts: [] }
@@ -269,6 +359,9 @@ export async function runZohoAuxSync(
   const current = computeCurrentAux(sessions, breaks, now)
   const seen = zohoAccountsSeen(sessions, breaks)
   const displayNames = await store.accountNames()
+  // How old the Zoho data behind `current` is — the Zoho ↔ CRM check pauses past ZOHO_MATCH_MAX_ZOHO_AGE_MIN.
+  const zohoAgeMin = pulled.includes(today) ? 0 : age(today) / 60000
+  const zohoNow = zohoNowOf(current)
 
   const accounts: AuxSyncResult['accounts'] = []
   for (const a of enabled) {
@@ -283,7 +376,8 @@ export async function runZohoAuxSync(
       const rows = buildAccountStatusRows(a.id, [...people.values(), ...extra], current, cfg, nowIso)
       await store.replaceAccountRows(a.id, rows)
       const loggedIn = rows.filter(r => r.category === 'login').length, onBreakOrAux = rows.length - loggedIn
-      accounts.push({ id: a.id, zohoAccounts: asked.length ? asked : [displayNames[a.id] || a.id], people: people.size, extraNames: extra.length, onBreakOrAux, loggedIn })
+      const entry: AuxSyncResult['accounts'][number] = { id: a.id, zohoAccounts: asked.length ? asked : [displayNames[a.id] || a.id], people: people.size, extraNames: extra.length, onBreakOrAux, loggedIn }
+      accounts.push(entry)
       let line = `${a.id}: Zoho account ${label} — ${people.size} ${people.size === 1 ? 'person' : 'people'} in Zoho's logs${extra.length ? ` (+${extra.length} extra name(s))` : ''}, ${onBreakOrAux} on a break/aux now${includeLoggedInOf(cfg) ? `, ${loggedIn} logged in on none` : ''}`
       if (!people.size) {
         line += seen.length
@@ -291,6 +385,18 @@ export async function runZohoAuxSync(
           : `. Zoho's cached logs carry no account at all yet (see the pull lines above).`
       }
       l(line)
+      // Compared against EVERYONE's current Zoho status (`current`), not just the
+      // rows this account shows — its include-toggles are about what Agent Status
+      // lists, and a pair can name someone filed under another Zoho account.
+      if (zohoCrmMatchActive(a.ds)) {
+        try {
+          const r = await checkZohoCrm(a, zohoNow, zohoAgeMin, store, nowIso)
+          entry.mismatches = r.mismatches
+          l(r.line)
+        } catch (e) {
+          l(`${a.id}: Zoho ↔ CRM check failed — ${isMissingTable(e) ? `its table is missing, ${MISMATCH_TABLE_HINT}` : e instanceof Error ? e.message : String(e)}`)
+        }
+      }
     } catch (e) {
       l(`${a.id}: could not update — ${e instanceof Error ? e.message : String(e)}`)
     }
@@ -318,5 +424,41 @@ export async function getZohoAuxStatus(store: AuxStore = supabaseAuxStore()): Pr
     pullMinutes: ZOHO_AUX_PULL_MINUTES, today, lastPull: (r.data as any)?.refreshed_at ?? null, note: (r.data as any)?.note ?? null,
     zohoAccounts: zohoAccountsSeen(sessions, breaks),
     zohoTypes: zohoTypesSeen([...breaks, ...yesterday.breaks]),
+  }
+}
+
+// ── For Settings → Zoho ↔ CRM ─────────────────────────────────────────────────
+// Everyone this account can be paired with — its people in the last two days of
+// Zoho logs plus its extra names (both as the modal has them, saved or not) —
+// with their Zoho status right now (null = not logged in); the Zoho types its
+// people used in those two days, and the whole organisation's; and what the
+// check last stored for the account (null + needsMigration when
+// sql/zoho_crm_match.sql hasn't been run yet).
+export async function getZohoCrmMatchInfo(
+  accountId: string, cfg: Pick<ZohoAuxConfig, 'zohoAccounts' | 'extraNames'>, store: AuxStore = supabaseAuxStore(),
+): Promise<ZohoCrmMatchInfo> {
+  const now = Date.now()
+  const today = dateInTz(now, PRIMARY_TZ), yesterday = addDays(today, -1)
+  const [names, sync, cache] = await Promise.all([store.accountNames(), store.getSync([today]), store.readCache([yesterday, today])])
+  const current = computeCurrentAux(cache.sessions, cache.breaks, now)
+  const onAccount = zohoPeopleOnAccount(cache.sessions, cache.breaks, accountKeysFor(accountId, names[accountId], cfg as ZohoAuxConfig))
+  const all = new Map(onAccount)
+  for (const n of parseExtraNames(cfg.extraNames)) if (!all.has(normalizeName(n))) all.set(normalizeName(n), n)
+  const people = [...all].map(([k, name]) => {
+    const c = current.get(k)
+    return { name: c?.employee || name, status: c?.type ?? null, since: c?.since ?? null }
+  }).sort((a, b) => a.name.localeCompare(b.name))
+  const mine = new Set(all.keys())
+
+  let mismatches: ZohoCrmMismatchRow[] | null = null, needsMigration = false
+  try { mismatches = await store.readMismatches(accountId) } catch (e) {
+    if (!isMissingTable(e)) throw e
+    needsMigration = true
+  }
+  return {
+    pullMinutes: ZOHO_AUX_PULL_MINUTES, lastPull: sync[today]?.refreshed_at ?? null, people,
+    accountTypes: zohoTypesSeen(cache.breaks.filter(b => mine.has(normalizeName(b.employee)))).map(t => t.type),
+    zohoTypes: zohoTypesSeen(cache.breaks),
+    mismatches, needsMigration,
   }
 }
