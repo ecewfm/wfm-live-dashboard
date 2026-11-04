@@ -263,7 +263,7 @@ export default function LogsPage({ accounts, displayNames }: { accounts: string[
                   <Fragment key={r.id}>
                   <tr className={`lg-row${isOpen ? ' open' : ''}${r.status === 'failed' ? ' failed' : ''}`} onClick={() => toggle(r.id)}>
                     <td><button className="lg-chev" aria-expanded={isOpen} aria-label={isOpen ? 'Hide details' : 'Show details'} onClick={e => { e.stopPropagation(); toggle(r.id) }}><i className={`bx ${isOpen ? 'bx-chevron-down' : 'bx-chevron-right'}`} /></button></td>
-                    <td title={t.full}><div>{t.main}</div><div className="lg-ago">{t.ago}</div></td>
+                    <td className="lg-when" title={t.full}><div>{t.main}</div><div className="lg-ago">{t.ago}</div></td>
                     <td>{r.kind === 'cliq'
                       ? <span className="lg-type cliq"><i className="bx bx-message-dots" /> Cliq</span>
                       : <span className="lg-type rta"><i className="bx bx-file" /> RTA Log</span>}</td>
@@ -272,7 +272,7 @@ export default function LogsPage({ accounts, displayNames }: { accounts: string[
                     <td>{r.status === 'sent'
                       ? <span className="lg-res ok"><i className="bx bx-check" /> Sent</span>
                       : <span className="lg-res bad"><i className="bx bx-x" /> Failed</span>}</td>
-                    <td className="text-muted">{SOURCE_LABEL[r.source] || r.source}</td>
+                    <td className="text-muted lg-src">{SOURCE_LABEL[r.source] || r.source}</td>
                   </tr>
                   {isOpen && (
                     <tr className="lg-detail-row">

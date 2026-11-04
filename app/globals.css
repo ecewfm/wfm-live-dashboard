@@ -700,21 +700,21 @@ body {
 }
 .lg-stat > i { font-size: 22px; color: var(--primary); }
 .lg-stat.bad > i, .lg-stat.bad .lg-stat-n { color: var(--danger); }
-.lg-stat-n { font-size: 20px; font-weight: 700; line-height: 1.1; }
-.lg-stat-l { font-size: 11px; color: var(--text-muted); }
-.lg-stat-note { font-size: 11px; color: var(--text-muted); }
+.lg-stat-n { font-size: 22px; font-weight: 700; line-height: 1.1; }
+.lg-stat-l { font-size: 12.5px; color: var(--text-muted); }
+.lg-stat-note { font-size: 12.5px; color: var(--text-muted); }
 .lg-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
 .lg-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-card); }
 .lg-seg button {
   border: none; background: transparent; color: var(--text-muted); cursor: pointer;
-  font-family: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 12px;
+  font-family: inherit; font-size: 13.5px; font-weight: 600; padding: 8px 13px;
 }
 .lg-seg button + button { border-left: 1px solid var(--border); }
 .lg-seg button.on { background: var(--primary); color: #fff; }
 .lg-seg button:not(.on):hover { background: var(--primary-light); color: var(--text-main); }
 .lg-select, .lg-search input {
   border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); color: var(--text-main);
-  font-family: inherit; font-size: 12.5px; padding: 7px 10px;
+  font-family: inherit; font-size: 13.5px; padding: 8px 10px;
 }
 .lg-search { position: relative; flex: 1; min-width: 220px; }
 .lg-search i { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--text-muted); }
@@ -726,17 +726,28 @@ body {
 .lg-banner.bad { background: rgba(201,92,92,0.10); border-color: rgba(201,92,92,0.35); color: var(--danger); }
 .lg-banner code { font-size: 12px; }
 .lg-table-wrap { overflow-x: auto; }
+/* Bigger text and a clear line between records (per the user, 2026-11-04) —
+   .dash-table's 13px text and faint --border dividers made a page that is all
+   text hard to scan. Scoped to .lg-table, so the Dashboard tables keep theirs.
+   The line is a variable so the last-row / open-row rules below still win. */
+.lg-table { font-size: 14.5px; --lg-line: rgba(44,59,54,0.20); }
+.dark .lg-table { --lg-line: rgba(255,255,255,0.13); }
+.lg-table thead th { font-size: 11.5px; padding: 11px 14px; border-bottom: 1px solid var(--lg-line); }
+.lg-table tbody td { padding: 13px 14px; border-bottom: 1px solid var(--lg-line); }
+.lg-card { border-color: rgba(44,59,54,0.28); }
+.dark .lg-card { border-color: var(--border); }
 .lg-table td { vertical-align: top; }
 .lg-row { cursor: pointer; }
 .lg-row.failed td { background: rgba(201,92,92,0.04); }
 .lg-row.open td { border-bottom-color: transparent; }
-.lg-chev { border: none; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0; }
-.lg-ago { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.lg-chev { border: none; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 18px; line-height: 1; padding: 0; }
+.lg-when, .lg-src { white-space: nowrap; }
+.lg-ago { font-size: 12px; color: var(--text-muted); white-space: nowrap; margin-top: 2px; }
 .lg-acc { font-weight: 600; white-space: nowrap; }
-.lg-sum { line-height: 1.45; min-width: 280px; }
+.lg-sum { line-height: 1.5; min-width: 280px; }
 .lg-type, .lg-res {
-  display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px; border-radius: 20px;
-  font-size: 11px; font-weight: 700; white-space: nowrap; border: 1px solid transparent;
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 20px;
+  font-size: 12px; font-weight: 700; white-space: nowrap; border: 1px solid transparent;
 }
 .lg-type.cliq { background: rgba(75,139,156,0.12); color: var(--info); border-color: rgba(75,139,156,0.3); }
 .lg-type.rta  { background: rgba(132,107,154,0.13); color: var(--purple); border-color: rgba(132,107,154,0.3); }
@@ -748,19 +759,19 @@ body {
 .dark .lg-detail-row > td { background: rgba(255,255,255,0.02); }
 .lg-detail { padding: 4px 4px 10px 26px; display: flex; flex-direction: column; gap: 12px; }
 .lg-error {
-  padding: 8px 12px; border-radius: 8px; font-size: 12.5px; line-height: 1.5; word-break: break-word;
+  padding: 8px 12px; border-radius: 8px; font-size: 13.5px; line-height: 1.5; word-break: break-word;
   background: rgba(201,92,92,0.10); border: 1px solid rgba(201,92,92,0.35); color: var(--danger);
 }
-.lg-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 18px; font-size: 12.5px; }
+.lg-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px 18px; font-size: 13.5px; }
 .lg-facts span {
-  display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--text-muted); margin-bottom: 1px;
 }
-.lg-block-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 6px; }
-.lg-items { list-style: none; display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
+.lg-block-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 6px; }
+.lg-items { list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
 .lg-items li { display: flex; align-items: baseline; gap: 8px; }
 .lg-pre {
-  white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Consolas, monospace; font-size: 13px;
   line-height: 1.5; background: var(--bg-body); border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px; max-height: 260px; overflow-y: auto;
 }
@@ -769,7 +780,7 @@ body {
 .lg-card.lg-busy .lg-table-wrap { opacity: .55; }
 .lg-pager-bar {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
-  margin-top: 14px; font-size: 12.5px;
+  margin-top: 14px; font-size: 13.5px;
 }
 .lg-pager { display: inline-flex; align-items: center; gap: 6px; }
 .lg-pg {
