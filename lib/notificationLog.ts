@@ -1,7 +1,8 @@
 // lib/notificationLog.ts
 // SERVER ONLY. The record behind the Loggings page: every Zoho Cliq message
-// and every Workforce RTA Logs submission this app makes, sent or failed, as
-// one plain-English line plus the detail (sql/notification_log.sql).
+// (breach alerts, and the hourly reports — details.type 'hourly') and every
+// Workforce RTA Logs submission this app makes, sent or failed, as one
+// plain-English line plus the detail (sql/notification_log.sql).
 //
 // Writes go through the service-role client because the table is RLS-locked
 // (it holds every account's breach details). A write that fails — table not
@@ -102,6 +103,13 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : /(ch|s
 
 export function cliqSummary(channel: string, breaches: BreachRow[]): string {
   return `#${channel} — ${plural(breaches.length, 'breach')}: ${briefBreaches(breaches)}`
+}
+
+/** "#ashleywfmlive — Hourly report 10:00–11:00 ET: Scheduled 12 · Actual 11 · Attendance 92% · SLA: 85% · +3 more" */
+export function hourlySummary(channel: string, hour: string, parts: string[], max = 6): string {
+  const shown = parts.slice(0, max)
+  if (parts.length > max) shown.push(`+${parts.length - max} more`)
+  return `#${channel} — Hourly report ${hour}: ${shown.join(' · ')}`
 }
 
 export function rtaSummary(category: string, subCategory: string, what: string): string {

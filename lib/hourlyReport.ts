@@ -18,7 +18,7 @@ import {
   zohoAccountValues, MAX_OPEN_SESSION_HOURS,
 } from './zohoAuxShared'
 import { extractKpiValue } from './utils'
-import type { KpiUnit } from './types'
+import type { KpiUnit, HourlyCliqConfig } from './types'
 
 // ── Time zones the page can show ──────────────────────────────────────────────
 // Whole-hour offsets only: the KPI readings are kept per UTC hour, which then
@@ -363,6 +363,68 @@ export function kpiCellValue(
   if (mode === 'last' || !h.n) return { text: h.last, num: h.lastNum }
   const num = mode === 'avg' ? h.sum / h.n : (tile.lowIsBad ? h.min : h.max) as number
   return { text: formatKpiNumber(num, tile.unit, h.pct), num }
+}
+
+// ── The table ─────────────────────────────────────────────────────────────────
+// The Hourly page and the hourly report in Cliq (lib/hourlyCliq.ts) both build
+// their rows and cells with these, so the picture in Cliq can't drift from the page.
+
+/** A KPI tile as the table needs it — a KpiCardTile (lib/breaches.ts) fits. */
+export interface HourlyTile { key: string; label: string; unit: KpiUnit | undefined; lowIsBad: boolean; colorOf: (num: number) => string }
+
+export interface HourlyRow { start: number; end: number; label: string; now: boolean; heads: HourHeads; kpi: KpiHour | undefined }
+
+/** Every hour of the report's day: who counts in it, and its KPI readings. */
+export function hourlyRows(report: Pick<HourlyReport, 'window' | 'people' | 'kpiHours'>, tz: string, now: number): HourlyRow[] {
+  const kpiByHour = new Map(report.kpiHours.map(h => [Date.parse(h.hour), h.tiles]))
+  return hoursOf(report.window, tz).map(h => ({
+    ...h, now: h.start <= now && now < h.end, heads: headsForHour(report.people, h.start, h.end, now), kpi: kpiByHour.get(h.start),
+  }))
+}
+
+/** Anything in the hour — someone scheduled or there, or a KPI reading. */
+export const rowHasData = (r: HourlyRow) => r.heads.scheduled.length > 0 || actualOf(r.heads) > 0 || (!!r.kpi && Object.keys(r.kpi).length > 0)
+
+/** Only the stretch of the day with something in it (every hour when none has). */
+export function trimHourlyRows(rows: HourlyRow[]): HourlyRow[] {
+  const first = rows.findIndex(rowHasData)
+  if (first < 0) return rows
+  let last = rows.length - 1
+  while (last > first && !rowHasData(rows[last])) last--
+  return rows.slice(first, last + 1)
+}
+
+export type CellTone = 'ok' | 'warn' | 'bad' | ''
+const TONE_OF: Record<string, CellTone> = { 'text-success': 'ok', 'text-warning': 'warn', 'text-danger': 'bad' }
+
+/** One KPI cell: its text in `mode`, toned by the tile's thresholds. */
+export function hourlyKpiCell(kpi: KpiHour | undefined, groupId: string, tile: HourlyTile, mode: KpiMode): { text: string; tone: CellTone } {
+  const v = kpiCellValue(kpi?.[kpiTileKey(groupId, tile.key)], mode, tile)
+  if (!v) return { text: '', tone: '' }
+  return { text: v.text, tone: v.num === null ? '' : TONE_OF[tile.colorOf(v.num)] ?? '' }
+}
+
+/** The TOTAL row's KPI cell — every hour in `rows` as one. Not toned. */
+export function hourlyTotalKpi(rows: HourlyRow[], groupId: string, tile: HourlyTile, mode: KpiMode): string {
+  return kpiCellValue(mergeKpiHours(rows.map(r => r.kpi?.[kpiTileKey(groupId, tile.key)])), mode, tile)?.text ?? ''
+}
+
+// Attendance has no thresholds of its own — the same lines vCORE colours adherence by.
+export const attendanceTone = (n: number | null): CellTone => n === null ? '' : n < 85 ? 'bad' : n < 95 ? 'warn' : ''
+/** "92%", "91.7%"; '' for none. */
+export const pctText = (n: number | null) => n === null ? '' : `${Number.isInteger(Math.round(n * 10) / 10) ? Math.round(n) : n.toFixed(1)}%`
+/** "ET", "PHT" — the short name in the zone's label. */
+export const tzShortLabel = (tz: string) => /\(([^)]+)\)/.exec(HOURLY_TIMEZONES.find(t => t.tz === tz)?.label ?? '')?.[1] ?? tz
+
+/** An account's hourly-report-in-Cliq setting, defaults filled in. */
+export function hourlyCliqOf(ds: { hourlyCliq?: HourlyCliqConfig } | null | undefined): Required<HourlyCliqConfig> {
+  const c = ds?.hourlyCliq
+  return {
+    enabled: !!c?.enabled,
+    tz: c?.tz && isHourlyTz(c.tz) ? c.tz : DEFAULT_HOURLY_TZ,
+    mode: c?.mode === 'avg' || c?.mode === 'worst' ? c.mode : 'last',
+    hiddenGroups: Array.isArray(c?.hiddenGroups) ? c.hiddenGroups : [],
+  }
 }
 
 // ── What /api/hourly returns (getHourlyReport, lib/hourlyReportServer.ts) ─────

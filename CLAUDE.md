@@ -941,9 +941,14 @@ hour for who was scheduled / there / not.
   `sql/hourly_report.sql` (**must be run once** — RLS on, no policies; the page says
   so until then). The server KPI fetch is `fetchKpiData()` in `lib/breaches.ts`,
   shared with the breach scan (`fetchAccountKpiData` in `lib/cliqScan.ts`).
-- NOT verified against live Zoho for the schedules (no Zoho client id/secret
-  locally): the field names are vCORE's. If the pull fails the page shows Zoho's
-  error; check the server log for the "Zoho schedules … account from …" line.
+- Schedules CONFIRMED live (2026-11-05, `wfm_zoho_schedule_sync` after go-live):
+  "primary: 2229 shifts / 62 accounts / account field Account; honduras: 43 shifts /
+  7 accounts / account field Employee.Account" — vCORE's field names hold. If a pull
+  fails the page shows Zoho's error; the sync row's `note` has the counts.
+- The table's rows and cells are built by the shared functions in
+  `lib/hourlyReport.ts` (`hourlyRows`, `trimHourlyRows`, `hourlyKpiCell`,
+  `hourlyTotalKpi`, `attendanceTone`, `pctText`) — the hourly report in Cliq (below)
+  uses the same ones; don't build them inline in the page again.
 - Known quirk, deliberately left alone: a count tile whose value has a thousands
   comma ("2,205") parses as 2 in `extractKpiValue` (tile colour, breaches, the
   Hourly Average/Worst) — fixing it would start breaching Perfect Serve's
@@ -976,6 +981,74 @@ spaces and punctuation ("Ashley Voice" = "Ashley - Voice").
   tag is DROPPED by this Next/Turbopack build ("Unique Nameof", "Accounton") — a
   single-line text node keeps it. The new text uses `{' '}`; older Settings text
   ("Unique Name", "Site(s)") still shows it.
+
+## Hourly report in Cliq (2026-11-05)
+
+Per the user: the Hourly table goes to each account's Cliq channel every hour, as
+"Hourly Report" — a message (like the breach alerts) followed by a picture of the
+table (like the alert's card picture). Per account, **off by default**: Settings →
+Zoho Integrations → **HOURLY REPORT TO CLIQ — {account}** (right under the Cliq
+channel; `HourlyCliqSection` in `SettingsModal.tsx`): the switch, the time zone of
+the hours (`HOURLY_TIMEZONES`, ET default), the KPI value (End of hour / Average /
+Worst) and which KPI groups to include. Saved as `DataSourceConfig.hourlyCliq`
+(data_source JSONB, no `wfm_settings` column), read through `hourlyCliqOf()`.
+
+- `lib/hourlyCliq.ts` — `runHourlyCliqReports()` (the cron), `sendHourlyCliqReport()`,
+  `buildHourlyCliqReport()`, `sendHourlyReportNow()`. Same channel (`cliq_channel`),
+  global "Enable Cliq Notifications" and Test Mode as the breach alerts (Cliq off →
+  nothing; Test Mode → `[TEST]` + a TEST pill on the picture). Not gated by staleness:
+  an hour whose data was out of sync just has no KPI readings, and the message says so.
+- **What's sent** — the hour that JUST ENDED: Scheduled / Actual / Attendance, every
+  shown KPI tile (🔴/🟡 by the tile's thresholds), and "Day so far"; then the picture
+  (`lib/hourlyCliqImage.tsx`): the day's rows up to that hour (trimmed like the page),
+  that hour highlighted, TOTAL = the day so far. Numbers come from the SAME
+  `getHourlyReport()` and the SAME row/cell functions as the page —
+  `hourlyRows` / `trimHourlyRows` / `hourlyKpiCell` / `hourlyTotalKpi` /
+  `attendanceTone` / `pctText` in `lib/hourlyReport.ts` (`components/HourlyPage.tsx`
+  was switched onto them, so the two can't drift). An hour with nobody scheduled or
+  logged in and no KPI reading is skipped (not sent, not logged).
+- **When** — `/api/cliq/hourly-report` (Vercel Cron, every minute, `CRON_SECRET`)
+  works only 2–30 minutes past the hour (`SEND_FROM_MIN` / `SEND_UNTIL_MIN`), at
+  most `HOURLY_PER_RUN` (4) accounts a minute, one at a time: Cliq allows 20 uploads
+  a minute and the breach scan can post 15 pictures in the same minute.
+- **Never twice** — `wfm_hourly_cliq_sent` (`sql/hourly_report.sql` section 4 —
+  **run that file again once**; until then the cron logs the hint and sends
+  nothing): one row per account per hour, claimed BEFORE sending (insert; a unique
+  violation = another run has it). sending | sent | failed | skipped; a failed one is
+  retried 2 min later, 3 attempts in all; kept 30 days.
+- The picture: `renderHourlyTablePng()` — Satori like the card (colours, Poppins,
+  icons, emoji fallback all shared from `lib/cliqCardImage.tsx`'s exports), fixed
+  column widths fitted to the text (KPI 44–150px), 2x, less for a table past 4000px
+  (never below 1x — Uniters' 24 tiles make a ~4000px-wide picture; the group chips
+  trim it). Fonts ship with both routes via `next.config.ts`'s `/api/cliq/*`
+  (checked in the build's `.nft.json`). Only after the message went through; a
+  failed picture is a log line and a note on the claim row, never a failed report.
+- **Loggings**: kind `cliq` with `details.type: 'hourly'` (+ `hourText`, `tz`,
+  `kpiMode`, the exact message) — shown as "Cliq · Hourly", triggered "Every hour" /
+  "Send the last hour now". Summary from `hourlySummary()` in `lib/notificationLog.ts`.
+- **"Send the last hour now"** (Settings, same section) → `/api/cliq/hourly-report-now`
+  (POST, `requireRole(['superuser','rta'])`, an RTA only for their accounts): the
+  hour that just ended, right away, with the channel and settings shown in the modal
+  (saved or not), even with the switch or Cliq off (Test Mode still applies). No
+  claim — it doesn't replace that hour's automatic report. Logged with source `test`.
+- Verified: rules + cron + send-now with fakes (117 — incl. retries, the 4-a-minute
+  cap, the midnight hour, Manila hours, real renders); a read-only dry run on
+  production (all 9 accounts with a Cliq channel: messages + real pictures, nothing
+  written, Cliq faked); the Settings section, send-now, Save and the Loggings row on
+  the production build (25, light + dark); the Hourly page re-run (42).
+
+## Settings Save no longer writes the default Cliq settings (fixed 2026-11-05)
+
+Found while testing the above: the Dashboard loads the global Cliq settings
+(`loadCliqSettings`) AFTER the accounts, and the Settings modal copied them into its
+state once, when it opened. Opened in the first second or two after a page load, it
+showed the defaults — Enable Cliq Notifications OFF, Test Mode ON — and Save Changes
+wrote them, silently stopping every account's Cliq alerts. The modal now keeps only
+what was changed in it (`cliqGlobalEdits`) on top of the loaded settings, and Save
+writes the global Cliq settings only when something there was changed (switching it
+off and on again counts as no change). Verified in the browser on the production
+build (4 checks: opened at once and saved untouched → nothing written; Test Mode
+changed → written with Cliq still ON).
 
 ## `lib/settings.ts` load/save silently dropping fields (fixed 2026-09-28)
 

@@ -59,7 +59,7 @@ async function fetchAccountKpi(ds: DataSourceConfig, accountId: string): Promise
 
 /** A table from sql/hourly_report.sql that hasn't been created yet. */
 export class HourlyTableMissing extends Error {}
-const missing = (e: { code?: string; message: string }) => e.code === 'PGRST205' || e.code === '42P01' || /does not exist|could not find the table|schema cache/i.test(e.message)
+export const isTableMissing = (e: { code?: string; message: string }) => e.code === 'PGRST205' || e.code === '42P01' || /does not exist|could not find the table|schema cache/i.test(e.message)
 
 // ── Storage (one small interface, so it's testable without Supabase) ─────────
 export interface HourlyStore {
@@ -79,7 +79,7 @@ export interface HourlyStore {
 export function supabaseHourlyStore(): HourlyStore {
   const db = getSupabaseAdmin()
   const must = <T>(r: { data: T; error: { code?: string; message: string } | null }, what: string): T => {
-    if (r.error) throw missing(r.error) ? new HourlyTableMissing(`${what}: ${r.error.message}`) : new Error(`${what}: ${r.error.message}`)
+    if (r.error) throw isTableMissing(r.error) ? new HourlyTableMissing(`${what}: ${r.error.message}`) : new Error(`${what}: ${r.error.message}`)
     return r.data
   }
   return {

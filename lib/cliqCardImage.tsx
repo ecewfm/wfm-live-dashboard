@@ -13,6 +13,9 @@
 // Satori lays out with flexbox only (no <table>) and needs the image height up
 // front, so every row has a fixed height, text never wraps (a long value ends
 // in "…"), and cardHeight() adds those heights up.
+//
+// The exported colours, font loader, icons and text helpers are shared with the
+// hourly report's table picture (lib/hourlyCliqImage.tsx).
 
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -31,15 +34,15 @@ export interface CardImageInput {
 }
 
 // Dark-mode colours from app/globals.css (.dark and the .ov-* card rules).
-const C = {
+export const C = {
   page: '#1a1a1a', card: '#252525', border: '#2e2e2e',
   text: '#f0f0f0', cell: '#e0e0e0', muted: '#a0a0a0', head: '#888888',
   success: '#4dca85', warning: '#ffd166', danger: '#ff6b6b', primary: '#d97a35', live: '#54c78b',
 }
 const TILE_COLOR: Record<string, string> = { 'text-success': C.success, 'text-warning': C.warning, 'text-danger': C.danger }
 
-const SCALE = 2          // drawn at 2x so it stays sharp when opened full size
-const PAD = 12           // page margin around the card
+export const SCALE = 2          // drawn at 2x so it stays sharp when opened full size
+export const PAD = 12           // page margin around the card
 const TILES_PER_ROW = 4  // .ov-kpi-tile is 25% wide
 const MAX_ROWS = 20      // breach rows drawn; the rest are counted in a "+N more" row
 const H = { header: 48, label: 26, tileRow: 62, groupGap: 10, breachHead: 33, tableHead: 31, row: 37, more: 30, footer: 33 }
@@ -52,13 +55,13 @@ const STATUS_PX = 70   // the Critical / Warning pill
 
 // Rough width of `s` in 12px Poppins (a wide font: capitals and digits take
 // more room than lower case), measured off rendered cards with ~8% to spare.
-function textPx(s: string): number {
+export function textPx(s: string): number {
   let w = 0
   for (const ch of s) w += /[A-Z0-9%#&@]/.test(ch) ? 8.4 : /[\s.,:;|'!()ijlt]/.test(ch) ? 4 : 7
   return w * 1.08
 }
 // A header label: 10px capitals with 0.5px letter spacing.
-const headerPx = (label: string) => textPx(label.toUpperCase()) * 10 / 12 + label.length * 0.5
+export const headerPx = (label: string) => textPx(label.toUpperCase()) * 10 / 12 + label.length * 0.5
 
 // Boxicons 2.1.4 (the set app/layout.tsx loads) — bx-buildings, bxs-alarm,
 // bx-error-circle, bx-time-five.
@@ -69,7 +72,7 @@ const ICONS: Record<string, string[]> = {
   clock: ['M12 2C6.486 2 2 6.486 2 12s4.486 10 10 10 10-4.486 10-10S17.514 2 12 2zm0 18c-4.411 0-8-3.589-8-8s3.589-8 8-8 8 3.589 8 8-3.589 8-8 8z', 'M13 7h-2v5.414l3.293 3.293 1.414-1.414L13 11.586z'],
 }
 
-function Icon({ name, size, color }: { name: string; size: number; color: string }) {
+export function Icon({ name, size, color }: { name: string; size: number; color: string }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24">
       {ICONS[name].map((d, i) => <path key={i} d={d} fill={color} />)}
@@ -78,7 +81,7 @@ function Icon({ name, size, color }: { name: string; size: number; color: string
 }
 
 // One line of text that ends in "…" instead of wrapping.
-const oneLine = { overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' } as const
+export const oneLine = { overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' } as const
 
 // Satori throws on a style value that is `undefined`, so optional ones are
 // only added when set.
@@ -268,7 +271,7 @@ function Card({ input, grow, width }: { input: CardImageInput; grow: number[]; w
 // alert tries again.
 type Font = { name: string; data: Buffer; weight: 400 | 600 | 700; style: 'normal' }
 let fonts: Promise<Font[]> | null = null
-function loadFonts(): Promise<Font[]> {
+export function loadFonts(): Promise<Font[]> {
   fonts ??= Promise.all(([['Poppins-Regular.ttf', 400], ['Poppins-SemiBold.ttf', 600], ['Poppins-Bold.ttf', 700]] as const)
     .map(async ([file, weight]) => ({
       name: 'Poppins', weight, style: 'normal' as const,
@@ -283,7 +286,7 @@ function loadFonts(): Promise<Font[]> {
 // letters). So a picture that fails is drawn once more with every emoji taken
 // out of the text.
 const EMOJI = /[\p{Extended_Pictographic}\u{1F3FB}-\u{1F3FF}\u{FE0F}\u{200D}\u{20E3}]/gu
-const noEmoji = (s: string) => s.replace(EMOJI, '').replace(/\s{2,}/g, ' ').trim()
+export const noEmoji = (s: string) => s.replace(EMOJI, '').replace(/\s{2,}/g, ' ').trim()
 
 function withoutEmoji(input: CardImageInput): CardImageInput {
   return {

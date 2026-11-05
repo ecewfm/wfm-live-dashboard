@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, AgentFilter, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice, KpiUnit } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, AgentFilter, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice, KpiUnit, HourlyCliqConfig } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
@@ -14,7 +14,9 @@ import {
 // Cliq/RTA scan resolve with — imported rather than re-implemented here so
 // the editor's idea of which table a slot binds against cannot disagree with
 // what the runtime actually reads (that mismatch yields '--' with no error).
-import { effectiveKpiSource, kpiSourceKey, agentSourcesFor, agentFilterKey } from '@/lib/breaches'
+import { effectiveKpiSource, kpiSourceKey, agentSourcesFor, agentFilterKey, kpiCardGroups } from '@/lib/breaches'
+import { HOURLY_TIMEZONES, KPI_MODES, hourlyCliqOf } from '@/lib/hourlyReport'
+import { apiFetch } from '@/lib/authClient'
 import { addAccount, removeAccount, renameAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
 import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
 import type { GeminiKeyMasked } from '@/lib/geminiKeys'
@@ -2513,6 +2515,135 @@ function ZohoAuxSection({ accountId, value, onChange }: {
   )
 }
 
+// ── Hourly report to Cliq — per account (per the user, 2026-11-05): after every
+// hour, the hour's head count and KPI tiles plus a picture of the day's hourly
+// table, to this account's Cliq channel (lib/hourlyCliq.ts). Saved as
+// DataSourceConfig.hourlyCliq on Save Changes; "Send the last hour now" uses what
+// is shown here, saved or not.
+function HourlyCliqSection({ accountId, channel, cliqOn, value, groups, onChange }: {
+  accountId: string
+  channel: string
+  cliqOn: boolean                         // Global Cliq Settings → Enable Cliq Notifications
+  value: HourlyCliqConfig | undefined
+  groups: { id: string; name: string }[]  // the account's KPI groups (kpiCardGroups)
+  onChange: (v: HourlyCliqConfig) => void
+}) {
+  const cfg = hourlyCliqOf({ hourlyCliq: value })
+  const set = (patch: Partial<HourlyCliqConfig>) => onChange({ ...cfg, ...patch })
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ ok: boolean; lines: string[] } | null>(null)
+  const hidden = new Set(cfg.hiddenGroups)
+  const off = !cfg.enabled
+  const noChannel = !channel.trim()
+
+  const toggleGroup = (id: string) => {
+    const n = new Set(hidden)
+    if (n.has(id)) n.delete(id); else n.add(id)
+    set({ hiddenGroups: [...n] })
+  }
+
+  const sendNow = async () => {
+    setBusy(true); setResult(null)
+    try {
+      const r = await apiFetch('/api/cliq/hourly-report-now', {
+        method: 'POST',
+        body: JSON.stringify({ accountId, channel, config: { tz: cfg.tz, mode: cfg.mode, hiddenGroups: cfg.hiddenGroups } }),
+      })
+      setResult({ ok: r?.status !== 'failed', lines: r?.log?.length ? r.log : [String(r?.status ?? 'Done')] })
+    } catch (e: any) {
+      setResult({ ok: false, lines: [e.message] })
+    }
+    setBusy(false)
+  }
+
+  return (
+    <>
+      <div className="sm-section-title" style={{ marginTop: 20 }}>HOURLY REPORT TO CLIQ — {accountId}</div>
+      <p className="sm-desc" style={{ marginBottom: 10 }}>
+        A couple of minutes after every hour, posts the hour that just ended to the Cliq channel above: its
+        <strong> Scheduled HC</strong>, <strong>Actual HC</strong>{' '}and <strong>Attendance %</strong>{' '}from
+        Zoho and each KPI tile&apos;s value, then a picture of the day&apos;s hourly table so far — the same table
+        as the <strong>Hourly</strong>{' '}page. An hour with nobody scheduled or logged in and no KPI readings is
+        skipped. <strong>Enable Cliq Notifications</strong>{' '}and <strong>Test Mode</strong>{' '}above apply, like
+        the breach alerts.
+      </p>
+      <table className="sm-table">
+        <tbody>
+          <tr>
+            <td>
+              <div className="sm-metric">Send the hourly report to Cliq</div>
+              <div className="sm-metric-sub">{noChannel ? 'Enter the Cliq channel above first' : `To #${channel.trim()} — off by default`}</div>
+            </td>
+            <td style={{ textAlign: 'center' }}>
+              <input type="checkbox" aria-label="Send the hourly report to Cliq" checked={cfg.enabled}
+                onChange={() => set({ enabled: !cfg.enabled })} />
+            </td>
+          </tr>
+          <tr style={{ opacity: off ? 0.5 : 1 }}>
+            <td><div className="sm-metric">Hours in</div><div className="sm-metric-sub">The time zone of the report&apos;s hours and day</div></td>
+            <td style={{ textAlign: 'center' }}>
+              <select className="sm-input" aria-label="Hourly report time zone" style={{ minWidth: 160 }} value={cfg.tz}
+                onChange={e => set({ tz: e.target.value })}>
+                {HOURLY_TIMEZONES.map(t => <option key={t.tz} value={t.tz}>{t.label}</option>)}
+              </select>
+            </td>
+          </tr>
+          <tr style={{ opacity: off ? 0.5 : 1 }}>
+            <td><div className="sm-metric">KPI value</div><div className="sm-metric-sub">{KPI_MODES.find(m => m.key === cfg.mode)?.hint}</div></td>
+            <td style={{ textAlign: 'center' }}>
+              <select className="sm-input" aria-label="Hourly report KPI value" style={{ minWidth: 160 }} value={cfg.mode}
+                onChange={e => set({ mode: e.target.value as HourlyCliqConfig['mode'] })}>
+                {KPI_MODES.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+              </select>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      {groups.length > 1 && (
+        <div style={{ marginTop: 12, opacity: off ? 0.5 : 1 }}>
+          <div className="sm-metric">KPI groups in the report</div>
+          <div className="hr-groups" style={{ marginTop: 6 }} aria-label="KPI groups in the hourly report">
+            {groups.map(g => (
+              <button key={g.id} type="button" className={`hr-chip${hidden.has(g.id) ? '' : ' on'}`} aria-pressed={!hidden.has(g.id)}
+                onClick={() => toggleGroup(g.id)}>
+                <i className={`bx ${hidden.has(g.id) ? 'bx-hide' : 'bx-show'}`} /> {g.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!cliqOn && cfg.enabled && (
+        <p className="sm-desc" style={{ marginTop: 10, color: 'var(--warning, #a06c12)' }}>
+          <strong>Enable Cliq Notifications</strong>{' '}(Global Cliq Settings above) is off — no hourly report is sent until it&apos;s on.
+        </p>
+      )}
+
+      <p className="sm-desc" style={{ marginTop: 10, marginBottom: 10 }}>
+        <strong>Send the last hour now</strong>{' '}posts the report for the hour that just ended right away, with the
+        channel and settings shown here (saved or not) — to see how it looks. It doesn&apos;t replace that hour&apos;s
+        automatic report. Other changes here apply after <strong>Save Changes</strong>.
+      </p>
+      <button type="button" className="acc-btn acc-btn-cfg" disabled={busy || noChannel}
+        style={{ fontSize: 13, padding: '9px 16px' }} onClick={sendNow}>
+        <i className={`bx ${busy ? 'bx-loader-alt bx-spin' : 'bx-send'}`} style={{ marginRight: 6 }} />
+        {busy ? 'Sending...' : 'Send the last hour now'}
+      </button>
+      {result && (
+        <pre style={{
+          marginTop: 12, padding: 12, maxHeight: 220, overflowY: 'auto',
+          background: 'var(--bg-body,#f0f2f1)', border: `1px solid ${result.ok ? 'var(--border,#e1e6e4)' : 'var(--danger,#c95c5c)'}`,
+          borderRadius: 6, fontSize: 11.5, lineHeight: 1.6, whiteSpace: 'pre-wrap',
+          color: 'var(--text-main)',
+        }}>
+          {result.lines.join('\n')}
+        </pre>
+      )}
+    </>
+  )
+}
+
 // ── Two independent RTA Logs Reporting toggles for one KPI threshold — NOT
 // mutually exclusive, per the user (2026-10-14): both can be on at once, so
 // a KPI reports at least every 60 minutes AND additionally whenever it
@@ -2562,8 +2693,21 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const zohoAccountNames = parseExtraNames(ds.zohoAccounts)
   // What Workforce RTA Logs send as the account — the Zoho Account's first name, else the display name.
   const rtaAccount = rtaZohoAccountName(zohoAccountNames, displayName, accountId)
+  // The KPI groups the hourly report in Cliq can include — the same tiles the Hourly page shows.
+  const hourlyGroups = useMemo(() => kpiCardGroups(ds, undefined, kpi).filter(g => g.tiles.length), [ds, kpi])
   const [cliqChan, setCliqChan]     = useState(cliqChannel)
-  const [cliqGlobal, setCliqGlobal] = useState<CliqGlobalSettings>(JSON.parse(JSON.stringify(cliqGlobalSettings)))
+  // Only what's been changed here is kept: the Dashboard loads the global Cliq settings after
+  // the accounts, so a modal opened in the first second or two would otherwise show (and Save
+  // Changes would write) the defaults — Cliq notifications OFF for every account. The rest
+  // follows the loaded settings, and Save writes them only when something here changed.
+  const [cliqGlobalEdits, setCliqGlobalEdits] = useState<Partial<CliqGlobalSettings>>({})
+  const cliqGlobal: CliqGlobalSettings = { ...cliqGlobalSettings, ...cliqGlobalEdits }
+  const setCliqGlobal = (f: (prev: CliqGlobalSettings) => CliqGlobalSettings) => setCliqGlobalEdits(edits => {
+    const next = f({ ...cliqGlobalSettings, ...edits })
+    const out: Partial<CliqGlobalSettings> = {}
+    for (const k of Object.keys(next) as (keyof CliqGlobalSettings)[]) if (next[k] !== cliqGlobalSettings[k]) Object.assign(out, { [k]: next[k] })
+    return out
+  })
   // Status Durations search — see statusMatches() below.
   const [statusFilter, setStatusFilter] = useState('')
   const [statusConfiguredOnly, setStatusConfiguredOnly] = useState(false)
@@ -3889,6 +4033,10 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   placeholder="e.g. ashleywfmlive" value={cliqChan}
                   onChange={e => setCliqChan(e.target.value.trim())} />
 
+                <HourlyCliqSection accountId={accountId} channel={cliqChan} cliqOn={cliqGlobal.enabled}
+                  value={ds.hourlyCliq} groups={hourlyGroups}
+                  onChange={v => setDs(prev => ({ ...prev, hourlyCliq: v }))} />
+
                 <div className="sm-section-title" style={{ marginTop: 20 }}>BREACH ALARM — {accountId}</div>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
                   Sound this account&apos;s card plays on the Overview page when a new
@@ -4127,7 +4275,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, zohoAccountNames[0] ?? '', rtaAiCatOn, rtaReportKpiOn, rtaReportAgentStatusOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, zohoAccountNames[0] ?? '', rtaAiCatOn, rtaReportKpiOn, rtaReportAgentStatusOn); if (Object.keys(cliqGlobalEdits).length) onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>

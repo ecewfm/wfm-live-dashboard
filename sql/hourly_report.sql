@@ -2,7 +2,7 @@
 -- The Hourly page — each account's KPI tiles and Zoho head count, hour by hour
 -- Run once in: Supabase Dashboard → SQL Editor → New Query. Safe to re-run.
 -- See lib/hourlyReportServer.ts (writes + reads) and lib/hourlyReport.ts (rules).
--- All three are read and written only by the server (service-role key): RLS on,
+-- All four are read and written only by the server (service-role key): RLS on,
 -- NO policies, like wfm_zoho_activity — the schedules hold every employee's
 -- shifts, and the page reads all of it through /api/hourly, which checks the
 -- caller's role and accounts.
@@ -48,3 +48,19 @@ CREATE TABLE IF NOT EXISTS wfm_zoho_schedule_sync (
   note         text
 );
 ALTER TABLE wfm_zoho_schedule_sync ENABLE ROW LEVEL SECURITY;
+
+-- 4. The hourly report in Cliq (lib/hourlyCliq.ts, added 2026-11-05): one row per
+--    account per hour, written BEFORE the report is sent, so an hour's report never
+--    goes out twice (the cron runs every minute through the first half of the hour).
+--    status: sending | sent | failed | skipped (nothing in the hour); a failed one is
+--    tried again, 3 attempts in all. Kept 30 days (pruned by the cron itself).
+CREATE TABLE IF NOT EXISTS wfm_hourly_cliq_sent (
+  account_id  text        NOT NULL,
+  hour_start  timestamptz NOT NULL,             -- the reported hour, UTC
+  status      text        NOT NULL,
+  attempts    integer     NOT NULL DEFAULT 1,
+  note        text,
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, hour_start)
+);
+ALTER TABLE wfm_hourly_cliq_sent ENABLE ROW LEVEL SECURITY;

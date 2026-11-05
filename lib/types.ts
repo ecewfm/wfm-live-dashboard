@@ -405,6 +405,20 @@ export interface DataSourceConfig {
   // table, Breach / Anomalies, the alarm, Cliq, Workforce Logs and RTA Logs
   // alike. In the data_source JSONB, same reasoning as zohoAux above.
   agentFilter?: AgentFilter
+
+  // The Hourly report in Cliq (Settings → Zoho Integrations, per the user,
+  // 2026-11-05): after every hour, the hour's head count and KPI tiles plus a
+  // picture of the day's hourly table, to this account's Cliq channel — see
+  // lib/hourlyCliq.ts. Read through hourlyCliqOf() (lib/hourlyReport.ts). In
+  // this JSONB for the same reason as zohoAux.
+  hourlyCliq?: HourlyCliqConfig
+}
+
+export interface HourlyCliqConfig {
+  enabled: boolean
+  tz?: string                          // one of HOURLY_TIMEZONES; unset = Eastern
+  mode?: 'last' | 'avg' | 'worst'      // which KPI value (KpiMode); unset = end of hour
+  hiddenGroups?: string[]              // KPI group ids left out of the report
 }
 
 export interface AgentFilter {

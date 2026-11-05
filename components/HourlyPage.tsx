@@ -17,9 +17,10 @@ import { DEFAULT_DATA_SOURCE, DEFAULT_THRESHOLDS } from '@/lib/utils'
 import { addDays, dateInTz } from '@/lib/zohoAuxShared'
 import type { DataSourceConfig, Thresholds } from '@/lib/types'
 import {
-  HOURLY_TIMEZONES, DEFAULT_HOURLY_TZ, ZOHO_CLOCK_TZ, KPI_MODES, isHourlyTz, hoursOf, clockIn,
-  headsForHour, actualOf, attendanceOf, dayHeads, kpiCellValue, mergeKpiHours, kpiTileKey, sessionEnd, toCsv,
-  type KpiMode, type HourHeads, type HourlyPerson, type HourlyReport, type KpiHour,
+  HOURLY_TIMEZONES, DEFAULT_HOURLY_TZ, ZOHO_CLOCK_TZ, KPI_MODES, isHourlyTz, clockIn,
+  actualOf, attendanceOf, dayHeads, sessionEnd, toCsv,
+  hourlyRows, trimHourlyRows, hourlyKpiCell, hourlyTotalKpi, attendanceTone, pctText,
+  type KpiMode, type HourHeads, type HourlyPerson, type HourlyReport, type HourlyRow, type KpiHour, type CellTone,
 } from '@/lib/hourlyReport'
 
 const REFRESH_MS = 2 * 60 * 1000     // the KPI readings are every minute, Zoho every 5
@@ -31,12 +32,8 @@ const store = {
   set(key: string, v: string) { try { localStorage.setItem(key, v) } catch { /* not remembered */ } },
 }
 
-const pctText = (n: number | null) => n === null ? '' : `${Number.isInteger(Math.round(n * 10) / 10) ? Math.round(n) : n.toFixed(1)}%`
-const CELL_CLASS: Record<string, string> = { 'text-success': 'hr-ok', 'text-warning': 'hr-warn', 'text-danger': 'hr-bad' }
-// Attendance has no thresholds of its own — the same lines vCORE colours adherence by.
-const attClass = (n: number | null) => n === null ? '' : n < 85 ? ' hr-att-bad' : n < 95 ? ' hr-att-warn' : ''
-
-interface Row { start: number; end: number; label: string; now: boolean; heads: HourHeads; kpi: KpiHour | undefined }
+const CELL_CLASS: Record<CellTone, string> = { ok: 'hr-ok', warn: 'hr-warn', bad: 'hr-bad', '': '' }
+const ATT_CLASS: Record<CellTone, string> = { ok: '', warn: ' hr-att-warn', bad: ' hr-att-bad', '': '' }
 
 export default function HourlyPage({ accounts, displayNames, account, onAccountChange, dataSources, kpiThresholds, onOpenSettings }: {
   accounts: string[]
@@ -121,30 +118,17 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
   const fits = report && report.accountId === account && report.date === date && report.tz === tz
   const people = useMemo(() => (fits ? report.people : []), [fits, report])
   const byName = useMemo(() => new Map(people.map(p => [p.name, p])), [people])
-  const kpiByHour = useMemo(() => new Map((fits ? report.kpiHours : []).map(h => [Date.parse(h.hour), h.tiles])), [fits, report])
-  const allRows: Row[] = useMemo(() => !fits ? [] : hoursOf(report.window, tz).map(h => ({
-    ...h, now: h.start <= now && now < h.end, heads: headsForHour(people, h.start, h.end, now), kpi: kpiByHour.get(h.start),
-  })), [fits, report, tz, people, now, kpiByHour])
+  const allRows: HourlyRow[] = useMemo(() => fits ? hourlyRows(report, tz, now) : [], [fits, report, tz, now])
   // Only the stretch of the day with something in it — unless "All 24 hours".
-  const rows = useMemo(() => {
-    if (allHours) return allRows
-    const has = (r: Row) => r.heads.scheduled.length > 0 || actualOf(r.heads) > 0 || (!!r.kpi && Object.keys(r.kpi).length > 0)
-    const first = allRows.findIndex(has)
-    if (first < 0) return allRows
-    let last = allRows.length - 1
-    while (last > first && !has(allRows[last])) last--
-    return allRows.slice(first, last + 1)
-  }, [allRows, allHours])
+  const rows = useMemo(() => allHours ? allRows : trimHourlyRows(allRows), [allRows, allHours])
   const total = useMemo(() => dayHeads(allRows.map(r => r.heads)), [allRows])
   const anySchedule = people.some(p => p.shifts.length > 0)
 
   const cell = (h: KpiHour | undefined, g: KpiCardGroup, t: KpiCardGroup['tiles'][number]) => {
-    const v = kpiCellValue(h?.[kpiTileKey(g.id, t.key)], mode, t)
-    if (!v) return { text: '', cls: '' }
-    return { text: v.text, cls: v.num === null ? '' : CELL_CLASS[t.colorOf(v.num)] ?? '' }
+    const c = hourlyKpiCell(h, g.id, t, mode)
+    return { text: c.text, cls: CELL_CLASS[c.tone] }
   }
-  const totalKpi = (g: KpiCardGroup, t: KpiCardGroup['tiles'][number]) =>
-    kpiCellValue(mergeKpiHours(allRows.map(r => r.kpi?.[kpiTileKey(g.id, t.key)])), mode, t)
+  const totalKpi = (g: KpiCardGroup, t: KpiCardGroup['tiles'][number]) => hourlyTotalKpi(allRows, g.id, t, mode)
 
   const downloadCsv = () => {
     const tiles = shownGroups.flatMap(g => g.tiles.map(t => ({ g, t })))
@@ -153,7 +137,7 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
       r.label, r.heads.scheduled.length, r.heads.started ? actualOf(r.heads) : '', pctText(attendanceOf(r.heads)),
       ...tiles.map(({ g, t }) => cell(r.kpi, g, t).text),
     ])
-    const foot = ['TOTAL', total.scheduled, total.actual ?? '', pctText(total.attendance), ...tiles.map(({ g, t }) => totalKpi(g, t)?.text ?? '')]
+    const foot = ['TOTAL', total.scheduled, total.actual ?? '', pctText(total.attendance), ...tiles.map(({ g, t }) => totalKpi(g, t))]
     const blob = new Blob([toCsv([head, ...body, foot])], { type: 'text/csv;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -277,7 +261,7 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
                       </td>
                       <td className="hr-num">{anySchedule ? r.heads.scheduled.length : ''}</td>
                       <td className="hr-num">{r.heads.started ? actualOf(r.heads) : ''}</td>
-                      <td className={`hr-num${attClass(att)}`}>{pctText(att)}</td>
+                      <td className={`hr-num${ATT_CLASS[attendanceTone(att)]}`}>{pctText(att)}</td>
                       {shownGroups.map(g => g.tiles.map((t, i) => {
                         const c = cell(r.kpi, g, t)
                         return <td key={`${g.id}:${t.key}`} className={`hr-num ${c.cls}${i === 0 ? ' hr-gs' : ''}`}>{c.text}</td>
@@ -299,10 +283,9 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
                   <td className="hr-num" title="Different people scheduled during the day">{anySchedule ? total.scheduled : ''}</td>
                   <td className="hr-num" title="Different people there during the day">{total.actual ?? ''}</td>
                   <td className="hr-num" title="Scheduled hours attended, out of the day's scheduled hours so far">{pctText(total.attendance)}</td>
-                  {shownGroups.map(g => g.tiles.map((t, i) => {
-                    const v = totalKpi(g, t)
-                    return <td key={`${g.id}:${t.key}`} className={`hr-num${i === 0 ? ' hr-gs' : ''}`}>{v?.text ?? ''}</td>
-                  }))}
+                  {shownGroups.map(g => g.tiles.map((t, i) => (
+                    <td key={`${g.id}:${t.key}`} className={`hr-num${i === 0 ? ' hr-gs' : ''}`}>{totalKpi(g, t)}</td>
+                  )))}
                 </tr>
               </tfoot>
             )}

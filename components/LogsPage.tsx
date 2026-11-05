@@ -9,6 +9,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '@/lib/authClient'
+import { KPI_MODES } from '@/lib/hourlyReport'
 
 type Kind = 'cliq' | 'rta_log'
 type Status = 'sent' | 'failed'
@@ -26,6 +27,8 @@ interface LogRow {
   error: string | null
   details: {
     channel?: string; testMode?: boolean; message?: string
+    // The hourly report in Cliq (lib/hourlyCliq.ts) — a Cliq row with type 'hourly'.
+    type?: 'hourly'; hourText?: string; kpiMode?: string
     mode?: 'ai' | 'plain' | 'heartbeat' | 'test'; zohoAccount?: string; sites?: string[]
     category?: string; subCategory?: string; remarks?: string
     items?: Item[]
@@ -42,6 +45,8 @@ const PERIODS = [
 type PeriodKey = typeof PERIODS[number]['key']
 
 const SOURCE_LABEL: Record<Source, string> = { auto: 'Automatic scan', force: 'Force Scan Now', test: 'Test button' }
+const HOURLY_SOURCE_LABEL: Record<Source, string> = { auto: 'Every hour', force: 'Force Scan Now', test: 'Send the last hour now' }
+const sourceLabel = (r: LogRow) => (r.details?.type === 'hourly' ? HOURLY_SOURCE_LABEL : SOURCE_LABEL)[r.source] || r.source
 const MODE_LABEL: Record<string, string> = {
   ai: 'AI categorization (Gemini) — one log per category',
   plain: 'One combined report (fixed category)',
@@ -264,15 +269,17 @@ export default function LogsPage({ accounts, displayNames }: { accounts: string[
                   <tr className={`lg-row${isOpen ? ' open' : ''}${r.status === 'failed' ? ' failed' : ''}`} onClick={() => toggle(r.id)}>
                     <td><button className="lg-chev" aria-expanded={isOpen} aria-label={isOpen ? 'Hide details' : 'Show details'} onClick={e => { e.stopPropagation(); toggle(r.id) }}><i className={`bx ${isOpen ? 'bx-chevron-down' : 'bx-chevron-right'}`} /></button></td>
                     <td className="lg-when" title={t.full}><div>{t.main}</div><div className="lg-ago">{t.ago}</div></td>
-                    <td>{r.kind === 'cliq'
-                      ? <span className="lg-type cliq"><i className="bx bx-message-dots" /> Cliq</span>
-                      : <span className="lg-type rta"><i className="bx bx-file" /> RTA Log</span>}</td>
+                    <td>{r.kind !== 'cliq'
+                      ? <span className="lg-type rta"><i className="bx bx-file" /> RTA Log</span>
+                      : r.details?.type === 'hourly'
+                        ? <span className="lg-type cliq"><i className="bx bx-table" /> Cliq · Hourly</span>
+                        : <span className="lg-type cliq"><i className="bx bx-message-dots" /> Cliq</span>}</td>
                     <td className="lg-acc">{name(r.account_id)}</td>
                     <td className="lg-sum">{r.summary}</td>
                     <td>{r.status === 'sent'
                       ? <span className="lg-res ok"><i className="bx bx-check" /> Sent</span>
                       : <span className="lg-res bad"><i className="bx bx-x" /> Failed</span>}</td>
-                    <td className="text-muted lg-src">{SOURCE_LABEL[r.source] || r.source}</td>
+                    <td className="text-muted lg-src">{sourceLabel(r)}</td>
                   </tr>
                   {isOpen && (
                     <tr className="lg-detail-row">
@@ -327,6 +334,10 @@ function Details({ row, accountName }: { row: LogRow; accountName: string }) {
         <div><span>Account</span>{accountName}{accountName !== row.account_id ? ` (${row.account_id})` : ''}</div>
         {row.kind === 'cliq' ? <>
           <div><span>Channel</span>#{d.channel}</div>
+          {d.type === 'hourly' && <>
+            <div><span>Hourly report</span>{d.hourText || '—'}</div>
+            <div><span>KPI value</span>{KPI_MODES.find(m => m.key === d.kpiMode)?.label || '—'}</div>
+          </>}
           <div><span>Test mode</span>{d.testMode ? 'On — the message was marked [TEST]' : 'Off'}</div>
         </> : <>
           <div><span>Zoho account</span>{d.zohoAccount || '—'}</div>
