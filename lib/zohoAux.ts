@@ -36,8 +36,8 @@ import { agentSourcesFor, normalizeAgentRow, mostRecentUpdatedAt } from './breac
 import {
   ZOHO_AUX_SOURCES, ZOHO_AUX_TABLE, zohoCriteriaDate, parseSessionRow, parseBreakRow,
   normalizeName, dateInTz, addDays, computeCurrentAux, buildAccountStatusRows, parseExtraNames,
-  pickAccountField, accountKeysFor, zohoPeopleOnAccount, zohoAccountsSeen, zohoTypesSeen, includeLoggedInOf,
-  type ZohoSession, type ZohoBreak, type ZohoAgentStatusRow, type CurrentAux, type ZohoAuxConfig,
+  pickAccountField, accountKeysFor, zohoAccountNamesOf, zohoPeopleOnAccount, zohoAccountsSeen, zohoTypesSeen, includeLoggedInOf,
+  type ZohoSession, type ZohoBreak, type ZohoAgentStatusRow, type CurrentAux,
 } from './zohoAuxShared'
 import {
   ZOHO_CRM_MISMATCH_TABLE, ZOHO_MATCH_MAX_ZOHO_AGE_MIN, zohoCrmMatchActive, findZohoCrmMismatches, nextMismatchRows,
@@ -52,20 +52,26 @@ export const ZOHO_AUX_SYNC_TABLE  = 'wfm_zoho_sync'
 // allowance is shared by the whole organisation, and a too-tight interval here
 // would eat into what vCORE needs. 2–10 via ZOHO_AUX_PULL_MINUTES.
 export const ZOHO_AUX_PULL_MINUTES = Math.min(10, Math.max(2, Number(process.env.ZOHO_AUX_PULL_MINUTES) || 5))
-const YESTERDAY_PULL_MINUTES = 30
-const PULL_LEASE_MS = 2 * 60 * 1000   // another run's pull counts as in progress for this long
+export const YESTERDAY_PULL_MINUTES = 30
+export const PULL_LEASE_MS = 2 * 60 * 1000   // another run's pull counts as in progress for this long
 const MAX_PAGES = 50
-const PRIMARY_TZ = 'America/New_York'
+export const PRIMARY_TZ = 'America/New_York'
 
 // ── Zoho ──────────────────────────────────────────────────────────────────────
 export type Fetched = { ok: true; rows: Record<string, unknown>[] } | { ok: false; error: string }
-type FetchLike = (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; status: number; json(): Promise<any>; headers: { get(name: string): string | null } }>
+export type FetchLike = (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; status: number; json(): Promise<any>; headers: { get(name: string): string | null } }>
 
 /** Every row of one report for ONE date (all pages). Zoho's "no records" is an empty result, not an error. */
-export async function fetchReportForDate(
+export function fetchReportForDate(
   token: string, app: string, report: string, dateField: string, dateISO: string, f: FetchLike = fetch as any,
 ): Promise<Fetched> {
-  const criteria = `(${dateField} == "${zohoCriteriaDate(dateISO)}")`
+  return fetchReport(token, app, report, `(${dateField} == "${zohoCriteriaDate(dateISO)}")`, f)
+}
+
+/** Every row of one report matching `criteria` (all pages) — e.g. the Honduras schedules' `(Day == "Wednesday")`. */
+export async function fetchReport(
+  token: string, app: string, report: string, criteria: string, f: FetchLike = fetch as any,
+): Promise<Fetched> {
   const url = `${CREATOR_API_BASE}/data/${OWNER_NAME}/${app}/report/${report}?criteria=${encodeURIComponent(criteria)}&max_records=1000`
   const rows: Record<string, unknown>[] = []
   let cursor: string | null = null
@@ -94,15 +100,17 @@ export async function fetchReportForDate(
 
 // ── Storage (one small interface, so the whole run is testable) ───────────────
 export interface CacheRow { log_date: string; kind: 'sessions' | 'breaks'; employee_norm: string; source: string; payload: unknown[] }
-interface SyncRow { log_date: string; refreshed_at: string | null; started_at: string | null }
+export interface SyncRow { log_date: string; refreshed_at: string | null; started_at: string | null }
 
 export interface AuxStore {
-  loadAccounts(): Promise<{ id: string; ds: DataSourceConfig }[]>
+  /** Every account's data_source, and its older RTA Logs "Zoho Account Name" (read by zohoAccountNamesOf until the Zoho Account setting is saved). */
+  loadAccounts(): Promise<{ id: string; ds: DataSourceConfig; rtaAccountName?: string | null }[]>
   getSync(dates: string[]): Promise<Record<string, SyncRow>>
   markStarted(date: string, at: string): Promise<void>
   markSynced(date: string, at: string, note: string): Promise<void>
   writeCache(date: string, source: string, rows: CacheRow[]): Promise<void>
-  readCache(dates: string[]): Promise<{ sessions: ZohoSession[]; breaks: ZohoBreak[] }>
+  /** `kind` = only that kind (the Hourly page needs only the time logs). */
+  readCache(dates: string[], kind?: CacheRow['kind']): Promise<{ sessions: ZohoSession[]; breaks: ZohoBreak[] }>
   /** account id → its display name here (what its Zoho account is matched against). */
   accountNames(): Promise<Record<string, string>>
   replaceAccountRows(accountId: string, rows: ZohoAgentStatusRow[]): Promise<void>
@@ -123,8 +131,12 @@ export function supabaseAuxStore(): AuxStore {
   }
   return {
     async loadAccounts() {
-      const rows = must(await db.from('wfm_settings').select('id, data_source'), 'reading account settings') as any[]
-      return (rows ?? []).map(r => ({ id: r.id as string, ds: r.data_source as DataSourceConfig }))
+      // rta_account_name only matters while an account's Zoho Account setting is unsaved — if
+      // the column is ever missing, read without it rather than fail every account.
+      let res = await db.from('wfm_settings').select('id, data_source, rta_account_name')
+      if (res.error) res = await db.from('wfm_settings').select('id, data_source') as typeof res
+      const rows = must(res, 'reading account settings') as any[]
+      return (rows ?? []).map(r => ({ id: r.id as string, ds: r.data_source as DataSourceConfig, rtaAccountName: r.rta_account_name ?? null }))
     },
     async getSync(dates) {
       const rows = must(await db.from(ZOHO_AUX_SYNC_TABLE).select('log_date, refreshed_at, started_at').in('log_date', dates), 'reading Zoho sync state') as SyncRow[]
@@ -142,17 +154,33 @@ export function supabaseAuxStore(): AuxStore {
         must(await db.from(ZOHO_AUX_CACHE_TABLE).insert(rows.slice(i, i + 500)), 'caching Zoho rows')
       }
     },
-    async readCache(dates) {
+    async readCache(dates, kind) {
       const sessions: ZohoSession[] = [], breaks: ZohoBreak[] = []
-      for (let from = 0; ; from += 1000) {
-        const page = must(await db.from(ZOHO_AUX_CACHE_TABLE).select('kind, payload')
-          .in('log_date', dates).order('log_date').order('employee_norm').order('kind').order('source')
-          .range(from, from + 999), 'reading the Zoho cache') as { kind: string; payload: any[] }[]
-        for (const r of page ?? []) {
-          if (r.kind === 'sessions') sessions.push(...(r.payload ?? []))
-          else if (r.kind === 'breaks') breaks.push(...(r.payload ?? []))
+      // A stable order, so 1,000-row pages never skip or repeat a row. The pages are
+      // read in parallel once the count is known (~5,000 rows for two days of time logs).
+      const query = () => {
+        const q = db.from(ZOHO_AUX_CACHE_TABLE).select('kind, payload', { count: 'exact' }).in('log_date', dates)
+        return (kind ? q.eq('kind', kind) : q).order('log_date').order('employee_norm').order('kind').order('source')
+      }
+      type Page = { kind: string; payload: any[] }[]
+      const first = await query().range(0, 999)
+      const pages = [must(first, 'reading the Zoho cache') as Page]
+      if (pages[0]?.length === 1000) {
+        if (typeof first.count === 'number') {
+          const rest = await Promise.all(Array.from({ length: Math.ceil(first.count / 1000) - 1 }, (_, i) =>
+            query().range((i + 1) * 1000, (i + 2) * 1000 - 1)))
+          for (const r of rest) pages.push(must(r, 'reading the Zoho cache') as Page)
+        } else {
+          for (let from = 1000; ; from += 1000) {
+            const page = must(await query().range(from, from + 999), 'reading the Zoho cache') as Page
+            pages.push(page)
+            if (!page || page.length < 1000) break
+          }
         }
-        if (!page || page.length < 1000) break
+      }
+      for (const page of pages) for (const r of page ?? []) {
+        if (r.kind === 'sessions') sessions.push(...(r.payload ?? []))
+        else if (r.kind === 'breaks') breaks.push(...(r.payload ?? []))
       }
       return { sessions, breaks }
     },
@@ -291,6 +319,58 @@ async function pullDate(date: string, token: string, store: AuxStore, f: FetchLi
   return anyOk
 }
 
+// ── Pull the dates that are due ───────────────────────────────────────────────
+// Each [date, minutes, completeAfter?] is pulled when its cached copy is older
+// than that many minutes (minutes = Infinity: only if it was never pulled), or
+// was pulled before `completeAfter` (ms) — a past day pulled while it was still
+// going on — unless another run started pulling it within PULL_LEASE_MS.
+// `force` pulls every one. Shared by the cron below (today and yesterday) and
+// the Hourly page (lib/hourlyReportServer.ts), which needs whichever dates it is
+// showing — so a date is never pulled by both at once. Returns the dates' sync
+// stamps from BEFORE this call, what it pulled, and what another run was pulling.
+export type WantedDate = readonly [date: string, minutes: number, completeAfter?: number]
+
+export const syncAgeMs = (sync: Record<string, SyncRow>, date: string, now: number) => {
+  const t = sync[date]?.refreshed_at
+  return t ? now - Date.parse(t) : Infinity
+}
+
+export function isDue(sync: Record<string, SyncRow>, [date, minutes, completeAfter]: WantedDate, now: number): boolean {
+  const rf = sync[date]?.refreshed_at
+  if (completeAfter !== undefined && rf && Date.parse(rf) < completeAfter && now >= completeAfter) return true
+  return syncAgeMs(sync, date, now) >= minutes * 60_000 - 20_000
+}
+
+export function isInProgress(sync: Record<string, SyncRow>, date: string, now: number): boolean {
+  const st = sync[date]?.started_at, rf = sync[date]?.refreshed_at
+  return !!st && (!rf || Date.parse(st) > Date.parse(rf)) && now - Date.parse(st) < PULL_LEASE_MS
+}
+
+export async function refreshZohoLogDates(
+  wanted: WantedDate[], opts: { force?: boolean; now: number; log: (m: string) => void },
+  deps: { store: AuxStore; getToken: () => Promise<string>; fetch: FetchLike },
+): Promise<{ sync: Record<string, SyncRow>; pulled: string[]; busy: string[] }> {
+  const { now, log: l } = opts
+  const nowIso = new Date(now).toISOString()
+  const sync = await deps.store.getSync(wanted.map(w => w[0]))
+  const pulled: string[] = [], busy: string[] = []
+  let token: string | null = null
+  for (const w of wanted) {
+    const date = w[0]
+    if (!opts.force && !isDue(sync, w, now)) continue
+    if (!opts.force && isInProgress(sync, date, now)) { busy.push(date); l(`Zoho ${date}: another run is pulling it right now — using the cached copy.`); continue }
+    if (!token) {
+      try { token = await deps.getToken() } catch (e) {
+        l(`Zoho sign-in failed — ${e instanceof Error ? e.message : String(e)}. Using the cached copy.`)
+        break
+      }
+    }
+    await deps.store.markStarted(date, nowIso)
+    if (await pullDate(date, token, deps.store, deps.fetch, nowIso, l)) pulled.push(date)
+  }
+  return { sync, pulled, busy }
+}
+
 // ── The whole run ─────────────────────────────────────────────────────────────
 export interface AuxSyncResult {
   log: string[]
@@ -331,28 +411,11 @@ export async function runZohoAuxSync(
   }
 
   const today = dateInTz(now, PRIMARY_TZ), yesterday = addDays(today, -1)
-  const sync = await store.getSync([today, yesterday])
-  const age = (d: string) => { const t = sync[d]?.refreshed_at; return t ? now - Date.parse(t) : Infinity }
-  const inProgress = (d: string) => {
-    const st = sync[d]?.started_at, rf = sync[d]?.refreshed_at
-    return !!st && (!rf || Date.parse(st) > Date.parse(rf)) && now - Date.parse(st) < PULL_LEASE_MS
-  }
-
-  const pulled: string[] = []
-  let token: string | null = null
-  for (const [date, minutes] of [[today, ZOHO_AUX_PULL_MINUTES], [yesterday, YESTERDAY_PULL_MINUTES]] as const) {
-    const due = opts.force || age(date) >= minutes * 60_000 - 20_000
-    if (!due) continue
-    if (!opts.force && inProgress(date)) { l(`Zoho ${date}: another run is pulling it right now — using the cached copy.`); continue }
-    if (!token) {
-      try { token = await getToken() } catch (e) {
-        l(`Zoho sign-in failed — ${e instanceof Error ? e.message : String(e)}. Using the cached copy.`)
-        break
-      }
-    }
-    await store.markStarted(date, nowIso)
-    if (await pullDate(date, token, store, f, nowIso, l)) pulled.push(date)
-  }
+  const { sync, pulled } = await refreshZohoLogDates(
+    [[today, ZOHO_AUX_PULL_MINUTES], [yesterday, YESTERDAY_PULL_MINUTES]],
+    { force: opts.force, now, log: l }, { store, getToken, fetch: f },
+  )
+  const age = (d: string) => syncAgeMs(sync, d, now)
   if (!pulled.length && !log.length) l(`Using the cached Zoho copy (today's was pulled ${Math.round(age(today) / 60000)} min ago; it refreshes every ${ZOHO_AUX_PULL_MINUTES} min).`)
 
   const { sessions, breaks } = await store.readCache([yesterday, today])
@@ -367,9 +430,9 @@ export async function runZohoAuxSync(
   for (const a of enabled) {
     try {
       const cfg = a.ds.zohoAux!
-      // Matched on its "Zoho account(s) to use" setting, else its display name here (and id).
-      const keys = accountKeysFor(a.id, displayNames[a.id], cfg)
-      const asked = parseExtraNames(cfg.zohoAccounts)
+      // Matched on its Zoho Account setting, else its display name here (and id).
+      const asked = zohoAccountNamesOf(a.ds, a.rtaAccountName)
+      const keys = accountKeysFor(a.id, displayNames[a.id], asked)
       const label = (asked.length ? asked : [displayNames[a.id] || a.id]).map(n => `"${n}"`).join(' / ')
       const people = zohoPeopleOnAccount(sessions, breaks, keys)
       const extra = parseExtraNames(cfg.extraNames)
@@ -381,7 +444,7 @@ export async function runZohoAuxSync(
       let line = `${a.id}: Zoho account ${label} — ${people.size} ${people.size === 1 ? 'person' : 'people'} in Zoho's logs${extra.length ? ` (+${extra.length} extra name(s))` : ''}, ${onBreakOrAux} on a break/aux now${includeLoggedInOf(cfg) ? `, ${loggedIn} logged in on none` : ''}`
       if (!people.size) {
         line += seen.length
-          ? `. No one in Zoho's logs is on that account — if Zoho calls it something else, pick it under "Zoho account(s) to use" in Settings → Zoho Integrations. Zoho accounts seen: ${seen.slice(0, 40).map(x => x.name).join(', ')}${seen.length > 40 ? `, … (${seen.length} in all)` : ''}`
+          ? `. No one in Zoho's logs is on that account — if Zoho calls it something else, pick it under "Zoho Account" in Settings → Zoho Integrations. Zoho accounts seen: ${seen.slice(0, 40).map(x => x.name).join(', ')}${seen.length > 40 ? `, … (${seen.length} in all)` : ''}`
           : `. Zoho's cached logs carry no account at all yet (see the pull lines above).`
       }
       l(line)
@@ -406,7 +469,7 @@ export async function runZohoAuxSync(
 
 // ── For the Settings panel ────────────────────────────────────────────────────
 // `zohoAccounts`: every account in today's Zoho logs and how many people are on
-// it — what the "Zoho account(s) to use" picker suggests, and how the panel shows
+// it — what the "Zoho Account" picker suggests, and how the panel shows
 // whether this account's name matches one. `zohoTypes`: every break/aux type in
 // the last two days of Zoho logs (organisation-wide), so Settings → Status
 // Durations can list them all — and their thresholds be set — before anyone
@@ -433,15 +496,16 @@ export async function getZohoAuxStatus(store: AuxStore = supabaseAuxStore()): Pr
 // with their Zoho status right now (null = not logged in); the Zoho types its
 // people used in those two days, and the whole organisation's; and what the
 // check last stored for the account (null + needsMigration when
-// sql/zoho_crm_match.sql hasn't been run yet).
+// sql/zoho_crm_match.sql hasn't been run yet). `zohoAccounts` is the modal's
+// Zoho Account setting (zohoAccountsTextOf), one per line.
 export async function getZohoCrmMatchInfo(
-  accountId: string, cfg: Pick<ZohoAuxConfig, 'zohoAccounts' | 'extraNames'>, store: AuxStore = supabaseAuxStore(),
+  accountId: string, cfg: { zohoAccounts?: string; extraNames?: string }, store: AuxStore = supabaseAuxStore(),
 ): Promise<ZohoCrmMatchInfo> {
   const now = Date.now()
   const today = dateInTz(now, PRIMARY_TZ), yesterday = addDays(today, -1)
   const [names, sync, cache] = await Promise.all([store.accountNames(), store.getSync([today]), store.readCache([yesterday, today])])
   const current = computeCurrentAux(cache.sessions, cache.breaks, now)
-  const onAccount = zohoPeopleOnAccount(cache.sessions, cache.breaks, accountKeysFor(accountId, names[accountId], cfg as ZohoAuxConfig))
+  const onAccount = zohoPeopleOnAccount(cache.sessions, cache.breaks, accountKeysFor(accountId, names[accountId], parseExtraNames(cfg.zohoAccounts)))
   const all = new Map(onAccount)
   for (const n of parseExtraNames(cfg.extraNames)) if (!all.has(normalizeName(n))) all.set(normalizeName(n), n)
   const people = [...all].map(([k, name]) => {

@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiSourceRows, fetchZohoCrmMismatches, collectRtaKpiSignals, breachTableExtraCols, breachExtraFields, kpiCardGroups, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiData, supabaseTableFetcher, fetchZohoCrmMismatches, collectRtaKpiSignals, breachTableExtraCols, breachExtraFields, kpiCardGroups, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage, sendCliqChannelFile } from './zohoCliq'
 import { renderAccountCardPng } from './cliqCardImage'
@@ -32,6 +32,7 @@ import { recordNotification, pruneNotificationLog, cliqSummary, rtaSummary, brie
 import { classifyBreachesForRtaLog } from './geminiClassifier'
 import { loadZohoFieldOptions, type ZohoFieldOption } from './settings'
 import { computeRtaLogsChangeSignal, computeRtaKpiSignalDue, isAgentStatusHeartbeatDue, EMPTY_RTA_LOGS_STATE, type RtaLogsState } from './rtaLogsChangeDetection'
+import { zohoAccountNamesOf, rtaZohoAccountName } from './zohoAuxShared'
 import type { AccountData, AgentSource, DataSourceConfig, Thresholds } from './types'
 import type { StatusThresholds } from './utils'
 
@@ -60,34 +61,35 @@ async function fetchAgentSource(src: AgentSource, accountId: string): Promise<an
 // button needs actual breach data to classify against, unlike the plain
 // non-AI test (a single generic "[TEST] Manual connectivity test" message).
 export async function fetchAccountData(ds: DataSourceConfig, accountId: string): Promise<AccountData> {
-  const kpiRows = ds.kpiTable
-    ? ((await supabase.from(ds.kpiTable as any).select('*').eq(ds.kpiAccountCol || 'account_id', accountId)).data as any[] ?? [])
-    : []
-
   // Shared with components/Dashboard.tsx — incl. the Zoho Breaks & Aux section
   // when this account has it on, so a too-long break alerts like any status.
   const agentSourcesToFetch: AgentSource[] = agentSourcesFor(ds)
-  const agentLists = await Promise.all(agentSourcesToFetch.map(src => fetchAgentSource(src, accountId)))
-
-  // Alternate KPI sources — any GROUP (KpiGroup.source) or individual TILE
-  // (GroupTile.source) reading its own table instead of ds.kpiTable. This is
-  // the SAME fetchKpiSourceRows() components/Dashboard.tsx calls; the only
-  // thing contributed here is the server's Supabase client. It used to be a
-  // hand-written loop copied into both files — and that pair HAD already
-  // drifted — so the loop is deliberately gone from both rather than
-  // "mirrored carefully". Result: Cliq/Workforce Logs/RTA Logs breach-check
-  // exactly the data the live Dashboard/Overview pages show.
-  const fetchRows = async (table: string, accountCol: string, accId: string) => {
-    const r = await supabase.from(table as any).select('*').eq(accountCol, accId)
-    return (r.data as any[]) ?? []
-  }
-  const kpiRowsBySource = await fetchKpiSourceRows(ds, accountId, fetchRows)
+  const [kpiData, agentLists] = await Promise.all([
+    fetchAccountKpiData(ds, accountId),
+    Promise.all(agentSourcesToFetch.map(src => fetchAgentSource(src, accountId))),
+  ])
   // Zoho ↔ CRM mismatches (Settings → Zoho ↔ CRM) — same call as Dashboard.tsx.
   const zohoMismatches = await fetchZohoCrmMismatches(ds, accountId, fetchRows)
 
   // Settings → Agent Filter — the same call Dashboard.tsx makes, so an agent
   // hidden on the dashboard is never in a Cliq alert / Workforce Log / RTA Log.
-  return { kpi: null, kpiRows, kpiRowsBySource, agents: applyAgentFilter(agentLists.flat(), ds), zohoMismatches, status: null, calls: [] }
+  return { ...kpiData, agents: applyAgentFilter(agentLists.flat(), ds), zohoMismatches }
+}
+
+const fetchRows = supabaseTableFetcher(supabase)
+
+/** Just the account's KPI rows (no agents) — what its KPI tiles read. */
+export async function fetchAccountKpiData(ds: DataSourceConfig, accountId: string): Promise<AccountData> {
+  // The account-wide KPI table plus alternate KPI sources — any GROUP
+  // (KpiGroup.source) or individual TILE (GroupTile.source) reading its own
+  // table instead of ds.kpiTable. The sources go through the SAME
+  // fetchKpiSourceRows() components/Dashboard.tsx calls; the only thing
+  // contributed here is the server's Supabase client. It used to be a
+  // hand-written loop copied into both files — and that pair HAD already
+  // drifted — so the loop is deliberately gone from both rather than
+  // "mirrored carefully". Result: Cliq/Workforce Logs/RTA Logs breach-check
+  // exactly the data the live Dashboard/Overview pages show.
+  return { kpi: null, ...(await fetchKpiData(ds, accountId, fetchRows)), agents: [], status: null, calls: [] }
 }
 
 // ── Message formatting — mirrors the old GAS tool's format ──────────────────
@@ -296,10 +298,12 @@ export async function runCliqScan(opts: { forceSend?: boolean } = {}): Promise<S
     ? await Promise.all([loadZohoFieldOptions('Category'), loadZohoFieldOptions('Sub_Categories')])
     : [[], []]
 
-  // Display names for the card pictures' headers — once per scan, only while
-  // Cliq is on. A failed read just means the pictures show the account id.
+  // Display names — once per scan, only while something uses them: the card
+  // pictures' headers (Cliq), and the account an RTA Log names when its Zoho
+  // Account setting is blank (rtaZohoAccountName). A failed read just means the
+  // account id is used instead.
   const pictures: CardPictures = { names: {}, left: MAX_CARD_PICTURES }
-  if (globalSettings.enabled && qualifying.some(a => !!a.cliq_channel)) {
+  if ((globalSettings.enabled && qualifying.some(a => !!a.cliq_channel)) || qualifying.some(a => !!a.rta_logs_enabled)) {
     const { data: nameRows } = await supabase.from('wfm_accounts').select('id, display_name')
     for (const r of (nameRows as { id: string; display_name: string | null }[] | null) ?? []) pictures.names[r.id] = r.display_name || r.id
   }
@@ -427,9 +431,10 @@ async function processAccount(
         // master by NAME (confirmed live 2026-09-25: it rejected our raw
         // internal id "guardianbikes" — "No valid Account was resolved
         // from HR" — since Zoho's own record is named "Guardian Bikes")
-        // — send the configured override when this account's id doesn't
-        // match its real Zoho display name.
-        const zohoAccountName = acc.rta_account_name || accountId
+        // — so this sends the account's Zoho Account setting (its first
+        // name; the older rta_account_name while that's unsaved), else its
+        // display name. Settings → Zoho Integrations → Zoho Account.
+        const zohoAccountName = rtaZohoAccountName(zohoAccountNamesOf(ds, acc.rta_account_name), pictures.names[accountId], accountId)
 
         // Due AND currently-breaching KPI tiles + any due agent breaches are
         // genuine breaches; due-but-healthy tiles (only possible via the

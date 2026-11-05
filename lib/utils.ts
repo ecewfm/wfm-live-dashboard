@@ -260,19 +260,26 @@ export function migrateDataSource(raw: any): DataSourceConfig {
   }
 }
 
+/** A saved kpi_thresholds object with every missing field backfilled from
+ *  DEFAULT_THRESHOLDS — per KEY, not a shallow spread, so a stored `aht` saved
+ *  before a field existed (e.g. kpiUnit) keeps its own values and gains just
+ *  the default for that field. Used by lib/settings.ts (Supabase) and
+ *  loadKpiThresholds below (localStorage), and server-side by the Hourly page's
+ *  minute job (lib/hourlyReportServer.ts), so all read a tile's unit the same. */
+export function mergeKpiThresholds(p: any): Thresholds {
+  return {
+    sla:  { ...DEFAULT_THRESHOLDS.sla,  ...p?.sla  },
+    wait: { ...DEFAULT_THRESHOLDS.wait, ...p?.wait },
+    aht:  { ...DEFAULT_THRESHOLDS.aht,  ...p?.aht  },
+    abn:  { ...DEFAULT_THRESHOLDS.abn,  ...p?.abn  },
+  }
+}
+
 // ── localStorage helpers ──────────────────────────────────────────────────────
 export function loadKpiThresholds(accountId: string): Thresholds {
   try {
     const raw = localStorage.getItem(`wfm_kpi_th_${accountId}`)
-    if (raw) {
-      const p = JSON.parse(raw)
-      return {
-        sla:  { ...DEFAULT_THRESHOLDS.sla,  ...p.sla  },
-        wait: { ...DEFAULT_THRESHOLDS.wait, ...p.wait },
-        aht:  { ...DEFAULT_THRESHOLDS.aht,  ...p.aht  },
-        abn:  { ...DEFAULT_THRESHOLDS.abn,  ...p.abn  },
-      }
-    }
+    if (raw) return mergeKpiThresholds(JSON.parse(raw))
   } catch {}
   return JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS))
 }

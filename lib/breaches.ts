@@ -241,6 +241,24 @@ export async function fetchKpiSourceRows(
   return out
 }
 
+/** Everything an account's KPI tiles read: its account-wide KPI table plus every alternate source.
+ *  The server's one KPI fetch — lib/cliqScan.ts (the breach scan) and lib/hourlyReportServer.ts
+ *  (the Hourly page's minute-by-minute readings) both call this. */
+export async function fetchKpiData(
+  ds: DataSourceConfig, accountId: string, fetchTable: KpiSourceFetcher,
+): Promise<Pick<AccountData, 'kpiRows' | 'kpiRowsBySource'>> {
+  const [kpiRows, kpiRowsBySource] = await Promise.all([
+    ds.kpiTable ? fetchTable(ds.kpiTable, ds.kpiAccountCol || 'account_id', accountId) : Promise.resolve([]),
+    fetchKpiSourceRows(ds, accountId, fetchTable),
+  ])
+  return { kpiRows, kpiRowsBySource }
+}
+
+/** A KpiSourceFetcher on a Supabase client — `select *` filtered by the account column. */
+export function supabaseTableFetcher(client: { from(table: string): any }): KpiSourceFetcher {
+  return async (table, accountCol, accountId) => ((await client.from(table).select('*').eq(accountCol, accountId)).data as any[]) ?? []
+}
+
 // ── The ONE "which rows does this binding read, and how" function ─────────
 // CANONICAL — used by buildBreaches() and collectRtaKpiSignals() below AND by
 // KpiGrid()/OverviewCard() in components/Dashboard.tsx. Same reasoning as
@@ -288,9 +306,17 @@ export function makeKpiCellResolver(
 
 // ── The Overview card's KPI tiles — what each group shows, its value and its
 // colour (text-success/-warning/-danger/-muted). ONE list for the Overview
-// card (components/Dashboard.tsx) and the picture attached to a Cliq alert
-// (lib/cliqCardImage.tsx), so the picture always shows what the card does.
-export interface KpiCardTile { key: string; label: string; value: string; colorClass: string }
+// card (components/Dashboard.tsx), the picture attached to a Cliq alert
+// (lib/cliqCardImage.tsx) and the Hourly page — the minute-by-minute readings
+// it keeps (lib/hourlyReportServer.ts) and the columns it shows — so all of
+// them agree on what a tile is.
+// `unit`, `lowIsBad` and `colorOf` describe the tile itself, not this reading:
+// how its value is parsed (extractKpiValue), which way is worse, and the colour
+// any number would get under its thresholds (for an hour's average or worst).
+export interface KpiCardTile {
+  key: string; label: string; value: string; colorClass: string
+  unit: KpiUnit | undefined; lowIsBad: boolean; colorOf: (num: number) => string
+}
 export interface KpiCardGroup { id: string; name: string; tiles: KpiCardTile[] }
 
 export function kpiCardGroups(ds: DataSourceConfig, accountData: AccountData | undefined, kpiTh: Thresholds): KpiCardGroup[] {
@@ -301,6 +327,8 @@ export function kpiCardGroups(ds: DataSourceConfig, accountData: AccountData | u
     // precedence.
     const rc = makeKpiCellResolver(ds, group, accountData)
     const name = group.name || 'Global'
+    const tile = (key: string, label: string, value: string, unit: KpiUnit | undefined, lowIsBad: boolean, colorOf: (num: number) => string): KpiCardTile =>
+      ({ key, label, value, colorClass: colorOf(extractKpiValue(value, unit).num), unit, lowIsBad, colorOf })
 
     // Independent-tiles group (see GroupTile) — own labels/bindings/
     // thresholds, separate from every other group on this account. Each tile
@@ -308,24 +336,20 @@ export function kpiCardGroups(ds: DataSourceConfig, accountData: AccountData | u
     if (group.tiles && group.tiles.length) {
       return {
         id: group.id, name,
-        tiles: group.tiles.map(t => {
-          const raw = rc(t.cell || undefined, t)
-          return { key: t.key, label: t.label, value: raw, colorClass: getKpiColorClass(extractKpiValue(raw, t.kpiUnit).num, t) }
-        }),
+        tiles: group.tiles.map(t => tile(t.key, t.label, rc(t.cell || undefined, t), t.kpiUnit, t.direction === 'desc', n => getKpiColorClass(n, t))),
       }
     }
 
     const tiles: KpiCardTile[] = []
     const fixed = (key: 'sla' | 'wait' | 'aht' | 'abn', value: string) =>
-      tiles.push({ key, label: ds.kpiLabels[key], value, colorClass: getKpiColorClass(extractKpiValue(value, kpiTh[key].kpiUnit).num, kpiTh[key]) })
+      tiles.push(tile(key, ds.kpiLabels[key], value, kpiTh[key].kpiUnit, kpiTh[key].direction === 'desc', n => getKpiColorClass(n, kpiTh[key])))
     if (group.cells.sla)  fixed('sla',  rc(group.cells.sla).replace(/\s+/g, ''))
     if (group.cells.wait) fixed('wait', rc(group.cells.wait))
     if (group.cells.aht)  fixed('aht',  rc(group.cells.aht))
     if (group.cells.abn)  fixed('abn',  rc(group.cells.abn))
     for (const t of ds.extraTiles ?? []) {
       if (!group.cells[t.key]) continue
-      const raw = rc(group.cells[t.key])
-      tiles.push({ key: t.key, label: t.label, value: raw, colorClass: getExtraTileColorClass(extractKpiValue(raw, t.kpiUnit).num, t) })
+      tiles.push(tile(t.key, t.label, rc(group.cells[t.key]), t.kpiUnit, t.higherIsBetter, n => getExtraTileColorClass(n, t)))
     }
     return { id: group.id, name, tiles }
   })

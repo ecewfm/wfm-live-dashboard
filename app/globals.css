@@ -792,3 +792,78 @@ body {
 .lg-pg:hover:not(:disabled):not(.on) { background: var(--primary-light); }
 .lg-pg.on { background: var(--primary); border-color: var(--primary); color: #fff; cursor: default; }
 .lg-pg:disabled { opacity: .45; cursor: default; }
+
+/* ── HOURLY PAGE (components/HourlyPage.tsx, super users + RTAs) ──────────
+   KPI tiles and Zoho head count, hour by hour. Reuses the Loggings page's
+   toolbar pieces (.lg-filters/.lg-select/.lg-seg/.lg-pg/.lg-banner) and
+   .table-card/.dash-table; the table itself reads like a sheet — every cell
+   boxed, numbers centred, the headers, the Interval column and TOTAL stay put
+   while it scrolls (a wide account has a column per KPI tile). */
+.hr-date { display: inline-flex; align-items: center; gap: 6px; }
+.hr-date input { min-width: 150px; }
+.hr-today { font-size: 13px; }
+.hr-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--text-muted); cursor: pointer; user-select: none; }
+.hr-check input { accent-color: var(--primary); width: 15px; height: 15px; }
+.hr-csv { gap: 6px; font-size: 13px; }
+.hr-groups { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -4px 0 12px; font-size: 13px; }
+.hr-chip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px; border-radius: 14px;
+  border: 1px solid var(--border); background: transparent; color: var(--text-muted);
+  cursor: pointer; font-family: inherit; font-size: 12.5px; font-weight: 600;
+}
+.hr-chip.on { border-color: var(--success); background: rgba(72,127,98,0.12); color: var(--text-main); }
+.hr-info { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; margin-bottom: 12px; font-size: 13px; }
+.hr-info i { color: var(--primary); vertical-align: -2px; margin-right: 3px; }
+.hr-link { border: none; background: none; color: var(--primary); cursor: pointer; font: inherit; font-weight: 600; text-decoration: underline; padding: 0; }
+
+.hr-wrap { max-height: calc(100vh - 300px); min-height: 220px; overflow: auto; }
+.hr-table { font-size: 13.5px; border-collapse: separate; border-spacing: 0; --hr-line: rgba(44,59,54,0.16); --hr-head: #f4f6f5; --hr-group: rgba(44,59,54,0.38); }
+.dark .hr-table { --hr-line: rgba(255,255,255,0.10); --hr-head: #2b2b2b; --hr-group: rgba(255,255,255,0.28); }
+.hr-table th, .hr-table td { border-right: 1px solid var(--hr-line); border-bottom: 1px solid var(--hr-line); }
+.hr-table thead { position: sticky; top: 0; z-index: 3; }
+.hr-table thead th {
+  position: static; top: auto; text-align: center; white-space: nowrap; font-size: 11px; padding: 8px 10px;
+  background: var(--hr-head); color: var(--text-muted);
+}
+.hr-table thead th.hr-gh { font-size: 11.5px; letter-spacing: 0.6px; color: var(--text-main); }
+.hr-table thead th.hr-hc { background: linear-gradient(rgba(75,139,156,0.12), rgba(75,139,156,0.12)), var(--hr-head); }
+.hr-table .hr-gs { border-left: 2px solid var(--hr-group); }
+.hr-table .hr-int { position: sticky; left: 0; z-index: 1; text-align: left; white-space: nowrap; background: var(--bg-card); font-weight: 600; min-width: 92px; }
+.hr-table thead th.hr-int { position: sticky; left: 0; z-index: 4; background: var(--hr-head); vertical-align: bottom; }
+.hr-table tbody td { padding: 9px 12px; }
+.hr-num { text-align: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hr-row { cursor: pointer; }
+.hr-row:hover td { background-image: linear-gradient(rgba(0,0,0,0.035), rgba(0,0,0,0.035)); }
+.dark .hr-row:hover td { background-image: linear-gradient(rgba(255,255,255,0.04), rgba(255,255,255,0.04)); }
+.hr-row.open td { border-bottom-color: transparent; }
+.hr-chev { font-size: 15px; color: var(--text-muted); vertical-align: -3px; margin-right: 4px; }
+.hr-now td.hr-int { box-shadow: inset 3px 0 0 var(--primary); }
+.hr-now-pill {
+  margin-left: 7px; padding: 1px 7px; border-radius: 10px; font-size: 10px; font-weight: 700; letter-spacing: 0.4px;
+  background: var(--primary); color: #fff; vertical-align: 1px; text-transform: uppercase;
+}
+/* A KPI cell by the tile's thresholds — the same green / amber / red as the tile. */
+.hr-ok   { background-color: rgba(72,127,98,0.15); color: var(--success); font-weight: 600; }
+.hr-warn { background-color: rgba(217,158,53,0.20); color: #a06c12; font-weight: 600; }
+.hr-bad  { background-color: rgba(201,92,92,0.17); color: var(--danger); font-weight: 700; }
+.dark .hr-warn { color: var(--warning); }
+.hr-att-warn { color: #a06c12; font-weight: 700; }
+.dark .hr-att-warn { color: var(--warning); }
+.hr-att-bad { color: var(--danger); font-weight: 700; }
+.hr-table tfoot { position: sticky; bottom: 0; z-index: 3; }
+.hr-total td {
+  background: var(--sidebar-bg); color: #fff; font-weight: 700; padding: 10px 12px;
+  border-right-color: rgba(255,255,255,0.14); border-bottom: none;
+}
+.hr-total td.hr-int { background: var(--sidebar-bg); letter-spacing: 0.5px; }
+.hr-total td.hr-gs { border-left-color: rgba(255,255,255,0.35); }
+.hr-detail-row > td { background: rgba(0,0,0,0.015); cursor: default; padding: 10px 16px 14px; }
+.dark .hr-detail-row > td { background: rgba(255,255,255,0.02); }
+/* Stays in view however far the table is scrolled sideways. */
+.hr-detail { position: sticky; left: 16px; width: min(1100px, calc(100vw - 120px)); display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px 24px; }
+.hr-list ul { list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 13px; max-height: 260px; overflow-y: auto; }
+.hr-list.bad .lg-block-title { color: var(--danger); }
+.hr-list.ok .lg-block-title { color: var(--success); }
+.hr-list.extra .lg-block-title { color: var(--info); }
+.hr-notes { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; line-height: 1.55; color: var(--text-muted); max-width: 1100px; }
+.hr-notes strong { color: var(--text-main); font-weight: 600; }

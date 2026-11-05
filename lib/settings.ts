@@ -8,8 +8,8 @@ import type { Thresholds, DataSourceConfig, DashboardLayout, HeaderColors, CliqG
 import { DEFAULT_ZOHO_LOOKUPS } from './types'
 import type { StatusThresholds } from './utils'
 import {
-  DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
-  loadKpiThresholds, loadStatusThresholds, loadDataSource,
+  DEFAULT_STATUS_THRESHOLDS, DEFAULT_DATA_SOURCE,
+  loadKpiThresholds, loadStatusThresholds, loadDataSource, mergeKpiThresholds,
   saveKpiThresholds, saveStatusThresholds, saveDataSource,
   loadDashboardLayout, saveDashboardLayoutLocal,
   loadHeaderColorsLocal, saveHeaderColorsLocal,
@@ -137,12 +137,7 @@ export async function loadSettings(accountId: string): Promise<AccountSettings> 
         // field the stored object doesn't happen to have. Mirrors
         // loadKpiThresholds()'s own (localStorage) merge below.
         kpi:    data.kpi_thresholds
-                  ? {
-                      sla:  { ...DEFAULT_THRESHOLDS.sla,  ...data.kpi_thresholds.sla  },
-                      wait: { ...DEFAULT_THRESHOLDS.wait, ...data.kpi_thresholds.wait },
-                      aht:  { ...DEFAULT_THRESHOLDS.aht,  ...data.kpi_thresholds.aht  },
-                      abn:  { ...DEFAULT_THRESHOLDS.abn,  ...data.kpi_thresholds.abn  },
-                    }
+                  ? mergeKpiThresholds(data.kpi_thresholds)
                   : loadKpiThresholds(accountId),
         status: data.status_thresholds
                   ? { ...DEFAULT_STATUS_THRESHOLDS, ...data.status_thresholds }

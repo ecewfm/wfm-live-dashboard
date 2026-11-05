@@ -303,17 +303,18 @@ below) since nothing else about its behavior (whether it also fills
   making reliable string-matching to one of these fragile; the single fixed
   sub-category remains the deliberate scope decision it always was (see
   chat history if per-breach-type mapping is wanted later).
-- **`accounts` (the account name sent) can be overridden** —
-  `wfm_settings.rta_account_name`. Confirmed required live (2026-09-25):
-  Zoho's script resolves the `accounts` value against its own HR/Accounts
-  master by NAME, and rejected `"guardianbikes"` (our internal account id)
-  with `"No valid Account was resolved from HR... Active Account not found
-  in HR: guardianbikes"` — its real Zoho record is named `"Guardian
-  Bikes"`. `lib/cliqScan.ts` sends `acc.rta_account_name || accountId`.
-  Blank (the default) sends the internal id as-is, unchanged from before —
-  only accounts whose id doesn't match Zoho's own naming need this filled
-  in. Settings UI: a plain text input, "Zoho Account Name", right above the
-  Site checkboxes.
+- **`accounts` (the account name sent) is the account's Zoho Account** —
+  the ONE Zoho account setting (see "Zoho Account — one setting" below):
+  its first name, else the display name (`rtaZohoAccountName()`). Confirmed
+  required live (2026-09-25): Zoho's script resolves the `accounts` value
+  against its own HR/Accounts master by NAME, and rejected `"guardianbikes"`
+  (our internal account id) with `"No valid Account was resolved from HR...
+  Active Account not found in HR: guardianbikes"` — its real Zoho record is
+  named `"Guardian Bikes"`. Until 2026-11-05 this was its own field,
+  `wfm_settings.rta_account_name` ("Zoho Account Name", blank = the id);
+  that column is still read while an account's Zoho Account has never been
+  saved, and Save Changes keeps writing the first name to it. The RTA Logs
+  section now just shows what will be sent.
 - `lib/cliqScan.ts` — per-account gate is just `rta_logs_enabled` (no account
   link requirement, unlike Workforce Logs, since there's no lookup ID to
   resolve — just optional plain-text overrides, see above and `rta_sites`).
@@ -556,8 +557,10 @@ project (no `zoho_activity` here), so this app pulls Zoho itself.
   name against the account's CRM agent tables, which found almost nobody: CRM
   names like Gorgias's "Ayla S" rarely equal a Zoho full name). An account shows
   the people whose account in Zoho equals its display name here (or its id),
-  compared ignoring case/spaces/punctuation (`normalizeAccount`), or its own
-  "Zoho account(s) to use" picker (`zohoAux.zohoAccounts`, one or more) when Zoho calls it
+  compared ignoring case/spaces/punctuation (`normalizeAccount`), or its Zoho
+  Account setting (one or more — see "Zoho Account — one setting" below; it
+  replaced this section's own "Zoho account(s) to use" picker,
+  `zohoAux.zohoAccounts`, still read until the new one is saved) when Zoho calls it
   differently — plus the optional "Extra Zoho names". Rows show the ZOHO name
   only (`agent_name` = the Zoho Employee name). vCORE never reads an account off
   these reports, so the field isn't documented anywhere: `pickAccountField()`
@@ -834,8 +837,9 @@ Untracked's own Status Durations minutes.
 ## Loggings tab — every Cliq message / RTA Log sent (2026-11-02)
 
 Per the user: super users get a third top-nav tab, **Loggings** (after Overview
-and Dashboard), listing every Zoho Cliq notification and every Workforce RTA
-Logs submission the webapp made — in brief, easy-to-read lines.
+and Dashboard; the Hourly tab comes after it — see below), listing every Zoho
+Cliq notification and every Workforce RTA Logs submission the webapp made — in
+brief, easy-to-read lines.
 
 - Table `wfm_notification_log` (`sql/notification_log.sql` — **must be run once
   in Supabase**): one row per attempt, `kind` cliq | rta_log, `status` sent |
@@ -877,6 +881,101 @@ Logs submission the webapp made — in brief, easy-to-read lines.
   one row per message/submission, failures carry Zoho's reason, exact message /
   remarks kept, still sends when the table is missing); the route's role check
   and filters (8); the page on the production build (27, light + dark).
+
+## Hourly tab — KPI readings + Zoho head count per hour (2026-11-05)
+
+Per the user (RTAs and super users asked for it, like their hand-kept interval
+sheets): a fourth top-nav tab, **Hourly** (after Loggings; `can.viewHourly` —
+superuser + RTA, an RTA only for their own accounts), a table per account and
+day: one row per hour — **Scheduled HC**, **Actual HC**, **Attendance %** from
+Zoho, then every KPI tile of the account (grouped by KPI group), and a TOTAL row.
+Account dropdown (the same `currentAccount` as the top nav), day picker (up to 7
+days ahead), time zone (`HOURLY_TIMEZONES` — ET default, CT/MT/PT, Honduras,
+Manila; whole-hour offsets only), KPI value mode, KPI group chips (hidden groups
+remembered per account in localStorage), "All 24 hours", CSV download. Click an
+hour for who was scheduled / there / not.
+
+- **KPI history is recorded by this app** — the CRMs only give live numbers (most
+  "today so far" or "right now"), so `/api/kpi/hourly-snapshot` (Vercel Cron, every
+  minute, `CRON_SECRET`) reads every account's tiles through `kpiCardGroups()` (the
+  Overview card's tiles — now also carrying each tile's `unit`, `lowIsBad` and
+  `colorOf`) and folds the reading into that hour's record in `wfm_kpi_hourly`
+  (`addKpiReading`: last / min / max / sum / n per tile, a same-minute rerun not
+  counted twice, a `00:00` duration not counted). Not recorded while the account's
+  data is stale (5 min, same as "DATA NOT IN SYNC"). Hours before it went live, and
+  any minute it didn't run, are blank — there is no backfill. Kept 120 days.
+  Modes: **End of hour** (the hour's last reading, exactly as the tile showed it;
+  TOTAL = end of day), **Average**, **Worst** (by the tile's direction). Cells are
+  coloured with the tile's own thresholds via `colorOf`; columns come from the
+  account's CURRENT tiles (keyed `groupId:tileKey`, so renames keep their history).
+- **Head count rules** (`lib/hourlyReport.ts`, `HC_SHARE` = half): Scheduled = the
+  Zoho daily schedule covers ≥ half the hour; Actual = logged in to the Time Tracker
+  for ≥ half of their scheduled time in the hour (half the hour if not scheduled —
+  overtime / in early count in Actual HC, not Attendance); Attendance = scheduled
+  people there ÷ those due so far (the current hour is judged on its elapsed part;
+  someone whose shift starts later in it is "upcoming", not absent). TOTAL =
+  distinct people; attendance = scheduled hours attended ÷ scheduled hours due.
+  Open sessions run to now, a forgotten logout stops at 18 h (`MAX_OPEN_SESSION_HOURS`).
+  Attendance colour: < 95 amber, < 85 red (vCORE's adherence lines — no setting).
+- **Zoho Daily Schedules** (new pull, vCORE's field names — its "Zoho Daily
+  Schedules and Time Logs" reference, 2026-11-05): `ece-time-tracker` /
+  `All_Daily_Schedules_View_Only` (`S_Date`, `Schedule_Start`/`_End`, `WHPD`,
+  `Account`) and `ece-time-tracker-honduras` / `Schedules_Report` (a WEEKLY
+  template, criteria `Day == "Wednesday"`, `Working_Hours`, `Employee.Account`).
+  Times parsed by `toHM`, stored as UTC (overnight = next day's wall clock); rest
+  days (WHPD 0, blank, start = end) dropped; one row per person (the last). Cached
+  per date × source × Zoho account in `wfm_zoho_schedules` + `wfm_zoho_schedule_sync`
+  (lease, never wiped by a failed/empty pull). Pulled ON VIEW only (no cron — vCORE
+  works the same way): today and later every 30 min, yesterday every 6 h, an older
+  day once (again if it was pulled before the day after it was over).
+- **Time logs** are the Zoho Breaks & Aux cache (`wfm_zoho_activity`); a date it
+  hasn't got (an older day, or no account has Breaks & Aux on) is pulled by the page
+  through the same `refreshZohoLogDates()` the cron uses (extracted from
+  `runZohoAuxSync`, with the lease — a date is never pulled twice at once). Reads
+  sessions only, pages in parallel (`readCache(dates, 'sessions')`).
+- Files: `lib/hourlyReport.ts` (pure: windows, schedule parsing, head count, KPI
+  folding/formatting, `HourlyReport` type), `lib/hourlyReportServer.ts` (server:
+  the minute job, the schedule pull, `getHourlyReport()`), `app/api/hourly`
+  (GET, `requireRole(['superuser','rta'])` + the account check on the first lines),
+  `app/api/kpi/hourly-snapshot`, `components/HourlyPage.tsx`, `.hr-*` in globals.css,
+  `sql/hourly_report.sql` (**must be run once** — RLS on, no policies; the page says
+  so until then). The server KPI fetch is `fetchKpiData()` in `lib/breaches.ts`,
+  shared with the breach scan (`fetchAccountKpiData` in `lib/cliqScan.ts`).
+- NOT verified against live Zoho for the schedules (no Zoho client id/secret
+  locally): the field names are vCORE's. If the pull fails the page shows Zoho's
+  error; check the server log for the "Zoho schedules … account from …" line.
+- Known quirk, deliberately left alone: a count tile whose value has a thousands
+  comma ("2,205") parses as 2 in `extractKpiValue` (tile colour, breaches, the
+  Hourly Average/Worst) — fixing it would start breaching Perfect Serve's
+  "total_calls" (thresholds 15/25). End of hour shows the text as scraped.
+- Verified: pure rules (59), the server with fake Zoho + stores (42), the route's
+  role check (16), a read-only dry run on production data (every account's KPI
+  tiles; Ashley Voice / Flex / Guardian Bikes / Rocco Ridge head counts from the real
+  cache), and the page + Settings on the production build (42, light + dark).
+
+## Zoho Account — one setting for every Zoho feature (2026-11-05)
+
+Per the user: Settings → Zoho Integrations → **ZOHO ACCOUNT — {account}** (first of
+the account's Zoho sections) is the one place an account's name in Zoho is set;
+default (blank) = its display name, the title on its KPI card. One or more names
+(Flex is "Flex", "Flex PartTime", "Flex-PnOps" in Zoho), matched ignoring case,
+spaces and punctuation ("Ashley Voice" = "Ashley - Voice").
+- Saved as `DataSourceConfig.zohoAccounts` (data_source JSONB, one per line — no
+  migration). Read ONLY through `zohoAccountsTextOf()` / `zohoAccountNamesOf()` in
+  `lib/zohoAuxShared.ts`: undefined (never saved) falls back to Breaks & Aux's old
+  `zohoAux.zohoAccounts`, then RTA Logs' old `rta_account_name`, so nothing changed
+  until it's saved; the modal seeds itself from them, and Save Changes writes it
+  (plus its first name into `rta_account_name`).
+- Used by: the Hourly page's head count, Zoho Breaks & Aux (`runZohoAuxSync` —
+  `loadAccounts()` now also returns `rta_account_name`), the Zoho ↔ CRM tab (passed
+  in as `zohoAccounts`), Workforce RTA Logs (`rtaZohoAccountName()` — first name,
+  else display name; the scan reads display names whenever an account has RTA Logs
+  on) and the Test RTA Logs button. `accountKeysFor(id, displayName, names)` now
+  takes the names.
+- Build quirk found here: in multi-line JSX text, the space right after a closing
+  tag is DROPPED by this Next/Turbopack build ("Unique Nameof", "Accounton") — a
+  single-line text node keeps it. The new text uses `{' '}`; older Settings text
+  ("Unique Name", "Site(s)") still shows it.
 
 ## `lib/settings.ts` load/save silently dropping fields (fixed 2026-09-28)
 

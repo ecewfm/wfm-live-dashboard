@@ -6,8 +6,8 @@
 // first line is what protects it: the roles that can edit settings, and an RTA
 // only for an account assigned to them.
 //
-// Query: account=<id>, plus the modal's current (maybe unsaved) "Zoho account(s)
-// to use" (zohoAccounts) and "Extra Zoho names" (extraNames), one per line.
+// Query: account=<id>, plus the modal's current (maybe unsaved) "Zoho Account"
+// (zohoAccounts) and "Extra Zoho names" (extraNames), one per line.
 
 import { requireRole, errorResponse, json, AuthError } from '@/lib/authServer'
 import { getZohoCrmMatchInfo } from '@/lib/zohoAux'

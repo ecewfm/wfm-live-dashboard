@@ -11,6 +11,10 @@
     {
       "path": "/api/zoho/aux-sync",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/kpi/hourly-snapshot",
+      "schedule": "* * * * *"
     }
   ]
 }

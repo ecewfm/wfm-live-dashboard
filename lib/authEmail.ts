@@ -118,6 +118,8 @@ export const can = {
   importUsers:   (r: UserRole) => r === 'superuser',
   /** The Loggings page: every Cliq message / RTA Log sent, for every account. */
   viewLogs:      (r: UserRole) => r === 'superuser',
+  /** The Hourly page: KPI readings and Zoho head count per hour (an RTA: their own accounts). */
+  viewHourly:    (r: UserRole) => r === 'superuser' || r === 'rta',
   /** Which roles this role is allowed to hand out. */
   assignableRoles: (r: UserRole): UserRole[] =>
     r === 'superuser' ? ['superuser', 'rta', 'team_lead']

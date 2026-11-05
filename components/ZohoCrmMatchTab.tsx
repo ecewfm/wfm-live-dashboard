@@ -31,6 +31,8 @@ interface Props {
   knownCrmStatuses: string[]
   /** Opens Settings → Zoho Integrations, where Zoho Breaks & Aux is switched on. */
   onOpenZohoSettings: () => void
+  /** The account's Zoho Account setting as the modal has it (zohoAccountsTextOf), one per line — whose people are paired. */
+  zohoAccounts: string
 }
 
 const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -54,7 +56,7 @@ function MinutesInput({ value, onCommit, label }: { value: number; onCommit: (n:
   )
 }
 
-export default function ZohoCrmMatchTab({ accountId, ds, setDs, knownCrmStatuses, onOpenZohoSettings }: Props) {
+export default function ZohoCrmMatchTab({ accountId, ds, setDs, knownCrmStatuses, onOpenZohoSettings, zohoAccounts }: Props) {
   const available = zohoCrmMatchAvailable(ds)
   const cfg: ZohoCrmMatchConfig = { ...emptyZohoCrmMatch(), ...(ds.zohoCrmMatch ?? {}) }
   // Built from the PREVIOUS config, so quick clicks never undo each other.
@@ -69,7 +71,7 @@ export default function ZohoCrmMatchTab({ accountId, ds, setDs, knownCrmStatuses
   // When `info` arrived — "Zoho now" durations are as of then.
   const [infoAt, setInfoAt] = useState(0)
   const [refresh, setRefresh] = useState(0)
-  const zohoAccounts = ds.zohoAux?.zohoAccounts ?? '', extraNames = ds.zohoAux?.extraNames ?? ''
+  const extraNames = ds.zohoAux?.extraNames ?? ''
   useEffect(() => {
     if (!available) return
     let cancelled = false

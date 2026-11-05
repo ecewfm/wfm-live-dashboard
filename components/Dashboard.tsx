@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase'
 import SettingsModal from './SettingsModal'
 import BreachColumnsModal from './BreachColumnsModal'
 import LogsPage from './LogsPage'
+import HourlyPage from './HourlyPage'
 import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
@@ -42,8 +43,9 @@ import {
   type StatusThresholds
 } from '@/lib/utils'
 
-// 'logs' = the Loggings page (super users only — can.viewLogs)
-type Page = 'dashboard' | 'overview' | 'logs'
+// 'logs' = the Loggings page (super users only — can.viewLogs);
+// 'hourly' = the Hourly page (super users and RTAs — can.viewHourly)
+type Page = 'dashboard' | 'overview' | 'logs' | 'hourly'
 
 // Stable reference (not a fresh {} literal) so passing this as a fallback
 // prop doesn't look like a changed value on every render — an unstable
@@ -89,6 +91,8 @@ export default function Dashboard() {
   // The Loggings tab — every Cliq message / RTA Log sent, for every account.
   // /api/logs checks the role too; this only decides whether the tab shows.
   const canViewLogs = can.viewLogs(profile.role)
+  // The Hourly tab — /api/hourly checks the role (and an RTA's accounts) too.
+  const canViewHourly = can.viewHourly(profile.role)
 
   const [isDark, setIsDark]                 = useState(false)
   // The page this TAB was last on (lib/viewMemory.ts) — so a reload, above all the
@@ -97,7 +101,7 @@ export default function Dashboard() {
   // (Dashboard only mounts after sign-in, on the client, so reading storage here is safe.)
   const [currentPage, setCurrentPage]       = useState<Page>(() => {
     const p = loadView().page ?? 'overview'
-    return p === 'logs' && !canViewLogs ? 'overview' : p
+    return (p === 'logs' && !canViewLogs) || (p === 'hourly' && !canViewHourly) ? 'overview' : p
   })
   const [accounts, setAccounts]             = useState<string[]>([])
   // Distinguishes "still loading" from "loaded, and this person has no
@@ -968,6 +972,11 @@ export default function Dashboard() {
               <i className="bx bx-list-ul" /> Loggings
             </div>
           )}
+          {canViewHourly && (
+            <div className={`top-nav-item${currentPage === 'hourly' ? ' active' : ''}`} onClick={() => navigate('hourly')}>
+              <i className="bx bx-table" /> Hourly
+            </div>
+          )}
         </div>
       </div>
 
@@ -981,9 +990,10 @@ export default function Dashboard() {
                 {currentPage === 'dashboard'
                   ? (currentAccount ? `${currentAccount.toUpperCase()} — Real-Time Dashboard` : 'Real-Time Dashboard')
                   : currentPage === 'logs' ? 'Loggings — Cliq Notifications & RTA Logs'
+                  : currentPage === 'hourly' ? 'Hourly — KPI & Head Count'
                   : 'All Accounts Overview'}
               </div>
-              <div className="topbar-sub">{currentPage === 'logs' ? 'Sent by the webapp, all accounts' : stale ? '⚠ Data may be stale' : 'Live'}</div>
+              <div className="topbar-sub">{currentPage === 'logs' ? 'Sent by the webapp, all accounts' : currentPage === 'hourly' ? 'Hour by hour, from the KPI tiles and Zoho' : stale ? '⚠ Data may be stale' : 'Live'}</div>
             </div>
           </div>
           <div className="topbar-right">
@@ -1119,6 +1129,17 @@ export default function Dashboard() {
           )}
           {currentPage === 'logs' && canViewLogs && (
             <LogsPage accounts={accounts} displayNames={displayNames} />
+          )}
+          {currentPage === 'hourly' && canViewHourly && accounts.length > 0 && currentAccount && (
+            <HourlyPage
+              accounts={accounts}
+              displayNames={displayNames}
+              account={currentAccount}
+              onAccountChange={switchAccount}
+              dataSources={dataSources}
+              kpiThresholds={kpiThresholds}
+              onOpenSettings={canOpenSettings ? () => setSettingsOpen(true) : undefined}
+            />
           )}
         </div>
       </div>

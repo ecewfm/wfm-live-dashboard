@@ -23,7 +23,7 @@ import UsersTab from './UsersTab'
 import AlarmTab from './AlarmTab'
 import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
-import { includeBreaksOf, includeAuxOf, includeLoggedInOf, accountKeysFor, normalizeAccount, parseExtraNames, zohoStatusCategory, allowanceMinutesOf, ZOHO_AUX_TABLE, ZOHO_LOGGED_IN_STATUS, type ZohoAuxConfig, type ZohoStatusCategory } from '@/lib/zohoAuxShared'
+import { includeBreaksOf, includeAuxOf, includeLoggedInOf, accountKeysFor, normalizeAccount, parseExtraNames, zohoStatusCategory, allowanceMinutesOf, zohoAccountsTextOf, rtaZohoAccountName, ZOHO_AUX_TABLE, ZOHO_LOGGED_IN_STATUS, type ZohoAuxConfig, type ZohoStatusCategory } from '@/lib/zohoAuxShared'
 import { zohoCrmMatchAvailable } from '@/lib/zohoCrmMatch'
 import ZohoCrmMatchTab from './ZohoCrmMatchTab'
 
@@ -416,7 +416,7 @@ interface Props {
   wfLogsEnabled:     boolean              // this account's Zoho Workforce Logs reporting toggle
   rtaLogsEnabled:    boolean              // this account's Zoho "Workforce RTA Logs" webapp-request toggle (a DIFFERENT Zoho intake — see lib/zohoWebappRequest.ts)
   rtaSites:          string[]             // this account's site(s) for THAT webapp-request — can be more than one, unlike zohoLookups.site
-  rtaAccountName:    string               // plain-text override for THAT webapp-request's account name, when accountId doesn't match Zoho's own HR display name ('' = send accountId as-is)
+  rtaAccountName:    string               // wfm_settings.rta_account_name — the older RTA Logs "Zoho Account Name"; only seeds the Zoho Account setting (ds.zohoAccounts) until that's first saved, and is then kept as its first name
   rtaAiCategorizationEnabled: boolean     // this account's opt-in for AI (Gemini) per-breach-type category/sub-category grouping — see lib/geminiClassifier.ts
   rtaReportKpi:      boolean              // this account's automatic RTA Logs reporting considers KPI Tile breaches (SLA, Abandon Rate, etc.) — default true
   rtaReportAgentStatus: boolean           // this account's automatic RTA Logs reporting considers Agent Status breaches — default false
@@ -2259,36 +2259,156 @@ function ZohoLookupField({ label, hint, fieldName, value, onChange, refreshKey, 
   )
 }
 
+// ── Zoho Account — per account (Settings → Zoho Integrations) ───────────────
+// The ONE setting every Zoho feature uses to find this account's people in Zoho
+// (per the user, 2026-11-05): DataSourceConfig.zohoAccounts, one name per line,
+// blank = the display name — see zohoAccountsTextOf() in lib/zohoAuxShared.ts.
+// Saved with everything else by Save Changes. Same matching rule everywhere:
+// case, spaces and punctuation don't matter.
+function ZohoAccountSection({ accountId, displayName, value, onChange }: {
+  accountId: string
+  displayName: string
+  value: string
+  onChange: (v: string) => void
+}) {
+  const [seen, setSeen] = useState<{ name: string; people: number }[] | null>(null)
+  // Zoho's own Accounts list (the field scan's x_Account values) — offered
+  // alongside the accounts in today's Zoho logs, so the right one can be picked
+  // even before anyone on it has logged in today.
+  const [zohoAccountList, setZohoAccountList] = useState<string[]>([])
+  const [draft, setDraft] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/zoho/aux-status').then(r => r.json()).then(d => { if (!cancelled) setSeen(d && !d.error ? d.zohoAccounts ?? [] : []) }).catch(() => { if (!cancelled) setSeen([]) })
+    loadZohoFieldOptions('x_Account').then(o => { if (!cancelled) setZohoAccountList(o.map(x => x.label)) })
+    return () => { cancelled = true }
+  }, [])
+
+  const picked = parseExtraNames(value)
+  const setPicked = (names: string[]) => onChange(names.join('\n'))
+  const add = (name: string) => {
+    const n = name.trim()
+    if (n && !picked.some(p => normalizeAccount(p) === normalizeAccount(n))) setPicked([...picked, n])
+    setDraft('')
+  }
+  const keys = new Set(accountKeysFor(accountId, displayName, picked))
+  const today = seen ?? []
+  const peopleOn = (name: string) => today.find(a => normalizeAccount(a.name) === normalizeAccount(name))?.people
+  const matched = today.filter(a => keys.has(normalizeAccount(a.name)))
+  const matchedPeople = matched.reduce((n, a) => n + a.people, 0)
+  // Every Zoho account known, once each: today's logs first (they have counts), then Zoho's Accounts list.
+  const options = [...new Map([...today.map(a => a.name), ...zohoAccountList]
+    .map(n => [normalizeAccount(n), n] as const).filter(([k]) => k)).values()]
+  const chip = (on: boolean): React.CSSProperties => ({
+    display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 9px', fontSize: 12, borderRadius: 12,
+    border: `1px solid ${on ? 'var(--success)' : 'var(--border,#e1e6e4)'}`,
+    background: on ? 'rgba(72,127,98,.12)' : 'transparent', color: 'var(--text-main)', fontFamily: 'inherit',
+  })
+
+  return (
+    <>
+      <div className="sm-section-title" style={{ marginTop: 20 }}>ZOHO ACCOUNT — {accountId}</div>
+      <p className="sm-desc" style={{ marginBottom: 10 }}>
+        {/* {' '} after a closing tag wherever the text then runs onto the next line — the
+            build drops a plain space there ("Accounton"). */}
+        This account&apos;s name in Zoho — the <strong>Account</strong>{' '}on its people&apos;s ECE Time Tracker
+        records. Everything here that reads Zoho finds this account&apos;s people by it: the{' '}
+        <strong>Hourly</strong> page&apos;s head count, <strong>Zoho Breaks &amp; Aux</strong>, the{' '}
+        <strong>Zoho ↔ CRM</strong> check — and <strong>Workforce RTA Logs</strong>{' '}are sent under its first
+        name. Leave it empty to use this account&apos;s own name, <strong>{displayName || accountId}</strong>{' '}(the
+        title on its KPI card). Pick one — or several — when Zoho calls it something else (e.g. &quot;Rocco
+        Fridge&quot; for Rocco Ridge; Flex is &quot;Flex&quot;, &quot;Flex PartTime&quot; and &quot;Flex-PnOps&quot;).
+        Capitals, spaces and punctuation don&apos;t matter.
+      </p>
+
+      <div aria-label="Zoho accounts used" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+        {picked.length === 0 ? (
+          <span style={{ ...chip(false), borderStyle: 'dashed', color: 'var(--text-muted)' }}>
+            Using this account&apos;s name: <strong style={{ color: 'var(--text-main)' }}>{displayName || accountId}</strong>
+          </span>
+        ) : picked.map(p => {
+          const n = peopleOn(p)
+          return (
+            <span key={p} style={chip(n !== undefined)} data-zoho-account={p}>
+              {p}
+              <span style={{ opacity: .7 }}>{n !== undefined ? `· ${n} today` : '· not in today\'s logs'}</span>
+              <button type="button" aria-label={`Remove ${p}`} title={`Remove ${p}`}
+                onClick={() => setPicked(picked.filter(x => x !== p))}
+                style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', padding: 0, fontSize: 15, lineHeight: 1 }}>
+                ×
+              </button>
+            </span>
+          )
+        })}
+      </div>
+
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input type="text" className="sm-input" aria-label="Add a Zoho account"
+          list={`zoho-accounts-${accountId}`} placeholder="Pick or type a Zoho account…"
+          style={{ flex: 1, textAlign: 'left' }} value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(draft) } }} />
+        <datalist id={`zoho-accounts-${accountId}`}>
+          {options.map(o => {
+            const n = peopleOn(o)
+            return <option key={o} value={o} label={n !== undefined ? `${n} in today's Zoho logs` : 'Zoho account'} />
+          })}
+        </datalist>
+        <button type="button" className="acc-btn acc-btn-cfg" disabled={!draft.trim()} aria-label="Add this Zoho account"
+          style={{ fontSize: 13, padding: '0 14px' }} onClick={() => add(draft)}>
+          <i className="bx bx-plus" /> Add
+        </button>
+      </div>
+
+      {seen && (
+        <div className="sm-metric-sub" role="status" style={{ marginTop: 6, color: matched.length ? 'var(--success)' : 'var(--warning)' }}>
+          {!today.length
+            ? 'No account in today\'s Zoho logs yet — they\'re pulled while an account has Zoho Breaks & Aux on, or the Hourly page is opened.'
+            : matched.length
+              ? `Matches ${matched.map(a => `"${a.name}" (${a.people})`).join(', ')} — ${matchedPeople} in today's Zoho logs.`
+              : `None of these is an account in today's Zoho logs (${today.length} accounts there) — pick one from the list.`}
+        </div>
+      )}
+      {options.length > 0 && (
+        <details style={{ marginTop: 4 }}>
+          <summary className="sm-metric-sub" style={{ cursor: 'pointer' }}>All Zoho accounts — click to add</summary>
+          <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {options.map(o => {
+              const n = peopleOn(o)
+              return (
+                <button key={o} type="button" title={`Add "${o}"`} onClick={() => add(o)}
+                  style={{ ...chip(keys.has(normalizeAccount(o))), cursor: 'pointer' }}>
+                  {o}{n !== undefined && <span style={{ opacity: .7 }}>({n})</span>}
+                </button>
+              )
+            })}
+          </div>
+        </details>
+      )}
+    </>
+  )
+}
+
 // ── Zoho Breaks & Aux — per account (Settings → Zoho Integrations) ──────────
 // Edits DataSourceConfig.zohoAux (saved with everything else by Save Changes).
 // The pull itself and the matching are lib/zohoAux.ts; the rules are
-// lib/zohoAuxShared.ts. "Pull now" runs on the SAVED settings, server-side.
-function ZohoAuxSection({ accountId, displayName, value, onChange }: {
+// lib/zohoAuxShared.ts. Whose breaks show is the Zoho Account section's setting.
+// "Pull now" runs on the SAVED settings, server-side.
+function ZohoAuxSection({ accountId, value, onChange }: {
   accountId: string
-  displayName: string
   value: ZohoAuxConfig | undefined
   onChange: (v: ZohoAuxConfig) => void
 }) {
   const cfg: ZohoAuxConfig = value ?? { enabled: false }
   const set = (patch: Partial<ZohoAuxConfig>) => onChange({ ...cfg, ...patch })
-  const [status, setStatus] = useState<{ pullMinutes?: number; lastPull?: string | null; zohoAccounts?: { name: string; people: number }[] } | null>(null)
+  const [status, setStatus] = useState<{ pullMinutes?: number; lastPull?: string | null } | null>(null)
   const [busy, setBusy] = useState(false)
   const [log, setLog] = useState<string[] | null>(null)
-  // Zoho's own Accounts list (the field scan's x_Account values) — offered in
-  // the "Zoho account(s) to use" picker alongside the accounts in today's logs,
-  // so the right one can be picked even before the next pull.
-  const [zohoAccountList, setZohoAccountList] = useState<string[]>([])
-  const [draftAccount, setDraftAccount] = useState('')
 
   const loadStatus = useCallback(() => {
     fetch('/api/zoho/aux-status').then(r => r.json()).then(d => setStatus(d && !d.error ? d : {})).catch(() => setStatus({}))
   }, [])
   useEffect(() => { loadStatus() }, [loadStatus])
-  useEffect(() => {
-    let cancelled = false
-    loadZohoFieldOptions('x_Account').then(o => { if (!cancelled) setZohoAccountList(o.map(x => x.label)) })
-    return () => { cancelled = true }
-  }, [])
 
   const pullNow = async () => {
     setBusy(true); setLog(null)
@@ -2305,37 +2425,14 @@ function ZohoAuxSection({ accountId, displayName, value, onChange }: {
 
   const lastPull = status?.lastPull ? new Date(status.lastPull).toLocaleTimeString() : 'not pulled yet today'
   const off = !cfg.enabled
-  // ── "Zoho account(s) to use" (ZohoAuxConfig.zohoAccounts, one per line) ──
-  // Empty = this account's own name here. Same matching rule as the pull
-  // (lib/zohoAuxShared.ts): case, spaces and punctuation don't matter.
-  const picked = parseExtraNames(cfg.zohoAccounts)
-  const setPicked = (names: string[]) => set({ zohoAccounts: names.join('\n') })
-  const addZohoAccount = (name: string) => {
-    const n = name.trim()
-    if (n && !picked.some(p => normalizeAccount(p) === normalizeAccount(n))) setPicked([...picked, n])
-    setDraftAccount('')
-  }
-  const keys = new Set(accountKeysFor(accountId, displayName, cfg))
-  const seen = status?.zohoAccounts ?? []
-  const peopleOn = (name: string) => seen.find(a => normalizeAccount(a.name) === normalizeAccount(name))?.people
-  const matched = seen.filter(a => keys.has(normalizeAccount(a.name)))
-  const matchedPeople = matched.reduce((n, a) => n + a.people, 0)
-  // Every Zoho account known, once each: today's logs first (they have counts), then Zoho's Accounts list.
-  const accountOptions = [...new Map([...seen.map(a => a.name), ...zohoAccountList]
-    .map(n => [normalizeAccount(n), n] as const).filter(([k]) => k)).values()]
-  const chip = (on: boolean): React.CSSProperties => ({
-    display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 9px', fontSize: 12, borderRadius: 12,
-    border: `1px solid ${on ? 'var(--success)' : 'var(--border,#e1e6e4)'}`,
-    background: on ? 'rgba(72,127,98,.12)' : 'transparent', color: 'var(--text-main)', fontFamily: 'inherit',
-  })
 
   return (
     <>
       <div className="sm-section-title" style={{ marginTop: 20 }}>ZOHO BREAKS &amp; AUX — {accountId}</div>
       <p className="sm-desc" style={{ marginBottom: 10 }}>
-        Adds a <strong>Zoho Breaks &amp; Aux</strong> section to this account&apos;s Agent Status: everyone
-        whose <strong>account in Zoho</strong> is this account and who is logged in to the ECE Time Tracker right
-        now — on a Zoho break or aux, or <strong>Logged In</strong> on none (just working) — shown under their
+        Adds a <strong>Zoho Breaks &amp; Aux</strong>{' '}section to this account&apos;s Agent Status: everyone
+        whose <strong>account in Zoho</strong> is this account (the <strong>Zoho Account</strong>{' '}above) and who is logged in to the ECE Time Tracker right
+        now — on a Zoho break or aux, or <strong>Logged In</strong>{' '}on none (just working) — shown under their
         Zoho name, with how long they&apos;ve been in it. Logged In and each Zoho type — 15 Minute Break, 1 Hour
         Lunch, Chat, Meeting, … — are in <strong>Status Durations</strong>, so each can have its own thresholds;
         one that runs too long then appears in Breach / Anomalies like any other status.
@@ -2378,81 +2475,6 @@ function ZohoAuxSection({ accountId, displayName, value, onChange }: {
           </tr>
         </tbody>
       </table>
-
-      <div style={{ marginTop: 12, opacity: off ? 0.5 : 1 }}>
-        <div className="sm-metric">Zoho account(s) to use</div>
-        <div className="sm-metric-sub" style={{ marginBottom: 8 }}>
-          Which account in Zoho this account&apos;s people come from (Zoho is pulled once for everyone; this
-          picks whose breaks show here). Leave it empty to use this account&apos;s own name,{' '}
-          <strong>{displayName || accountId}</strong>. Pick one — or several — when Zoho calls it something
-          else (e.g. &quot;Rocco Fridge&quot; for Rocco Ridge). Capitals, spaces and punctuation don&apos;t matter.
-        </div>
-
-        <div aria-label="Zoho accounts used" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-          {picked.length === 0 ? (
-            <span style={{ ...chip(false), borderStyle: 'dashed', color: 'var(--text-muted)' }}>
-              Using this account&apos;s name: <strong style={{ color: 'var(--text-main)' }}>{displayName || accountId}</strong>
-            </span>
-          ) : picked.map(p => {
-            const n = peopleOn(p)
-            return (
-              <span key={p} style={chip(n !== undefined)} data-zoho-account={p}>
-                {p}
-                <span style={{ opacity: .7 }}>{n !== undefined ? `· ${n} today` : '· not in today\'s logs'}</span>
-                <button type="button" disabled={off} aria-label={`Remove ${p}`} title={`Remove ${p}`}
-                  onClick={() => setPicked(picked.filter(x => x !== p))}
-                  style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', padding: 0, fontSize: 15, lineHeight: 1 }}>
-                  ×
-                </button>
-              </span>
-            )
-          })}
-        </div>
-
-        <div style={{ display: 'flex', gap: 6 }}>
-          <input type="text" className="sm-input" aria-label="Add a Zoho account" disabled={off}
-            list={`zoho-accounts-${accountId}`} placeholder="Pick or type a Zoho account…"
-            style={{ flex: 1, textAlign: 'left' }} value={draftAccount}
-            onChange={e => setDraftAccount(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addZohoAccount(draftAccount) } }} />
-          <datalist id={`zoho-accounts-${accountId}`}>
-            {accountOptions.map(o => {
-              const n = peopleOn(o)
-              return <option key={o} value={o} label={n !== undefined ? `${n} in today's Zoho logs` : 'Zoho account'} />
-            })}
-          </datalist>
-          <button type="button" className="acc-btn acc-btn-cfg" disabled={off || !draftAccount.trim()} aria-label="Add this Zoho account"
-            style={{ fontSize: 13, padding: '0 14px' }} onClick={() => addZohoAccount(draftAccount)}>
-            <i className="bx bx-plus" /> Add
-          </button>
-        </div>
-
-        {status && (
-          <div className="sm-metric-sub" role="status" style={{ marginTop: 6, color: matched.length ? 'var(--success)' : 'var(--warning)' }}>
-            {!seen.length
-              ? 'No account in today\'s Zoho logs yet — "Pull now" shows which account field Zoho has.'
-              : matched.length
-                ? `Showing people from ${matched.map(a => `"${a.name}" (${a.people})`).join(', ')} — ${matchedPeople} in today's Zoho logs.`
-                : `None of these is an account in today's Zoho logs (${seen.length} accounts there) — pick one from the list.`}
-          </div>
-        )}
-        {accountOptions.length > 0 && (
-          <details style={{ marginTop: 4 }}>
-            <summary className="sm-metric-sub" style={{ cursor: 'pointer' }}>All Zoho accounts — click to add</summary>
-            <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {accountOptions.map(o => {
-                const n = peopleOn(o)
-                return (
-                  <button key={o} type="button" disabled={off} title={`Add "${o}"`} onClick={() => addZohoAccount(o)}
-                    style={{ ...chip(keys.has(normalizeAccount(o))), cursor: off ? 'default' : 'pointer' }}>
-                    {o}{n !== undefined && <span style={{ opacity: .7 }}>({n})</span>}
-                  </button>
-                )
-              })}
-            </div>
-          </details>
-        )}
-      </div>
 
       <div style={{ marginTop: 12, opacity: off ? 0.5 : 1 }}>
         <div className="sm-metric">Extra Zoho names (optional)</div>
@@ -2529,7 +2551,17 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
 
   const [kpi, setKpi]   = useState<Thresholds>(JSON.parse(JSON.stringify(kpiThresholds)))
   const [stat, setStat] = useState<StatusThresholds>(JSON.parse(JSON.stringify(statusThresholds)))
-  const [ds, setDs]     = useState<DataSourceConfig>(JSON.parse(JSON.stringify(dataSource)))
+  // The Zoho Account setting starts from the older per-feature fields while it has never been
+  // saved (zohoAccountsTextOf), so the first Save Changes carries them over unchanged.
+  const [ds, setDs]     = useState<DataSourceConfig>(() => {
+    const d: DataSourceConfig = JSON.parse(JSON.stringify(dataSource))
+    if (typeof d.zohoAccounts !== 'string') d.zohoAccounts = zohoAccountsTextOf(d, rtaAccountName)
+    return d
+  })
+  const displayName = accounts.find(a => a.id === accountId)?.display_name || accountId
+  const zohoAccountNames = parseExtraNames(ds.zohoAccounts)
+  // What Workforce RTA Logs send as the account — the Zoho Account's first name, else the display name.
+  const rtaAccount = rtaZohoAccountName(zohoAccountNames, displayName, accountId)
   const [cliqChan, setCliqChan]     = useState(cliqChannel)
   const [cliqGlobal, setCliqGlobal] = useState<CliqGlobalSettings>(JSON.parse(JSON.stringify(cliqGlobalSettings)))
   // Status Durations search — see statusMatches() below.
@@ -2543,7 +2575,6 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
   const [wfLogsOn, setWfLogsOn]         = useState(wfLogsEnabled)
   const [rtaLogsOn, setRtaLogsOn]       = useState(rtaLogsEnabled)
   const [rtaSitesOn, setRtaSitesOn]     = useState<string[]>(rtaSites)
-  const [rtaAcctName, setRtaAcctName]   = useState(rtaAccountName)
   const [rtaAiCatOn, setRtaAiCatOn]     = useState(rtaAiCategorizationEnabled)
   const [rtaReportKpiOn, setRtaReportKpiOn]             = useState(rtaReportKpi)
   const [rtaReportAgentStatusOn, setRtaReportAgentStatusOn] = useState(rtaReportAgentStatus)
@@ -2713,7 +2744,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          accountId, sites: rtaSitesOn, zohoAccountName: rtaAcctName || undefined,
+          accountId, sites: rtaSitesOn, zohoAccountName: rtaAccount,
           aiEnabled: rtaAiCatOn, ds, kpiThresholds: kpi, statusThresholds: stat,
           reportAgentStatus: rtaReportAgentStatusOn,
         }),
@@ -3695,7 +3726,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             })()}
 
             {tab === 'zohomatch' && (
-              <ZohoCrmMatchTab accountId={accountId} ds={ds} setDs={setDs}
+              <ZohoCrmMatchTab accountId={accountId} ds={ds} setDs={setDs} zohoAccounts={ds.zohoAccounts ?? ''}
                 knownCrmStatuses={[...currentStatusRows, ...pastStatusRows]}
                 onOpenZohoSettings={() => setTab('cliq')} />
             )}
@@ -3844,6 +3875,10 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   </button>
                 </div>
 
+                <ZohoAccountSection accountId={accountId} displayName={displayName}
+                  value={ds.zohoAccounts ?? ''}
+                  onChange={v => setDs(prev => ({ ...prev, zohoAccounts: v, ...(prev.zohoAux?.zohoAccounts ? { zohoAux: { ...prev.zohoAux, zohoAccounts: undefined } } : {}) }))} />
+
                 <div className="sm-section-title" style={{ marginTop: 20 }}>CLIQ CHANNEL — {accountId}</div>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
                   Enter the <strong>Unique Name</strong> of the Zoho Cliq channel for this account
@@ -3908,7 +3943,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   A SEPARATE Zoho intake from Workforce Logs above — submits a &quot;Workforce RTA
                   Logs&quot; webapp request (account-wide, category fixed to Service Level &amp; Volume
                   Management / Understaffing Alert unless AI Categorization below picks a better one)
-                  instead of a Workforce Logs record. Just the account&apos;s own id, its Site(s), and a
+                  instead of a Workforce Logs record. Just the account&apos;s name in Zoho, its Site(s), and a
                   plain-text breach summary — no Zoho lookup IDs to resolve.
                 </p>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>
@@ -3962,17 +3997,13 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                     next time — it will <strong>not</strong> fall back to sending the fixed category below.
                   </p>
                 )}
-                <p className="sm-desc" style={{ marginTop: 10, marginBottom: 6 }}>
-                  <strong>Zoho Account Name</strong> — Zoho&apos;s script resolves the account by
-                  matching this against its own HR/Accounts list by NAME, not by <strong>{accountId}</strong>
-                  &apos;s id. Leave blank to send <strong>{accountId}</strong> as-is; fill this in only
-                  if Zoho rejects it with &quot;Account not found in HR&quot; — e.g. the id
-                  &quot;guardianbikes&quot; needs &quot;Guardian Bikes&quot; here to match Zoho&apos;s
-                  own record.
+                <p className="sm-desc" style={{ marginTop: 10, marginBottom: 10 }}>
+                  <strong>Account</strong> — sent as <strong>&quot;{rtaAccount}&quot;</strong>: the{' '}
+                  <strong>Zoho Account</strong>{' '}set above (its first name), else this account&apos;s own
+                  name. Zoho&apos;s script resolves it against its HR/Accounts list by NAME, so if Zoho
+                  rejects it with &quot;Account not found in HR&quot;, set the Zoho Account above to
+                  Zoho&apos;s own spelling (e.g. &quot;Guardian Bikes&quot;).
                 </p>
-                <input type="text" className="sm-input" placeholder={`Zoho account name (defaults to "${accountId}")`}
-                  style={{ width: '100%', marginBottom: 10 }}
-                  value={rtaAcctName} onChange={e => setRtaAcctName(e.target.value)} />
                 <p className="sm-desc" style={{ marginTop: 4, marginBottom: 6 }}>
                   <strong>Site(s)</strong> — Zoho&apos;s own processing script rejects this submission
                   with no site at all. An account can span more than one (check all that apply); type
@@ -3998,7 +4029,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                   There&apos;s no Zoho sandbox for this intake, so the button below sends a real,
                   clearly-tagged <code>[TEST]</code> submission for <strong>{accountId}</strong> — check
                   Zoho&apos;s own list to confirm it arrived (safe to delete it there afterward). This is
-                  test-only — it does <strong>not</strong> save the Zoho Account Name or Site(s) above;
+                  test-only — it does <strong>not</strong> save the Zoho Account or Site(s) above;
                   click <strong>Save Changes</strong> below to persist them.{' '}
                   {rtaAiCatOn && (
                     <>Since AI Categorization is on, this classifies this account&apos;s REAL current
@@ -4033,7 +4064,6 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 )}
 
                 <ZohoAuxSection accountId={accountId}
-                  displayName={accounts.find(a => a.id === accountId)?.display_name || accountId}
                   value={ds.zohoAux}
                   onChange={z => setDs(prev => ({ ...prev, zohoAux: z }))} />
 
@@ -4097,7 +4127,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
             ) : <div />}
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, rtaAcctName, rtaAiCatOn, rtaReportKpiOn, rtaReportAgentStatusOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
+              <button className="sm-btn-save" onClick={() => { onSave(kpi, stat, ds, cliqChan, wfLogsOn, zohoLu, alarmSnd, rtaLogsOn, rtaSitesOn, zohoAccountNames[0] ?? '', rtaAiCatOn, rtaReportKpiOn, rtaReportAgentStatusOn); onSaveCliqGlobal(cliqGlobal); onClose() }}>
                 <i className="bx bx-save" /> Save Changes
               </button>
             </div>

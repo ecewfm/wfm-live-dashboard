@@ -384,6 +384,13 @@ export interface DataSourceConfig {
   // lib/settings.ts.
   zohoAux?: ZohoAuxConfig
 
+  // This account's name(s) in Zoho, one per line — Settings → Zoho Integrations
+  // → Zoho Account (per the user, 2026-11-05). The ONE account setting every Zoho
+  // feature uses; '' = the display name. Undefined = never saved: the older
+  // per-feature fields are read instead. Always read through zohoAccountsTextOf()
+  // / zohoAccountNamesOf() in lib/zohoAuxShared.ts.
+  zohoAccounts?: string
+
   // Zoho ↔ CRM status match (Settings → Zoho ↔ CRM, per the user 2026-11-04):
   // which Zoho person is which CRM agent, which CRM statuses mean the same as
   // each Zoho status, and when a mismatch becomes a breach. Usable only while

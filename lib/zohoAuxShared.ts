@@ -57,9 +57,9 @@ export interface ZohoAuxConfig {
   // Logged in to the Time Tracker and on no break or aux — just working
   // (ZOHO_LOGGED_IN_STATUS). Default true. Per the user, 2026-11-03.
   includeLoggedIn?: boolean
-  // This account's name in Zoho (the Account on its people's Zoho records),
-  // one or more, one per line — only when it isn't the same as the account's
-  // display name here. Blank = the display name (and the account id).
+  // LEGACY — the old "Zoho account(s) to use" picker of this section. Replaced by
+  // the account-wide DataSourceConfig.zohoAccounts (see zohoAccountsTextOf
+  // below); still read while that has never been saved.
   zohoAccounts?: string
   // Extra Zoho names to show whatever their Zoho account is, one per line —
   // someone who works this account but is filed under another one in Zoho.
@@ -218,12 +218,40 @@ export function pickAccountField(rows: Record<string, unknown>[]): string | null
 /** Account names compared ignoring case, spaces and punctuation ("Guardian Bikes" = "guardianbikes"). */
 export const normalizeAccount = (s: string | null | undefined) => normalizeName(s).replace(/[^a-z0-9]/g, '')
 
-/** The names this account goes by in Zoho, normalized: its "Zoho account(s) to use" setting when set,
- *  else its display name here and its id. */
-export function accountKeysFor(accountId: string, displayName: string | undefined, cfg: ZohoAuxConfig | undefined): string[] {
-  const set = parseExtraNames(cfg?.zohoAccounts)
-  const names = set.length ? set : [displayName || '', accountId]
-  return [...new Set(names.map(normalizeAccount).filter(Boolean))]
+// ── This account's name(s) in Zoho — ONE setting for every Zoho feature ──────
+// Per the user (2026-11-05): Settings → Zoho Integrations → "Zoho Account",
+// saved as DataSourceConfig.zohoAccounts (one name per line — Flex is three in
+// Zoho: "Flex", "Flex PartTime", "Flex-PnOps"). Blank = the account's display
+// name, the title on its KPI card. Read by Zoho Breaks & Aux, the Zoho ↔ CRM
+// check, the Hourly page's head counts and (its first name) Workforce RTA Logs.
+// It replaced two older per-feature fields — Breaks & Aux's "Zoho account(s) to
+// use" (zohoAux.zohoAccounts) and RTA Logs' "Zoho Account Name"
+// (wfm_settings.rta_account_name). Until the new one has been saved for an
+// account, those are read instead, in that order, so nothing changes before then.
+export function zohoAccountsTextOf(
+  ds: { zohoAccounts?: string; zohoAux?: ZohoAuxConfig } | null | undefined, legacyRtaAccountName?: string | null,
+): string {
+  if (typeof ds?.zohoAccounts === 'string') return ds.zohoAccounts
+  return ds?.zohoAux?.zohoAccounts || legacyRtaAccountName || ''
+}
+
+/** The Zoho Account setting as names — [] = use the display name. */
+export function zohoAccountNamesOf(
+  ds: { zohoAccounts?: string; zohoAux?: ZohoAuxConfig } | null | undefined, legacyRtaAccountName?: string | null,
+): string[] {
+  return parseExtraNames(zohoAccountsTextOf(ds, legacyRtaAccountName))
+}
+
+/** The names this account goes by in Zoho, normalized: its Zoho Account setting when set
+ *  (zohoAccountNamesOf), else its display name here and its id. */
+export function accountKeysFor(accountId: string, displayName: string | undefined, names: string[]): string[] {
+  const list = names.length ? names : [displayName || '', accountId]
+  return [...new Set(list.map(normalizeAccount).filter(Boolean))]
+}
+
+/** The account a Workforce RTA Log names: the first Zoho Account, else the display name, else the id. */
+export function rtaZohoAccountName(names: string[], displayName: string | undefined, accountId: string): string {
+  return names[0] || displayName || accountId
 }
 
 /** Everyone in Zoho's logs on one of `accountKeys`: normalized name → their Zoho name. */
@@ -289,7 +317,7 @@ export interface CurrentAux {
 }
 
 // A session still open after this long is a forgotten logout, not a shift.
-const MAX_OPEN_SESSION_HOURS = 18
+export const MAX_OPEN_SESSION_HOURS = 18
 // A break may be stamped a moment before its session's own login.
 const START_TOLERANCE_MS = 2 * 60 * 1000
 
