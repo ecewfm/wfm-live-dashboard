@@ -28,6 +28,7 @@ import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
 import { includeBreaksOf, includeAuxOf, includeLoggedInOf, includeNotLoggedInOf, accountKeysFor, normalizeAccount, parseExtraNames, zohoStatusCategory, allowanceMinutesOf, zohoAccountsTextOf, rtaZohoAccountName, ZOHO_AUX_TABLE, ZOHO_LOGGED_IN_STATUS, ZOHO_MISSING_STATUS, ZOHO_LEFT_EARLY_STATUS, type ZohoAuxConfig, type ZohoStatusCategory } from '@/lib/zohoAuxShared'
 import { zohoCrmMatchAvailable } from '@/lib/zohoCrmMatch'
+import { readsZohoKpis } from '@/lib/zohoWorkforce'
 import ZohoCrmMatchTab from './ZohoCrmMatchTab'
 
 type Tab = 'kpi' | 'status' | 'agents' | 'datasource' | 'accounts' | 'cliq' | 'zohomatch' | 'users' | 'alarm'
@@ -4186,6 +4187,23 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                 <ZohoAccountSection accountId={accountId} displayName={displayName}
                   value={ds.zohoAccounts ?? ''}
                   onChange={v => setDs(prev => ({ ...prev, zohoAccounts: v, ...(prev.zohoAux?.zohoAccounts ? { zohoAux: { ...prev.zohoAux, zohoAccounts: undefined } } : {}) }))} />
+
+                {/* Accounts without a CRM (their card reads the Zoho KPI tiles): the
+                    tiles come from Workforce REST's timeline — lib/workforceRest.ts. */}
+                {readsZohoKpis(ds) && (
+                  <>
+                    <div className="sm-section-title" style={{ marginTop: 20 }}>WORKFORCE REST ACCOUNT — {accountId}</div>
+                    <p className="sm-desc" style={{ marginBottom: 10 }}>
+                      This card&apos;s Attendance &amp; Adherence tiles come from Workforce REST&apos;s Adherence timeline:
+                      its schedule (Agent Manager&apos;s assigned weeks) against who is logged in. Enter this account&apos;s
+                      name in Workforce REST only if it differs from &quot;{displayName}&quot; (blank uses that name). When
+                      Workforce REST can&apos;t answer, the tiles fall back to Zoho&apos;s schedule, and the Zoho sync log says why.
+                    </p>
+                    <input type="text" className="sm-input" style={{ width: '100%', textAlign: 'left' }}
+                      placeholder={displayName} value={ds.restAccount ?? ''}
+                      onChange={e => setDs(prev => ({ ...prev, restAccount: e.target.value }))} />
+                  </>
+                )}
 
                 <div className="sm-section-title" style={{ marginTop: 20 }}>CLIQ CHANNEL — {accountId}</div>
                 <p className="sm-desc" style={{ marginBottom: 10 }}>

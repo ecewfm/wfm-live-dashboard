@@ -57,6 +57,7 @@ import {
   type ZohoKpiRow, type ZohoKpiValues,
 } from './zohoWorkforce'
 import type { ScheduleCacheRow } from './hourlyReport'
+import { fetchRestKpis, restAccountName, restKpiConfig, type RestKpi } from './workforceRest'
 
 const CREATOR_API_BASE = 'https://www.zohoapis.com/creator/v2.1'
 export const ZOHO_AUX_CACHE_TABLE = 'wfm_zoho_activity'
@@ -300,6 +301,9 @@ const isMissingTable = (e: unknown) => /wfm_zoho_crm_mismatch|PGRST205|does not 
 const KPI_TABLE_HINT = 'run sql/zoho_only_accounts.sql once in Supabase (SQL Editor) to create it'
 const isKpiTableMissing = (e: unknown) => /wfm_zoho_kpis|PGRST205|does not exist|schema cache/i.test(e instanceof Error ? e.message : String(e))
 const pctOf = (n: number | null) => n === null ? '--' : `${Math.round(n * 10) / 10}%`
+/** The sync log's one-line account of an account's tiles. */
+const kpiSummary = (v: ZohoKpiValues) =>
+  `${v.shiftsToday} shift(s) today${v.onLeave ? ` (${v.onLeave} on leave)` : ''}, ${v.scheduledNow} scheduled now, ${v.loggedIn} logged in, ${v.notLoggedIn} not logged in, attendance ${pctOf(v.attendance)}, absenteeism ${pctOf(v.absenteeism)} (${v.noShows} no-show), adherence ${pctOf(v.adherence)}, ${v.lateToday} late`
 
 /** Every account's cached shifts for `dates`, the due ones pulled first — loadZohoSchedules() in lib/hourlyReportServer.ts. */
 export type ScheduleLoader = (dates: string[], opts: { now: number; log: (m: string) => void },
@@ -464,6 +468,14 @@ export async function runZohoAuxSync(
     return { log, pulled: [], accounts: [] }
   }
 
+  const displayNames = await store.accountNames()
+  // The Zoho-KPI accounts' tiles from Workforce REST (lib/workforceRest.ts) —
+  // asked now so the call runs alongside this run's Zoho pulls. Each account
+  // uses them below when vCORE answered for it, else keeps Zoho's own tiles.
+  const restPending: Promise<Map<string, RestKpi>> | null = kpiOn.length && restKpiConfig()
+    ? fetchRestKpis(kpiOn.map(a => ({ key: a.id, name: restAccountName(a.ds, displayNames[a.id] || a.id) })), { now })
+    : null
+
   const today = dateInTz(now, PRIMARY_TZ), yesterday = addDays(today, -1)
   const { sync, pulled } = await refreshZohoLogDates(
     [[today, ZOHO_AUX_PULL_MINUTES], [yesterday, YESTERDAY_PULL_MINUTES]],
@@ -475,7 +487,6 @@ export async function runZohoAuxSync(
   const { sessions, breaks } = await store.readCache([yesterday, today])
   const current = computeCurrentAux(sessions, breaks, now)
   const seen = zohoAccountsSeen(sessions, breaks)
-  const displayNames = await store.accountNames()
   // How old the Zoho data behind `current` is — the Zoho ↔ CRM check pauses past ZOHO_MATCH_MAX_ZOHO_AGE_MIN,
   // and the Zoho KPI tiles stop being written (so the card shows DATA NOT IN SYNC rather than old numbers).
   const zohoAgeMin = pulled.includes(today) ? 0 : age(today) / 60000
@@ -495,6 +506,7 @@ export async function runZohoAuxSync(
   const sessionsByPerson = byPerson(sessions)
   const breaksByPerson = byPerson(breaks)
   const leaves = leavesOf(sessions)
+  const rest = restPending ? await restPending : null
 
   const accounts: AuxSyncResult['accounts'] = []
   for (const a of using) {
@@ -534,17 +546,24 @@ export async function runZohoAuxSync(
       }
 
       if (readsZohoKpis(a.ds)) {
-        if (!schedules) parts.push('KPI tiles not updated (no schedules)')
-        else if (!zohoFresh) parts.push(`KPI tiles not updated — Zoho's data is ${Number.isFinite(zohoAgeMin) ? `${Math.round(zohoAgeMin)} min old` : 'not pulled today yet'}`)
-        else {
-          const v = computeAccountKpis({ shifts, sessionsByPerson, breaksByPerson, current, peopleOnAccount: people.keys(), leaves, now })
+        const fromRest = rest?.get(a.id)
+        const writeKpis = async (v: ZohoKpiValues, from: string) => {
           entry.kpis = v
           try {
             await store.replaceKpiRows(a.id, zohoKpiRows(a.id, v, nowIso))
-            parts.push(`KPIs: ${v.shiftsToday} shift(s) today${v.onLeave ? ` (${v.onLeave} on leave)` : ''}, ${v.scheduledNow} scheduled now, ${v.loggedIn} logged in, ${v.notLoggedIn} not logged in, attendance ${pctOf(v.attendance)}, absenteeism ${pctOf(v.absenteeism)} (${v.noShows} no-show), adherence ${pctOf(v.adherence)}, ${v.lateToday} late`)
+            parts.push(`KPIs${from}: ${kpiSummary(v)}`)
           } catch (e) {
             parts.push(`KPI tiles NOT written — ${isKpiTableMissing(e) ? `their table is missing, ${KPI_TABLE_HINT}` : e instanceof Error ? e.message : String(e)}`)
           }
+        }
+        if (fromRest?.ok) {
+          // vCORE's timeline is the basis (it checked its own Zoho data's age).
+          await writeKpis(fromRest.values, ` from Workforce REST "${fromRest.account}" (${fromRest.agents} on its timeline)`)
+        } else {
+          if (fromRest) parts.push(`Workforce REST: ${fromRest.reason} — using Zoho's schedule`)
+          if (!schedules) parts.push('KPI tiles not updated (no schedules)')
+          else if (!zohoFresh) parts.push(`KPI tiles not updated — Zoho's data is ${Number.isFinite(zohoAgeMin) ? `${Math.round(zohoAgeMin)} min old` : 'not pulled today yet'}`)
+          else await writeKpis(computeAccountKpis({ shifts, sessionsByPerson, breaksByPerson, current, peopleOnAccount: people.keys(), leaves, now }), '')
         }
       }
 

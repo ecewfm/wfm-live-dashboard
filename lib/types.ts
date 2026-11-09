@@ -391,6 +391,12 @@ export interface DataSourceConfig {
   // / zohoAccountNamesOf() in lib/zohoAuxShared.ts.
   zohoAccounts?: string
 
+  // The account's name in Workforce REST (vCORE), for a card that reads the
+  // Zoho KPI tiles — Settings → Zoho Integrations → Workforce REST Account (per
+  // the user, 2026-11-09). Its tiles then come from vCORE's Adherence timeline;
+  // '' / undefined = the display name. See lib/workforceRest.ts.
+  restAccount?: string
+
   // Zoho ↔ CRM status match (Settings → Zoho ↔ CRM, per the user 2026-11-04):
   // which Zoho person is which CRM agent, which CRM statuses mean the same as
   // each Zoho status, and when a mismatch becomes a breach. Usable only while

@@ -1103,6 +1103,40 @@ ACCOUNTS FROM ZOHO** scans Zoho and adds them in one go.
   Status Durations / Alarm on the production build with live read-only data and
   every write intercepted (33, light + dark).
 
+## Zoho-only cards take their tiles from Workforce REST (2026-11-09)
+
+The client wants the no-CRM accounts' card to agree with Workforce REST (vCORE):
+vCORE's schedule (Agent Manager's assigned weeks + overrides — what its Adherence
+timeline and Coverage Heatmap use) as the basis of Scheduled Now / the head
+count, against the agents actually logged in on that timeline.
+
+- **Where** — `lib/workforceRest.ts` (`fetchRestKpis`), called once per run by
+  `runZohoAuxSync` (`lib/zohoAux.ts`) for every account that `readsZohoKpis`,
+  started alongside the Zoho pulls. For each such account the sync writes vCORE's
+  values through the SAME `zohoKpiRows` (same table, ids, tile keys, thresholds,
+  hourly history) — the card, Cliq picture and hourly snapshot need no change.
+- **vCORE's side** — `POST /api/live/kpis` in workforce-rest (`src/lib/live-kpis.ts`),
+  one request for all accounts `{accounts:[{key,name}]}`, answering ZohoKpiValues
+  per key. Built from vCORE's day timeline and its Agent Statuses card per agent.
+  Rules (the user's choices, 2026-11-09): Scheduled Now = shift covers now (rest
+  day / leave out); **Logged In = scheduled agents with a live session only**, so
+  Logged In + Not Logged In = Scheduled Now; On Break = break/lunch now; Adherence =
+  vCORE's own (Σ adherent ÷ Σ scheduled, today so far); Attendance / Absenteeism /
+  Late Today = THIS app's rules (`computeAccountKpis`) applied to vCORE's schedule.
+- **Matching** — `DataSourceConfig.restAccount` (Settings → Zoho Integrations →
+  Workforce REST Account, shown only on a Zoho-KPI card), else the display name;
+  vCORE compares names ignoring case/punctuation, "&" = "and", then its slug.
+- **Fallback (the user's choice)** — vCORE not configured, unreachable, over 25 s,
+  no such account, malformed values, or vCORE's own Zoho data 15+ min old → that
+  account keeps the tiles worked out from Zoho's schedule, exactly as before, and
+  the sync log line says `Workforce REST: <reason> — using Zoho's schedule`. A
+  REST-fed line reads `KPIs from Workforce REST "<name>" (<n> on its timeline): …`.
+- **Env (server-only, both must be set or it's off)** — `WORKFORCE_REST_URL` (vCORE's
+  base URL) and `WORKFORCE_REST_KPI_SECRET` (= vCORE's `WFM_LIVE_KPI_SECRET`; vCORE's
+  route is closed — 503 — until that is set there).
+- Not changed: the Agent Status section under the card still lists "scheduled but
+  not logged in" from Zoho's schedule; CRM accounts are untouched.
+
 ## Settings Save no longer writes the default Cliq settings (fixed 2026-11-05)
 
 Found while testing the above: the Dashboard loads the global Cliq settings
