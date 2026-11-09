@@ -1037,6 +1037,72 @@ Worst) and which KPI groups to include. Saved as `DataSourceConfig.hourlyCliq`
   written, Cliq faked); the Settings section, send-now, Save and the Loggings row on
   the production build (25, light + dark); the Hourly page re-run (42).
 
+## Accounts run from Zoho alone — no CRM (2026-11-09)
+
+Per the user (the Hermes idea "WFM Live & REST Adherence Alert"): accounts with no
+CRM on WFM Live get their KPI card and Agent Status from Zoho — the Daily
+Schedules and the Time Tracker logs/breaks — and Settings → Accounts → **ADD
+ACCOUNTS FROM ZOHO** scans Zoho and adds them in one go.
+
+- **The card** — one KPI group "Attendance & Adherence" (`zohoKpiGroup()`), its
+  tiles bound to `wfm_zoho_kpis` (tall: `account_id` / `tile_key` / `value` /
+  `updated_at`) like any KPI table, so the card, breaches, Cliq picture, Hourly
+  page and "DATA NOT IN SYNC" all work unchanged. Tiles: Scheduled Now, Logged In,
+  On Break (breaks & lunch only — on Earnin / Flex most "aux" is Chat / Email /
+  Phones, i.e. the work), Not Logged In, Attendance %, Absenteeism %, Adherence %,
+  Late Today. The counts are information only (`isInfoKpi`, `lib/utils.ts`:
+  warn/crit ≥ `KPI_INFO_THRESHOLD` → plain colour, no "Target", never breach); the
+  % use vCORE's lines (95 / 85; Absenteeism 5 / 10).
+- **The rules** (`lib/zohoWorkforce.ts`, pure): "today" = shifts on today's Zoho
+  schedule (by schedule date, ET) + yesterday's still running. Attendance = time
+  logged in ÷ scheduled time so far. Absenteeism = no login during a shift that's
+  been on 15+ min (`ABSENT_AFTER_MIN`) ÷ such shifts. Adherence (people who worked
+  only, like vCORE's computeAdherence) = scheduled time minus not-logged-in pieces
+  > 60 s (V2) minus break/lunch time past the allowance in its name + 60 s, ÷
+  scheduled time. Aux isn't judged (no plan to compare with). Late = first login
+  > 60 s after the start. A shift whose day has a leave in the time log's Note
+  (`[VL in Hours][8]`, vCORE's marker — `leaveCodeOf`, parsed into
+  `ZohoSession.leave` with `.date` since this change) and no login is leave:
+  out of every tile. vCORE's separate approved-leaves report is NOT read. The
+  Note format is from vCORE's doc, not yet seen live — the pull log now says
+  "N leave note(s)" per source; 0 everywhere for days = check the format.
+- **Agent Status** — the Zoho Breaks & Aux section, plus (new switch
+  `zohoAux.includeNotLoggedIn`, default OFF so Guardian Bikes / Rocco Ridge are
+  unchanged) people scheduled now and not logged in: **Not Logged In** (since the
+  shift start) or **Logged Out Early** (since the logout) — category `'off'`, red
+  pill, own Status Durations rows (5 / 15 min to start). `scheduledOffNow()`.
+- **The minute job** — `runZohoAuxSync()` (`lib/zohoAux.ts`) now runs every
+  account with Breaks & Aux on OR whose card reads `wfm_zoho_kpis`
+  (`readsZohoKpis`). It loads schedules (`loadZohoSchedules()` in
+  `lib/hourlyReportServer.ts`, imported dynamically — that file imports this one;
+  today every 30 min, yesterday 6 h, same lease) only while some account needs
+  them, writes each account's tile rows, and skips writing while Zoho's data is
+  15+ min old (so the card goes DATA NOT IN SYNC instead of showing old numbers).
+- **Adding** — `lib/zohoOnlyAccounts.ts` + `/api/zoho/accounts-scan` (GET) and
+  `/api/zoho/accounts-add` (POST `{names}`), both `requireRole(['superuser'])`.
+  The scan lists every Zoho account on today's schedule / in today's logs with
+  counts and whether a WFM Live account (by its Zoho Account keys) already has it;
+  internal departments (`looksInternal`: IT…, Finance…, Floating, BENCH Paid,
+  Utility, Security, …) start unticked. Adding writes `wfm_settings`
+  (`zohoOnlyDataSource`, `zohoOnlyStatusThresholds`, a two-row
+  `zohoOnlyDashboardLayout`), mutes the new ids in the alarm, then inserts
+  `wfm_accounts` (id from the Zoho name, `accountIdFor`, never reusing a removed
+  account's id — e.g. 7Cs vs the removed `7cs-live`). Refuses until the SQL below
+  has been run. Live scan 2026-11-09: 63 Zoho accounts, 14 covered, 31 ticked.
+- **Alarm** — `wfm_alarm_settings.muted_accounts` (Settings → Alarm → "Accounts
+  it rings for"): accounts the global alarm never rings for. Evaluated anyway
+  (baselines advance), only the events are dropped (`Dashboard.tsx`). New Zoho
+  accounts start muted — their % change every minute and the alarm rings on every
+  change of a breaching value.
+- `sql/zoho_only_accounts.sql` (**must be run once**): `wfm_zoho_kpis` (RLS off,
+  like `wfm_zoho_agent_status`) + `muted_accounts`.
+- Verified: rules + the real sync with fakes (68), read-only dry run on
+  production's caches (scan + Walmart / Earnin / Resident Home / Minoan … tiles,
+  ~2 ms an account), the earlier Zoho / Hourly suites re-run (30, 45, 26, 59, 42,
+  117), and the card / Agent Status / Settings → Accounts / Zoho Integrations /
+  Status Durations / Alarm on the production build with live read-only data and
+  every write intercepted (33, light + dark).
+
 ## Settings Save no longer writes the default Cliq settings (fixed 2026-11-05)
 
 Found while testing the above: the Dashboard loads the global Cliq settings

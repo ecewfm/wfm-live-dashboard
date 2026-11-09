@@ -57,6 +57,11 @@ export interface ZohoAuxConfig {
   // Logged in to the Time Tracker and on no break or aux — just working
   // (ZOHO_LOGGED_IN_STATUS). Default true. Per the user, 2026-11-03.
   includeLoggedIn?: boolean
+  // Scheduled right now (Zoho Daily Schedules) but not logged in — never came
+  // in (ZOHO_MISSING_STATUS) or logged out before the shift ended
+  // (ZOHO_LEFT_EARLY_STATUS). Default OFF; on for the accounts added from
+  // Zoho (lib/zohoWorkforce.ts). Per the user, 2026-11-09.
+  includeNotLoggedIn?: boolean
   // LEGACY — the old "Zoho account(s) to use" picker of this section. Replaced by
   // the account-wide DataSourceConfig.zohoAccounts (see zohoAccountsTextOf
   // below); still read while that has never been saved.
@@ -69,10 +74,16 @@ export interface ZohoAuxConfig {
 export const includeBreaksOf = (c?: ZohoAuxConfig | null) => c?.includeBreaks !== false
 export const includeAuxOf    = (c?: ZohoAuxConfig | null) => c?.includeAux !== false
 export const includeLoggedInOf = (c?: ZohoAuxConfig | null) => c?.includeLoggedIn !== false
+export const includeNotLoggedInOf = (c?: ZohoAuxConfig | null) => c?.includeNotLoggedIn === true
 
 /** The status of someone logged in to the Time Tracker who is on no break or
  *  aux — its own Status Durations entry, like each Zoho break/aux type. */
 export const ZOHO_LOGGED_IN_STATUS = 'Logged In'
+
+/** Scheduled now, and not logged in since the shift started — late, or not coming. */
+export const ZOHO_MISSING_STATUS = 'Not Logged In'
+/** Scheduled now, logged in earlier in the shift but logged out since — undertime or a gap. */
+export const ZOHO_LEFT_EARLY_STATUS = 'Logged Out Early'
 
 export function parseExtraNames(text: string | undefined | null): string[] {
   const seen = new Set<string>(), out: string[] = []
@@ -162,10 +173,12 @@ export function breakCategory(type: string): 'break' | 'aux' {
   return c === 'Break' || c === 'Lunch' ? 'break' : 'aux'
 }
 
-/** A Zoho section status's kind: Logged In, or a break/aux type's. */
-export type ZohoStatusCategory = 'break' | 'aux' | 'login'
+/** A Zoho section status's kind: Logged In, scheduled but not logged in ('off'), or a break/aux type's. */
+export type ZohoStatusCategory = 'break' | 'aux' | 'login' | 'off'
 export function zohoStatusCategory(status: string): ZohoStatusCategory {
-  return status === ZOHO_LOGGED_IN_STATUS ? 'login' : breakCategory(status)
+  if (status === ZOHO_LOGGED_IN_STATUS) return 'login'
+  if (status === ZOHO_MISSING_STATUS || status === ZOHO_LEFT_EARLY_STATUS) return 'off'
+  return breakCategory(status)
 }
 
 /** The allowance a break/lunch type names, in minutes: "15 Minute Break" → 15,
@@ -282,16 +295,33 @@ export function zohoAccountsSeen(sessions: ZohoSession[], breaks: ZohoBreak[]): 
 // ── Parsed rows (what the cache holds) ────────────────────────────────────────
 // `accounts`: the person's Zoho account(s) on that row — see above. Absent on
 // rows cached before 2026-10-23 (they're re-pulled within minutes).
-export interface ZohoSession { employee: string; login: string | null; logout: string | null; source: string; accounts?: string[] }
+// `date`: the Time Tracker date the row is filed under (T_Date / Shift_Date —
+// an overnight session started on D is filed under D). `leave`: the leave the
+// row's Note records, e.g. "VL" for "[VL in Hours][8]" (vCORE's leave marker,
+// its reference §2) — usually on a row with no login. Both absent on rows
+// cached before 2026-11-09.
+export interface ZohoSession {
+  employee: string; login: string | null; logout: string | null; source: string; accounts?: string[]
+  date?: string; leave?: string
+}
 export interface ZohoBreak   { employee: string; start: string | null; end: string | null; type: string; source: string; accounts?: string[] }
 
-export function parseSessionRow(r: Record<string, unknown>, s: ZohoAuxSource, accountField: string | null = null): ZohoSession {
+/** The leave a time log's Note records — "[VL in Hours][8]" → "VL"; undefined when none. */
+export function leaveCodeOf(note: unknown): string | undefined {
+  const m = /\[\s*([A-Za-z][A-Za-z ]{0,20}?)\s+in\s+hours?\s*\]/i.exec(zohoDisplay(note))
+  return m ? m[1].toUpperCase() : undefined
+}
+
+export function parseSessionRow(r: Record<string, unknown>, s: ZohoAuxSource, accountField: string | null = null, date?: string): ZohoSession {
+  const leave = leaveCodeOf(r.Note)
   return {
     employee: zohoDisplay(r.Employee),
     login:  parseZohoDate(r[s.timelog.login], s.tz),
     logout: parseZohoDate(r[s.timelog.logout], s.tz),
     source: s.key,
     accounts: accountField ? zohoAccountValues(r[accountField]) : [],
+    ...(date ? { date } : {}),
+    ...(leave ? { leave } : {}),
   }
 }
 
@@ -385,13 +415,16 @@ export interface ZohoAgentStatusRow {
  * The rows for one account: everyone in `names` (its people in Zoho, plus its
  * extra names) who is logged in or on a break/aux right now, of a kind this
  * account shows — listed under their ZOHO name (per the user, 2026-10-23: the
- * Zoho name only).
+ * Zoho name only). `current` may also hold people who are scheduled but not
+ * logged in (category 'off' — scheduledOffNow() in lib/zohoWorkforce.ts).
  */
 export function buildAccountStatusRows(
   accountId: string, names: string[], current: Map<string, CurrentAux>,
   cfg: ZohoAuxConfig, nowIso: string,
 ): ZohoAgentStatusRow[] {
-  const want: Record<ZohoStatusCategory, boolean> = { break: includeBreaksOf(cfg), aux: includeAuxOf(cfg), login: includeLoggedInOf(cfg) }
+  const want: Record<ZohoStatusCategory, boolean> = {
+    break: includeBreaksOf(cfg), aux: includeAuxOf(cfg), login: includeLoggedInOf(cfg), off: includeNotLoggedInOf(cfg),
+  }
   const seen = new Set<string>(), rows: ZohoAgentStatusRow[] = []
   for (const name of names) {
     const k = normalizeName(name)

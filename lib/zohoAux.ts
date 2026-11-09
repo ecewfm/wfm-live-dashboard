@@ -27,6 +27,14 @@
 // lib/zohoCrmMatch.ts) for the accounts that have it on: everyone's current Zoho
 // status is right here, so this is where who-is-out-of-sync is worked out and
 // stored with when it started (wfm_zoho_crm_mismatch).
+//
+// And it runs the accounts with no CRM, worked out from Zoho alone
+// (lib/zohoWorkforce.ts, per the user 2026-11-09): every account whose card
+// reads wfm_zoho_kpis gets its Attendance / Absenteeism / Adherence tiles
+// written there, and an account with "scheduled but not logged in" on gets
+// those people in its Zoho Breaks & Aux section. Both need Zoho's Daily
+// Schedules, so those are pulled here too while any account uses them (today
+// every 30 min, yesterday every 6 h — lib/hourlyReportServer.ts's rules).
 
 import { getZohoAccessToken } from './zohoAuth'
 import { getSupabaseAdmin } from './supabaseAdmin'
@@ -37,12 +45,18 @@ import {
   ZOHO_AUX_SOURCES, ZOHO_AUX_TABLE, zohoCriteriaDate, parseSessionRow, parseBreakRow,
   normalizeName, dateInTz, addDays, computeCurrentAux, buildAccountStatusRows, parseExtraNames,
   pickAccountField, accountKeysFor, zohoAccountNamesOf, zohoPeopleOnAccount, zohoAccountsSeen, zohoTypesSeen, includeLoggedInOf,
+  includeNotLoggedInOf,
   type ZohoSession, type ZohoBreak, type ZohoAgentStatusRow, type CurrentAux,
 } from './zohoAuxShared'
 import {
   ZOHO_CRM_MISMATCH_TABLE, ZOHO_MATCH_MAX_ZOHO_AGE_MIN, zohoCrmMatchActive, findZohoCrmMismatches, nextMismatchRows,
   type ZohoCrmMismatchRow, type ZohoNow, type ZohoCrmMatchInfo,
 } from './zohoCrmMatch'
+import {
+  ZOHO_KPI_TABLE, readsZohoKpis, accountShifts, scopedShifts, scheduledOffNow, computeAccountKpis, zohoKpiRows, byPerson, leavesOf,
+  type ZohoKpiRow, type ZohoKpiValues,
+} from './zohoWorkforce'
+import type { ScheduleCacheRow } from './hourlyReport'
 
 const CREATOR_API_BASE = 'https://www.zohoapis.com/creator/v2.1'
 export const ZOHO_AUX_CACHE_TABLE = 'wfm_zoho_activity'
@@ -121,6 +135,9 @@ export interface AuxStore {
   readMismatches(accountId: string): Promise<ZohoCrmMismatchRow[]>
   replaceMismatches(accountId: string, rows: ZohoCrmMismatchRow[]): Promise<void>
   clearMismatchesExcept(keepIds: string[]): Promise<void>
+  // ── Accounts run from Zoho (lib/zohoWorkforce.ts) ──
+  replaceKpiRows(accountId: string, rows: ZohoKpiRow[]): Promise<void>
+  clearKpisExcept(keepIds: string[]): Promise<void>
 }
 
 export function supabaseAuxStore(): AuxStore {
@@ -223,6 +240,18 @@ export function supabaseAuxStore(): AuxStore {
       const stale = [...new Set((existing ?? []).map(r => r.account_id))].filter(id => !keepIds.includes(id))
       if (stale.length) must(await db.from(ZOHO_CRM_MISMATCH_TABLE).delete().in('account_id', stale), 'clearing accounts that turned the Zoho / CRM check off')
     },
+    async replaceKpiRows(accountId, rows) {
+      if (rows.length) must(await db.from(ZOHO_KPI_TABLE).upsert(rows, { onConflict: 'id' }), 'writing the Zoho KPI tiles')
+      const existing = must(await db.from(ZOHO_KPI_TABLE).select('id').eq('account_id', accountId), 'reading the Zoho KPI tiles') as { id: string }[]
+      const keep = new Set(rows.map(r => r.id))
+      const stale = (existing ?? []).map(r => r.id).filter(id => !keep.has(id))
+      if (stale.length) must(await db.from(ZOHO_KPI_TABLE).delete().in('id', stale), 'removing old Zoho KPI tiles')
+    },
+    async clearKpisExcept(keepIds) {
+      const existing = must(await db.from(ZOHO_KPI_TABLE).select('account_id'), 'reading the Zoho KPI accounts') as { account_id: string }[]
+      const stale = [...new Set((existing ?? []).map(r => r.account_id))].filter(id => !keepIds.includes(id))
+      if (stale.length) must(await db.from(ZOHO_KPI_TABLE).delete().in('account_id', stale), 'clearing accounts that stopped reading the Zoho KPI tiles')
+    },
   }
 }
 
@@ -268,6 +297,16 @@ async function checkZohoCrm(
 }
 
 const isMissingTable = (e: unknown) => /wfm_zoho_crm_mismatch|PGRST205|does not exist|schema cache/i.test(e instanceof Error ? e.message : String(e))
+const KPI_TABLE_HINT = 'run sql/zoho_only_accounts.sql once in Supabase (SQL Editor) to create it'
+const isKpiTableMissing = (e: unknown) => /wfm_zoho_kpis|PGRST205|does not exist|schema cache/i.test(e instanceof Error ? e.message : String(e))
+const pctOf = (n: number | null) => n === null ? '--' : `${Math.round(n * 10) / 10}%`
+
+/** Every account's cached shifts for `dates`, the due ones pulled first — loadZohoSchedules() in lib/hourlyReportServer.ts. */
+export type ScheduleLoader = (dates: string[], opts: { now: number; log: (m: string) => void },
+  deps: { getToken: () => Promise<string>; fetch: FetchLike }) => Promise<ScheduleCacheRow[]>
+// Imported when first used: lib/hourlyReportServer.ts imports this file.
+const defaultScheduleLoader: ScheduleLoader = async (dates, opts, deps) =>
+  (await import('./hourlyReportServer')).loadZohoSchedules(dates, opts, deps)
 
 // ── One date, both Zoho apps ──────────────────────────────────────────────────
 async function pullDate(date: string, token: string, store: AuxStore, f: FetchLike, nowIso: string, l: (m: string) => void): Promise<boolean> {
@@ -290,7 +329,7 @@ async function pullDate(date: string, token: string, store: AuxStore, f: FetchLi
     // Which field holds each person's account — see pickAccountField(). Break
     // rows that don't carry it take it from the same person's time log.
     const tlField = pickAccountField(tl.rows), blField = pickAccountField(bl.rows)
-    const sessions = tl.rows.map(r => parseSessionRow(r, s, tlField)).filter(x => x.employee)
+    const sessions = tl.rows.map(r => parseSessionRow(r, s, tlField, date)).filter(x => x.employee)
     const breaks = bl.rows.map(r => parseBreakRow(r, s, blField)).filter(x => x.employee)
     const accountOf = new Map<string, string[]>()
     for (const x of sessions) if (x.accounts?.length) accountOf.set(normalizeName(x.employee), x.accounts)
@@ -312,8 +351,10 @@ async function pullDate(date: string, token: string, store: AuxStore, f: FetchLi
     breaks.forEach(x => add('breaks', x.employee, x))
     // An ok-but-EMPTY pull is a no-op, never a wipe of a populated date.
     if (grouped.size) await store.writeCache(date, s.key, [...grouped.values()])
-    l(`Zoho ${s.key} ${date}: ${sessions.length} time log(s), ${breaks.length} break/aux row(s).`)
-    notes.push(`${s.key}: ${sessions.length} logs / ${breaks.length} breaks / account field ${tlField || blField || 'NONE'}`)
+    // Leave notes ("[VL in Hours][8]") — counted here, so a pull shows whether Zoho's Note field reads as vCORE describes.
+    const leaves = sessions.filter(x => x.leave).length
+    l(`Zoho ${s.key} ${date}: ${sessions.length} time log(s), ${breaks.length} break/aux row(s), ${leaves} leave note(s).`)
+    notes.push(`${s.key}: ${sessions.length} logs / ${breaks.length} breaks / ${leaves} leaves / account field ${tlField || blField || 'NONE'}`)
   }
   if (anyOk) await store.markSynced(date, nowIso, notes.join('; '))
   return anyOk
@@ -375,37 +416,50 @@ export async function refreshZohoLogDates(
 export interface AuxSyncResult {
   log: string[]
   pulled: string[]
-  // per enabled account: which Zoho account name(s) it was matched on, how many
-  // people Zoho has on it, and how many of them (plus extra names) are on a
-  // break/aux now, and logged in on none (shown as Logged In); and, with the
-  // Zoho ↔ CRM check on, how many of its agents are out of sync
-  accounts: { id: string; zohoAccounts: string[]; people: number; extraNames: number; onBreakOrAux: number; loggedIn: number; mismatches?: number }[]
+  // per account using Zoho: which Zoho account name(s) it was matched on, how
+  // many people Zoho has on it, and how many of them (plus extra names) are on
+  // a break/aux now, and logged in on none (shown as Logged In); scheduled but
+  // not logged in (with that on); with the Zoho ↔ CRM check on, how many of its
+  // agents are out of sync; and the Zoho KPI tiles, for an account that reads them
+  accounts: {
+    id: string; zohoAccounts: string[]; people: number; extraNames: number; onBreakOrAux: number; loggedIn: number
+    notLoggedIn?: number; mismatches?: number; kpis?: ZohoKpiValues
+  }[]
 }
 
 export async function runZohoAuxSync(
   opts: { force?: boolean } = {},
-  deps: { store?: AuxStore; getToken?: () => Promise<string>; fetch?: FetchLike; now?: () => number } = {},
+  deps: { store?: AuxStore; getToken?: () => Promise<string>; fetch?: FetchLike; now?: () => number; schedules?: ScheduleLoader } = {},
 ): Promise<AuxSyncResult> {
   const store = deps.store ?? supabaseAuxStore()
   const getToken = deps.getToken ?? getZohoAccessToken
   const f = deps.fetch ?? (fetch as any as FetchLike)
+  const loadSchedules = deps.schedules ?? defaultScheduleLoader
   const now = (deps.now ?? Date.now)()
   const nowIso = new Date(now).toISOString()
   const log: string[] = []
   const l = (m: string) => log.push(m)
 
-  const enabled = (await store.loadAccounts()).filter(a => a.ds?.zohoAux?.enabled)
+  const all = await store.loadAccounts()
+  // Zoho Breaks & Aux on (the agent section), and/or a card reading the Zoho KPI tiles.
+  const auxOn = all.filter(a => a.ds?.zohoAux?.enabled)
+  const kpiOn = all.filter(a => readsZohoKpis(a.ds))
+  const using = all.filter(a => a.ds?.zohoAux?.enabled || readsZohoKpis(a.ds))
   // An account that turned this off stops showing it at once anyway (the
   // dashboard only adds the section while it's on); clear its rows too.
-  await store.clearAccountsExcept(enabled.map(a => a.id))
+  await store.clearAccountsExcept(auxOn.map(a => a.id))
   // Same for the Zoho ↔ CRM check (its rows are ignored while it's off anyway).
   // Only worth a log line when some account uses it — before then the table may
   // not even exist yet.
-  const matching = enabled.filter(a => zohoCrmMatchActive(a.ds))
+  const matching = auxOn.filter(a => zohoCrmMatchActive(a.ds))
   try { await store.clearMismatchesExcept(matching.map(a => a.id)) } catch (e) {
     if (matching.length) l(`Zoho ↔ CRM: ${isMissingTable(e) ? `its table is missing — ${MISMATCH_TABLE_HINT}` : e instanceof Error ? e.message : String(e)}`)
   }
-  if (enabled.length === 0) {
+  // And the Zoho KPI tiles — same reasoning.
+  try { await store.clearKpisExcept(kpiOn.map(a => a.id)) } catch (e) {
+    if (kpiOn.length) l(`Zoho KPI tiles: ${isKpiTableMissing(e) ? `their table is missing — ${KPI_TABLE_HINT}` : e instanceof Error ? e.message : String(e)}`)
+  }
+  if (using.length === 0) {
     l('No account has Zoho Breaks & Aux turned on — nothing pulled from Zoho.')
     return { log, pulled: [], accounts: [] }
   }
@@ -422,27 +476,80 @@ export async function runZohoAuxSync(
   const current = computeCurrentAux(sessions, breaks, now)
   const seen = zohoAccountsSeen(sessions, breaks)
   const displayNames = await store.accountNames()
-  // How old the Zoho data behind `current` is — the Zoho ↔ CRM check pauses past ZOHO_MATCH_MAX_ZOHO_AGE_MIN.
+  // How old the Zoho data behind `current` is — the Zoho ↔ CRM check pauses past ZOHO_MATCH_MAX_ZOHO_AGE_MIN,
+  // and the Zoho KPI tiles stop being written (so the card shows DATA NOT IN SYNC rather than old numbers).
   const zohoAgeMin = pulled.includes(today) ? 0 : age(today) / 60000
+  const zohoFresh = zohoAgeMin <= ZOHO_MATCH_MAX_ZOHO_AGE_MIN
   const zohoNow = zohoNowOf(current)
 
-  const accounts: AuxSyncResult['accounts'] = []
-  for (const a of enabled) {
+  // Zoho's Daily Schedules — only while an account needs them (its KPI tiles, or scheduled but not logged in).
+  let schedules: ScheduleCacheRow[] | null = null
+  if (kpiOn.length || auxOn.some(a => includeNotLoggedInOf(a.ds.zohoAux))) {
     try {
-      const cfg = a.ds.zohoAux!
+      schedules = await loadSchedules([yesterday, today], { now, log: l }, { getToken, fetch: f })
+    } catch (e) {
+      l(`Zoho schedules: could not be read — ${/PGRST205|does not exist|schema cache|HourlyTableMissing/i.test(e instanceof Error ? `${e.name} ${e.message}` : String(e))
+        ? 'their table is missing, run sql/hourly_report.sql once in Supabase' : e instanceof Error ? e.message : String(e)}. Skipping the KPI tiles and "not logged in" this run.`)
+    }
+  }
+  const sessionsByPerson = byPerson(sessions)
+  const breaksByPerson = byPerson(breaks)
+  const leaves = leavesOf(sessions)
+
+  const accounts: AuxSyncResult['accounts'] = []
+  for (const a of using) {
+    try {
+      const cfg = a.ds.zohoAux ?? { enabled: false }
       // Matched on its Zoho Account setting, else its display name here (and id).
       const asked = zohoAccountNamesOf(a.ds, a.rtaAccountName)
       const keys = accountKeysFor(a.id, displayNames[a.id], asked)
       const label = (asked.length ? asked : [displayNames[a.id] || a.id]).map(n => `"${n}"`).join(' / ')
       const people = zohoPeopleOnAccount(sessions, breaks, keys)
       const extra = parseExtraNames(cfg.extraNames)
-      const rows = buildAccountStatusRows(a.id, [...people.values(), ...extra], current, cfg, nowIso)
-      await store.replaceAccountRows(a.id, rows)
-      const loggedIn = rows.filter(r => r.category === 'login').length, onBreakOrAux = rows.length - loggedIn
-      const entry: AuxSyncResult['accounts'][number] = { id: a.id, zohoAccounts: asked.length ? asked : [displayNames[a.id] || a.id], people: people.size, extraNames: extra.length, onBreakOrAux, loggedIn }
+      const shifts = schedules ? accountShifts(schedules, keys, today, yesterday, now) : []
+      const entry: AuxSyncResult['accounts'][number] = {
+        id: a.id, zohoAccounts: asked.length ? asked : [displayNames[a.id] || a.id], people: people.size, extraNames: extra.length, onBreakOrAux: 0, loggedIn: 0,
+      }
       accounts.push(entry)
-      let line = `${a.id}: Zoho account ${label} — ${people.size} ${people.size === 1 ? 'person' : 'people'} in Zoho's logs${extra.length ? ` (+${extra.length} extra name(s))` : ''}, ${onBreakOrAux} on a break/aux now${includeLoggedInOf(cfg) ? `, ${loggedIn} logged in on none` : ''}`
-      if (!people.size) {
+      const parts: string[] = []
+
+      if (cfg.enabled) {
+        // Scheduled right now but not logged in: the account's shifts, and its extra names' wherever they're filed.
+        let shown: Map<string, CurrentAux> = current
+        let scheduledNames: string[] = []
+        if (includeNotLoggedInOf(cfg) && schedules) {
+          const extraSet = new Set(extra.map(normalizeName))
+          const theirShifts = [...shifts, ...(extraSet.size ? scopedShifts(schedules, today, yesterday, now, (_r, k) => extraSet.has(k)) : [])]
+          shown = new Map([...scheduledOffNow(theirShifts, sessionsByPerson, current, now, leaves), ...current])
+          scheduledNames = theirShifts.map(s => s.employee)
+        }
+        const rows = buildAccountStatusRows(a.id, [...people.values(), ...extra, ...scheduledNames], shown, cfg, nowIso)
+        await store.replaceAccountRows(a.id, rows)
+        entry.loggedIn = rows.filter(r => r.category === 'login').length
+        entry.notLoggedIn = rows.filter(r => r.category === 'off').length
+        entry.onBreakOrAux = rows.length - entry.loggedIn - entry.notLoggedIn
+        parts.push(`${entry.onBreakOrAux} on a break/aux now`)
+        if (includeLoggedInOf(cfg)) parts.push(`${entry.loggedIn} logged in on none`)
+        if (includeNotLoggedInOf(cfg)) parts.push(schedules ? `${entry.notLoggedIn} scheduled but not logged in` : 'scheduled-but-not-logged-in skipped (no schedules)')
+      }
+
+      if (readsZohoKpis(a.ds)) {
+        if (!schedules) parts.push('KPI tiles not updated (no schedules)')
+        else if (!zohoFresh) parts.push(`KPI tiles not updated — Zoho's data is ${Number.isFinite(zohoAgeMin) ? `${Math.round(zohoAgeMin)} min old` : 'not pulled today yet'}`)
+        else {
+          const v = computeAccountKpis({ shifts, sessionsByPerson, breaksByPerson, current, peopleOnAccount: people.keys(), leaves, now })
+          entry.kpis = v
+          try {
+            await store.replaceKpiRows(a.id, zohoKpiRows(a.id, v, nowIso))
+            parts.push(`KPIs: ${v.shiftsToday} shift(s) today${v.onLeave ? ` (${v.onLeave} on leave)` : ''}, ${v.scheduledNow} scheduled now, ${v.loggedIn} logged in, ${v.notLoggedIn} not logged in, attendance ${pctOf(v.attendance)}, absenteeism ${pctOf(v.absenteeism)} (${v.noShows} no-show), adherence ${pctOf(v.adherence)}, ${v.lateToday} late`)
+          } catch (e) {
+            parts.push(`KPI tiles NOT written — ${isKpiTableMissing(e) ? `their table is missing, ${KPI_TABLE_HINT}` : e instanceof Error ? e.message : String(e)}`)
+          }
+        }
+      }
+
+      let line = `${a.id}: Zoho account ${label} — ${people.size} ${people.size === 1 ? 'person' : 'people'} in Zoho's logs${extra.length ? ` (+${extra.length} extra name(s))` : ''}${schedules ? `, ${new Set(shifts.map(s => s.norm)).size} on its schedule today` : ''}${parts.length ? `, ${parts.join(', ')}` : ''}`
+      if (!people.size && !shifts.length) {
         line += seen.length
           ? `. No one in Zoho's logs is on that account — if Zoho calls it something else, pick it under "Zoho Account" in Settings → Zoho Integrations. Zoho accounts seen: ${seen.slice(0, 40).map(x => x.name).join(', ')}${seen.length > 40 ? `, … (${seen.length} in all)` : ''}`
           : `. Zoho's cached logs carry no account at all yet (see the pull lines above).`
@@ -451,7 +558,7 @@ export async function runZohoAuxSync(
       // Compared against EVERYONE's current Zoho status (`current`), not just the
       // rows this account shows — its include-toggles are about what Agent Status
       // lists, and a pair can name someone filed under another Zoho account.
-      if (zohoCrmMatchActive(a.ds)) {
+      if (cfg.enabled && zohoCrmMatchActive(a.ds)) {
         try {
           const r = await checkZohoCrm(a, zohoNow, zohoAgeMin, store, nowIso)
           entry.mismatches = r.mismatches

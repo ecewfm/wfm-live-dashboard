@@ -24,7 +24,7 @@ const SOUND_FIELDS = {
   warning:  ['warningSoundKind', 'warningSoundUrl', 'warningSoundName'],
 } as const
 
-export default function AlarmTab() {
+export default function AlarmTab({ accounts }: { accounts: { id: string; display_name: string }[] }) {
   const [saved, setSaved] = useState<GlobalAlarmSettings>(DEFAULT_ALARM_SETTINGS)
   const [draft, setDraft] = useState<GlobalAlarmSettings>(DEFAULT_ALARM_SETTINGS)
   const [loading, setLoading] = useState(true)
@@ -32,6 +32,8 @@ export default function AlarmTab() {
   // Table exists but predates a newer column (SQL not re-run yet).
   const [ringModeMissing, setRingModeMissing] = useState(false)
   const [warningMissing, setWarningMissing] = useState(false)
+  const [mutedMissing, setMutedMissing] = useState(false)
+  const [accountFilter, setAccountFilter] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -48,6 +50,7 @@ export default function AlarmTab() {
     const probe = async (col: string) => e ? false : !!(await supabase.from('wfm_alarm_settings').select(col).limit(1)).error
     setRingModeMissing(await probe('ring_mode'))
     setWarningMissing(await probe('warning_sound_kind'))
+    setMutedMissing(await probe('muted_accounts'))
     const s = await loadAlarmSettings()
     setSaved(s)
     setDraft(d => {
@@ -77,6 +80,7 @@ export default function AlarmTab() {
         ...(warningMissing ? {} : {
           warningSoundKind: draft.warningSoundKind, warningBuiltinKey: draft.warningBuiltinKey, warningVolume: draft.warningVolume,
         }),
+        ...(mutedMissing ? {} : { mutedAccounts: draft.mutedAccounts }),
       }),
     })
     await load()
@@ -226,6 +230,17 @@ export default function AlarmTab() {
           : 'However many changes happen, a screen rings at most once in this time.'}
       </p>
 
+      {/* ── Which accounts ──────────────────────────────────────────────── */}
+      <div className="ds-mini-label">Accounts it rings for</div>
+      {mutedMissing && !setupMissing ? (
+        <div className="auth-note auth-note-err" style={{ margin: '6px 0 18px' }}>
+          Choosing accounts needs a small database update. Run <code>sql/zoho_only_accounts.sql</code> in the Supabase SQL editor (it&apos;s safe to run again), then reopen this tab. Until then the alarm rings for every account.
+        </div>
+      ) : (
+        <AccountRingList accounts={accounts} muted={draft.mutedAccounts} filter={accountFilter} setFilter={setAccountFilter}
+                         disabled={setupMissing} onChange={m => setDraft(d => ({ ...d, mutedAccounts: m }))} />
+      )}
+
       <div className="auth-note" style={{ marginBottom: 16 }}>
         <strong>When it rings</strong>
         <ul style={{ margin: '6px 0 0 18px', padding: 0, lineHeight: 1.6 }}>
@@ -339,6 +354,58 @@ function SoundChoice({ slot, draft, saved, setDraft, busy, disabled, sameOnly, o
                onChange={e => { const f = e.target.files?.[0]; if (f) onUpload(f); e.target.value = '' }} />
       </label>
       {!w && <span className="sm-desc" style={{ margin: 0 }}>MP3, WAV, OGG or M4A, up to 2 MB. Short sounds (1–3 seconds) work best.</span>}
+    </div>
+  )
+}
+
+// ── Which accounts ring (per the user, 2026-11-09): the accounts added from
+// Zoho start unticked (lib/zohoOnlyAccounts.ts), every other account ticked.
+function AccountRingList({ accounts, muted, filter, setFilter, disabled, onChange }: {
+  accounts: { id: string; display_name: string }[]
+  muted: string[]
+  filter: string
+  setFilter: (v: string) => void
+  disabled: boolean
+  onChange: (muted: string[]) => void
+}) {
+  const mutedSet = new Set(muted)
+  const rings = accounts.filter(a => !mutedSet.has(a.id)).length
+  const q = filter.trim().toLowerCase()
+  const shown = q ? accounts.filter(a => `${a.display_name} ${a.id}`.toLowerCase().includes(q)) : accounts
+  // Ids of accounts no longer on the dashboard are kept as they are.
+  const set = (ids: string[], ring: boolean) => {
+    const next = new Set(muted)
+    ids.forEach(id => (ring ? next.delete(id) : next.add(id)))
+    onChange([...next].sort())
+  }
+  const btn = { padding: '4px 10px', fontSize: 12 }
+  return (
+    <div style={{ margin: '6px 0 18px' }}>
+      <p className="sm-desc" style={{ margin: '0 0 8px' }}>
+        Rings for <strong>{rings}</strong> of {accounts.length} accounts. Accounts added from Zoho start unticked — their
+        Attendance and Adherence move every minute, and a breaching value that changes rings. Their breaches still show on
+        the dashboard either way.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+        <input className="sm-input" aria-label="Filter accounts" placeholder="Filter accounts…" value={filter}
+               style={{ width: 200, textAlign: 'left' }} onChange={e => setFilter(e.target.value)} />
+        <button type="button" className="sm-btn-cancel" style={btn} disabled={disabled || !shown.length}
+                onClick={() => set(shown.map(a => a.id), true)}>Tick {q ? 'these' : 'all'}</button>
+        <button type="button" className="sm-btn-cancel" style={btn} disabled={disabled || !shown.length}
+                onClick={() => set(shown.map(a => a.id), false)}>Untick {q ? 'these' : 'all'}</button>
+      </div>
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '4px 12px',
+        maxHeight: 220, overflowY: 'auto', padding: 8, border: '1px solid var(--border,#e1e6e4)', borderRadius: 6,
+      }}>
+        {shown.map(a => (
+          <label key={a.id} title={a.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, minWidth: 0 }}>
+            <input type="checkbox" checked={!mutedSet.has(a.id)} disabled={disabled} onChange={e => set([a.id], e.target.checked)} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.display_name || a.id}</span>
+          </label>
+        ))}
+        {!shown.length && <span className="sm-metric-sub">No account matches.</span>}
+      </div>
     </div>
   )
 }

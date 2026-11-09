@@ -20,12 +20,13 @@ import { apiFetch } from '@/lib/authClient'
 import { addAccount, removeAccount, renameAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
 import { ALARM_SOUNDS, playAlarm } from '@/lib/alarmSounds'
 import type { GeminiKeyMasked } from '@/lib/geminiKeys'
+import type { ZohoAccountScan, ZohoAddResult } from '@/lib/zohoOnlyAccounts'
 import { loadGeminiModels, saveGeminiModels } from '@/lib/geminiModels'
 import UsersTab from './UsersTab'
 import AlarmTab from './AlarmTab'
 import { useAuth } from './AuthGate'
 import { can } from '@/lib/authEmail'
-import { includeBreaksOf, includeAuxOf, includeLoggedInOf, accountKeysFor, normalizeAccount, parseExtraNames, zohoStatusCategory, allowanceMinutesOf, zohoAccountsTextOf, rtaZohoAccountName, ZOHO_AUX_TABLE, ZOHO_LOGGED_IN_STATUS, type ZohoAuxConfig, type ZohoStatusCategory } from '@/lib/zohoAuxShared'
+import { includeBreaksOf, includeAuxOf, includeLoggedInOf, includeNotLoggedInOf, accountKeysFor, normalizeAccount, parseExtraNames, zohoStatusCategory, allowanceMinutesOf, zohoAccountsTextOf, rtaZohoAccountName, ZOHO_AUX_TABLE, ZOHO_LOGGED_IN_STATUS, ZOHO_MISSING_STATUS, ZOHO_LEFT_EARLY_STATUS, type ZohoAuxConfig, type ZohoStatusCategory } from '@/lib/zohoAuxShared'
 import { zohoCrmMatchAvailable } from '@/lib/zohoCrmMatch'
 import ZohoCrmMatchTab from './ZohoCrmMatchTab'
 
@@ -605,7 +606,149 @@ function AccountsTab({
           ))}
         </div>
       )}
+
+      <ZohoAddAccounts onAdded={onRefresh} />
     </div>
+  )
+}
+
+// ── Add accounts from Zoho (per the user, 2026-11-09) ─────────────────────────
+// Every account on today's Zoho schedule or in today's Time Tracker logs, and
+// whether WFM Live already has it; the ticked ones are added as accounts run
+// from Zoho alone — their card from wfm_zoho_kpis, their Agent Status from Zoho
+// Breaks & Aux (lib/zohoOnlyAccounts.ts, lib/zohoWorkforce.ts).
+function ZohoAddAccounts({ onAdded }: { onAdded: () => void }) {
+  const [scan, setScan] = useState<ZohoAccountScan | null>(null)
+  const [busy, setBusy] = useState<'scan' | 'add' | null>(null)
+  const [error, setError] = useState('')
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [result, setResult] = useState<ZohoAddResult | null>(null)
+
+  const loadScan = async () => {
+    const s: ZohoAccountScan = await apiFetch('/api/zoho/accounts-scan')
+    setScan(s)
+    // Internal departments start unticked; the rest of the new ones ticked.
+    setPicked(new Set(s.rows.filter(r => !r.onLive && !r.internal).map(r => r.norm)))
+  }
+  const runScan = async () => {
+    setBusy('scan'); setError(''); setResult(null)
+    try { await loadScan() } catch (e: any) { setError(e.message) }
+    setBusy(null)
+  }
+
+  const newRows = scan?.rows.filter(r => !r.onLive) ?? []
+  const liveRows = scan?.rows.filter(r => r.onLive) ?? []
+  const toAdd = newRows.filter(r => picked.has(r.norm))
+  const ready = !!scan && scan.ready.kpiTable && scan.ready.alarmColumn
+  const tick = (norms: string[], on: boolean) => setPicked(prev => {
+    const n = new Set(prev)
+    norms.forEach(k => (on ? n.add(k) : n.delete(k)))
+    return n
+  })
+
+  const add = async () => {
+    if (!toAdd.length) return
+    const names = toAdd.map(r => r.zohoName)
+    if (!confirm(`Add ${names.length} account${names.length === 1 ? '' : 's'} to WFM Live, run from Zoho?\n\n${names.join(', ')}\n\n` +
+      'Super users see them on the Overview straight away; the global alarm leaves them out (Settings → Alarm).')) return
+    setBusy('add'); setError('')
+    try {
+      const r: ZohoAddResult = await apiFetch('/api/zoho/accounts-add', { method: 'POST', body: JSON.stringify({ names }) })
+      setResult(r)
+      onAdded()
+      await loadScan()
+    } catch (e: any) { setError(e.message) }
+    setBusy(null)
+  }
+
+  const btn = { fontSize: 12, padding: '5px 12px' }
+  return (
+    <>
+      <div className="sm-section-title" style={{ marginTop: 24 }}>ADD ACCOUNTS FROM ZOHO</div>
+      <p className="sm-desc">
+        For accounts with no CRM on WFM Live: their card and Agent Status come from Zoho alone — the Daily
+        Schedules and the Time Tracker logs. The card shows <strong>Scheduled Now</strong>, <strong>Logged In</strong>,{' '}
+        <strong>On Break</strong>, <strong>Not Logged In</strong>, <strong>Attendance</strong>,{' '}
+        <strong>Absenteeism</strong>, <strong>Adherence</strong> and <strong>Late Today</strong>; Agent Status shows everyone
+        logged in (and on which break or aux) and anyone scheduled now who isn&apos;t. The scan lists every account on
+        today&apos;s Zoho schedule or in today&apos;s logs.
+      </p>
+      <button type="button" className="acc-btn acc-btn-cfg" style={{ fontSize: 13, padding: '9px 16px' }} disabled={!!busy} onClick={runScan}>
+        <i className={`bx ${busy === 'scan' ? 'bx-loader-alt bx-spin' : 'bx-search-alt'}`} style={{ marginRight: 6 }} />
+        {busy === 'scan' ? 'Scanning Zoho…' : scan ? 'Scan again' : 'Scan Zoho accounts'}
+      </button>
+
+      {error && <div className="auth-note auth-note-err" style={{ marginTop: 12 }}>{error}</div>}
+      {result && (
+        <div className="auth-note auth-note-ok" style={{ marginTop: 12 }}>
+          {result.added.length
+            ? <>Added {result.added.length}: {result.added.map(a => a.displayName).join(', ')}. Their numbers fill in within a minute or two.</>
+            : <>Nothing added.</>}
+          {result.skipped.length > 0 && <> Skipped: {result.skipped.map(s => `${s.zohoName} (${s.why})`).join('; ')}.</>}
+        </div>
+      )}
+      {scan && !ready && (
+        <div className="auth-note auth-note-err" style={{ marginTop: 12 }}>
+          Before adding: run <code>sql/zoho_only_accounts.sql</code> once in the Supabase SQL editor — it creates the
+          tiles&apos; table and the alarm&apos;s list of accounts — then scan again.
+        </div>
+      )}
+
+      {scan && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8, fontSize: 12.5 }}>
+            <span><strong>{newRows.length}</strong> not on WFM Live · {liveRows.length} already on it · Zoho date {scan.date}</span>
+            <span style={{ flex: 1 }} />
+            <button type="button" className="sm-btn-cancel" style={btn} disabled={!newRows.length} onClick={() => tick(newRows.map(r => r.norm), true)}>Tick all</button>
+            <button type="button" className="sm-btn-cancel" style={btn} disabled={!picked.size} onClick={() => tick(newRows.map(r => r.norm), false)}>Untick all</button>
+          </div>
+          {newRows.length > 0 ? (
+            <div style={{ maxHeight: 360, overflowY: 'auto', border: '1px solid var(--border,#e1e6e4)', borderRadius: 6 }}>
+              <table className="sm-table" aria-label="Zoho accounts not on WFM Live" style={{ margin: 0 }}>
+                <thead>
+                  <tr><th style={{ width: 30 }} /><th>Zoho account</th><th>Scheduled today</th><th>In today&apos;s logs</th><th>Note</th></tr>
+                </thead>
+                <tbody>
+                  {newRows.map(r => (
+                    <tr key={r.norm}>
+                      <td style={{ textAlign: 'center' }}>
+                        <input type="checkbox" aria-label={`Add ${r.zohoName}`} checked={picked.has(r.norm)} onChange={e => tick([r.norm], e.target.checked)} />
+                      </td>
+                      <td><div className="sm-metric">{r.zohoName}</div></td>
+                      <td style={{ textAlign: 'center' }}>{r.scheduledToday}</td>
+                      <td style={{ textAlign: 'center' }}>{r.inLogsToday}</td>
+                      <td className="sm-metric-sub">
+                        {[r.internal && 'Looks like an internal department',
+                          r.removed && `A removed account ("${r.removed.displayName}") has this name — a new one is added`]
+                          .filter(Boolean).join(' · ')}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : <p className="sm-desc">Every Zoho account seen today is already on WFM Live.</p>}
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
+            <button type="button" className="sm-btn-save" disabled={!ready || !toAdd.length || !!busy} onClick={add}>
+              {busy === 'add' ? 'Adding…' : `Add ${toAdd.length} account${toAdd.length === 1 ? '' : 's'}`}
+            </button>
+            <span className="sm-metric-sub">
+              Each gets its Zoho name as its name and Zoho Account; change either later in Settings like any account.
+            </span>
+          </div>
+
+          {liveRows.length > 0 && (
+            <details style={{ marginTop: 12 }}>
+              <summary className="sm-metric-sub" style={{ cursor: 'pointer' }}>Already on WFM Live ({liveRows.length})</summary>
+              <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 12.5, lineHeight: 1.7 }}>
+                {liveRows.map(r => <li key={r.norm}>{r.zohoName} → <strong>{r.onLive!.displayName}</strong> · {r.scheduledToday} scheduled today</li>)}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+    </>
   )
 }
 
@@ -2475,6 +2618,20 @@ function ZohoAuxSection({ accountId, value, onChange }: {
                 onChange={() => set({ includeLoggedIn: !includeLoggedInOf(cfg) })} />
             </td>
           </tr>
+          <tr style={{ opacity: off ? 0.5 : 1 }}>
+            <td>
+              <div className="sm-metric">Include scheduled, not logged in</div>
+              <div className="sm-metric-sub">
+                From Zoho&apos;s Daily Schedules — someone whose shift is on now but who isn&apos;t logged in: <strong>{ZOHO_MISSING_STATUS}</strong>{' '}
+                (not since the shift started — late, or not coming) or <strong>{ZOHO_LEFT_EARLY_STATUS}</strong>{' '}(logged out
+                before the shift ended), timed from the shift start or the logout
+              </div>
+            </td>
+            <td style={{ textAlign: 'center' }}>
+              <input type="checkbox" aria-label="Include scheduled, not logged in" disabled={off} checked={includeNotLoggedInOf(cfg)}
+                onChange={() => set({ includeNotLoggedIn: !includeNotLoggedInOf(cfg) })} />
+            </td>
+          </tr>
         </tbody>
       </table>
 
@@ -3074,11 +3231,15 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
     return () => { cancelled = true }
   }, [zohoOn, accountId, statSupaUrl, statSupaKey])
   // Logged In first (when this account shows it — listed even before anyone is
-  // in it), then breaks/lunches (the ones with an allowance), then every other aux.
+  // in it), then scheduled-but-not-logged-in (likewise), then breaks/lunches
+  // (the ones with an allowance), then every other aux.
   const zohoInfo = new Map(zohoTypes.map(t => [t.type, t]))
   if (includeLoggedInOf(ds.zohoAux)) zohoInfo.set(ZOHO_LOGGED_IN_STATUS, { type: ZOHO_LOGGED_IN_STATUS, category: 'login', count: 0 })
+  if (includeNotLoggedInOf(ds.zohoAux)) {
+    for (const t of [ZOHO_MISSING_STATUS, ZOHO_LEFT_EARLY_STATUS]) zohoInfo.set(t, { type: t, category: 'off', count: 0 })
+  }
   Object.keys(zohoNow).forEach(t => { if (!zohoInfo.has(t)) zohoInfo.set(t, { type: t, category: zohoStatusCategory(t), count: 0 }) })
-  const ZOHO_ORDER: Record<ZohoStatusCategory, number> = { login: 0, break: 1, aux: 2 }
+  const ZOHO_ORDER: Record<ZohoStatusCategory, number> = { login: 0, off: 1, break: 2, aux: 3 }
   const zohoStatusRows = zohoOn
     ? [...zohoInfo.values()].sort((a, b) => ZOHO_ORDER[a.category] - ZOHO_ORDER[b.category]).map(t => t.type)
     : []
@@ -3328,7 +3489,7 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
               />
             )}
 
-            {tab === 'alarm' && canManageAccounts && <AlarmTab />}
+            {tab === 'alarm' && canManageAccounts && <AlarmTab accounts={accounts} />}
 
             {tab === 'users' && canManageUsers && (
               <UsersTab accounts={accounts.map(a => ({ id: a.id, display_name: a.display_name || a.id }))} />
@@ -3682,7 +3843,10 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                                 const info = zohoInfo.get(t)
                                 const now = zohoNow[t] ?? 0
                                 return renderStatusRow(t, <>
-                                  {info?.category === 'login' ? 'logged in, on no break or aux' : info?.category === 'break' ? 'break' : 'aux'}
+                                  {info?.category === 'login' ? 'logged in, on no break or aux'
+                                    : t === ZOHO_MISSING_STATUS ? 'scheduled now, not logged in since the shift started'
+                                    : t === ZOHO_LEFT_EARLY_STATUS ? 'scheduled now, logged out before the shift ended'
+                                    : info?.category === 'break' ? 'break' : 'aux'}
                                   {now > 0 && <> · <strong style={{ color: 'var(--warning)' }}>{now} on it now</strong></>}
                                   {info && info.count > 0 && <> · seen {info.count.toLocaleString()}× in Zoho&apos;s last 2 days</>}
                                 </>)

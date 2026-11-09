@@ -233,7 +233,7 @@ export default function ZohoCrmMatchTab({ accountId, ds, setDs, knownCrmStatuses
   const allTypes = uniq((info?.zohoTypes ?? []).map(t => t.type)).filter(t => !special.has(statusKey(t)))
   const ownSet = new Set(ownTypes.map(statusKey))
   const moreTypes = allTypes.filter(t => !ownSet.has(statusKey(t)))
-  const ORDER = { login: 0, break: 1, aux: 2 } as const
+  const ORDER = { login: 0, off: 1, break: 2, aux: 3 } as const
   const typeRows = [...ownTypes, ...(showAllTypes ? moreTypes : [])]
     .map((t, i) => ({ t, i })).sort((a, b) => ORDER[zohoStatusCategory(a.t)] - ORDER[zohoStatusCategory(b.t)] || a.i - b.i).map(x => x.t)
   const zohoRows = [ZOHO_LOGGED_IN_STATUS, ...(cfg.checkNotInZoho ? [ZOHO_NOT_LOGGED_IN_STATUS] : []), ...typeRows]

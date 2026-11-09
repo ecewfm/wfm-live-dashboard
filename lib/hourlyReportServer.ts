@@ -73,7 +73,8 @@ export interface HourlyStore {
   markScheduleStarted(date: string, at: string): Promise<void>
   markScheduleSynced(date: string, at: string, note: string): Promise<void>
   writeSchedules(date: string, source: string, rows: ScheduleCacheRow[]): Promise<void>
-  readSchedules(dates: string[], accountNorms: string[]): Promise<ScheduleCacheRow[]>
+  /** `accountNorms` null = every account's (the Zoho sync, lib/zohoAux.ts). */
+  readSchedules(dates: string[], accountNorms: string[] | null): Promise<ScheduleCacheRow[]>
 }
 
 export function supabaseHourlyStore(): HourlyStore {
@@ -125,9 +126,9 @@ export function supabaseHourlyStore(): HourlyStore {
       }
     },
     async readSchedules(dates, accountNorms) {
-      if (!accountNorms.length) return []
-      return (must(await db.from(SCHEDULE_TABLE).select('log_date, source, account_norm, account, payload')
-        .in('log_date', dates).in('account_norm', accountNorms), 'reading the Zoho schedules') ?? []) as ScheduleCacheRow[]
+      if (accountNorms && !accountNorms.length) return []
+      const q = db.from(SCHEDULE_TABLE).select('log_date, source, account_norm, account, payload').in('log_date', dates)
+      return (must(await (accountNorms ? q.in('account_norm', accountNorms) : q), 'reading the Zoho schedules') ?? []) as ScheduleCacheRow[]
     },
   }
 }
@@ -235,6 +236,18 @@ export async function refreshZohoSchedules(
     if (await pullScheduleDate(date, token, deps.store, deps.fetch, nowIso, l)) pulled.push(date)
   }
   return { sync, pulled, busy }
+}
+
+/** The Zoho sync's schedules (lib/zohoAux.ts — accounts run from Zoho, lib/zohoWorkforce.ts):
+ *  the due dates pulled first (same rules and lease as the Hourly page), then every account's
+ *  cached shifts for `dates`. Throws HourlyTableMissing until sql/hourly_report.sql has been run. */
+export async function loadZohoSchedules(
+  dates: string[], opts: { now: number; log: (m: string) => void },
+  deps: { getToken: () => Promise<string>; fetch: FetchLike; store?: HourlyStore },
+): Promise<ScheduleCacheRow[]> {
+  const store = deps.store ?? supabaseHourlyStore()
+  await refreshZohoSchedules(dates, opts, { store, getToken: deps.getToken, fetch: deps.fetch })
+  return store.readSchedules(dates, null)
 }
 
 // ── 3. The page's data (HourlyReport, lib/hourlyReport.ts) ────────────────────

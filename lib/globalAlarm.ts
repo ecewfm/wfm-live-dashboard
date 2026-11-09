@@ -62,6 +62,9 @@ export interface GlobalAlarmSettings {
   ringMode: RingMode
   /** 'once': minimum gap between rings. 'until_ack': quiet time after acknowledging. */
   minGapSeconds: number
+  /** Account ids the alarm never rings for (Settings → Alarm). The accounts added
+   *  from Zoho start here (lib/zohoOnlyAccounts.ts); every other account rings. */
+  mutedAccounts: string[]
 }
 
 export type RingMode = 'once' | 'until_ack'
@@ -71,7 +74,7 @@ export const DEFAULT_ALARM_SETTINGS: GlobalAlarmSettings = {
   enabled: false, soundKind: 'builtin', builtinKey: 'siren', soundUrl: null, soundName: null,
   volume: 0.8, severity: 'all',
   warningSoundKind: 'same', warningBuiltinKey: 'chime', warningSoundUrl: null, warningSoundName: null, warningVolume: 0.8,
-  ringMode: 'until_ack', minGapSeconds: 30,
+  ringMode: 'until_ack', minGapSeconds: 30, mutedAccounts: [],
 }
 
 /** Read the one global row. Falls back to "off" if the table isn't migrated yet. */
@@ -99,6 +102,8 @@ export async function loadAlarmSettings(): Promise<GlobalAlarmSettings> {
       // Missing column (SQL not upgraded yet) or an unknown value → the default.
       ringMode: data.ring_mode === 'once' ? 'once' : 'until_ack',
       minGapSeconds: Number.isFinite(data.min_gap_seconds) ? data.min_gap_seconds : 30,
+      // Missing column (sql/zoho_only_accounts.sql not run yet) → none left out.
+      mutedAccounts: Array.isArray(data.muted_accounts) ? data.muted_accounts.filter((x: unknown) => typeof x === 'string').sort() : [],
     }
   } catch {
     return DEFAULT_ALARM_SETTINGS

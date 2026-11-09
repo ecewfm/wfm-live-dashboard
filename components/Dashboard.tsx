@@ -35,7 +35,7 @@ import {
   // this page goes through makeKpiCellResolver() in lib/breaches.ts so the
   // browser and the Cliq/RTA scan resolve identically — re-importing it is
   // how the drift CLAUDE.md documents would start again.
-  getKpiColorClass, getStatusPillClass, getExtraTileColorClass,
+  getKpiColorClass, getStatusPillClass, getExtraTileColorClass, isInfoKpi,
   loadKpiThresholds, saveKpiThresholds,
   loadStatusThresholds, saveStatusThresholds,
   loadDataSource, saveDataSource,
@@ -706,10 +706,13 @@ export default function Dashboard() {
     const eligible = accounts.filter(id =>
       accountDataReady(id) && !isDataStale(freshestAcrossSources(dataSources[id], data[id])))
     const s = alarmRef.current
-    const { events, next } = evaluateAlarm(alarmBaselines.current, allBreaches, eligible, s.severity, Date.now())
+    const evaluated = evaluateAlarm(alarmBaselines.current, allBreaches, eligible, s.severity, Date.now())
     // The baseline advances even while the alarm is off, so switching it on
     // later doesn't ring for everything that changed in the meantime.
-    alarmBaselines.current = next
+    alarmBaselines.current = evaluated.next
+    // Accounts the alarm leaves out (Settings → Alarm) — evaluated all the same,
+    // so turning one back on doesn't ring for what changed while it was out.
+    const events = evaluated.events.filter(e => !s.mutedAccounts.includes(e.accountId))
     if (!s.enabled || events.length === 0) return
 
     setLastAlarm({ text: events.map(e => describeEvent(e, id => displayNames[id] || id)).join('\n'), at: Date.now() })
@@ -1703,7 +1706,7 @@ function KpiGrid({ group, accountData, kpiTh, ds }: {
           const { num } = extractKpiValue(raw, t.kpiUnit)
           return (
             <KpiTile key={t.key} label={t.label} value={raw || '--'} numValue={num}
-              target={`Target ${formatKpiThresholdLabel(t.kpiUnit, t.targ, t.direction)}`} th={t} />
+              target={isInfoKpi(t) ? '' : `Target ${formatKpiThresholdLabel(t.kpiUnit, t.targ, t.direction)}`} th={t} />
           )
         })}
       </div>
@@ -1747,7 +1750,7 @@ function KpiTile({ label, value, numValue, target, th, showBar, plain, colorOver
       <div className="kpi-label">{label}</div>
       <div className={`kpi-value ${colorClass}`}>{value}</div>
       {showBar && <div className="kpi-bar"><div className="kpi-bar-fill" style={{ width: `${barW}%`, background: barColor }} /></div>}
-      <div className="kpi-target">{target}</div>
+      {target && <div className="kpi-target">{target}</div>}
     </div>
   )
 }

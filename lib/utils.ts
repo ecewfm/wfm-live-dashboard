@@ -563,6 +563,8 @@ export function formatTime(iso: string | null | undefined): string {
 // gray = offline.
 export function getStatusPillClass(status: string | null): string {
   const s = (status || '').toLowerCase()
+  // Zoho's scheduled-but-not-logged-in (lib/zohoAuxShared.ts) — a shift that's on with nobody there.
+  if (/^(not logged in|logged out early)$/.test(s))                          return 'pill pill-nav'
   if (/offline|logged (out|off)|signed out/.test(s))                          return 'pill pill-offline'
   if (/break|lunch|meal|brb|bathroom|back soon|away|do not disturb/.test(s))  return 'pill pill-break'
   if (/after (call|chat)|\bacw\b|wrap|follow.?up/.test(s))                   return 'pill pill-acw'
@@ -575,11 +577,20 @@ export function getStatusPillClass(status: string | null): string {
   return 'pill pill-default'
 }
 
+/** A KPI tile with no thresholds of its own — information only, like a head count
+ *  (the Zoho-run accounts' Scheduled Now / Logged In, lib/zohoWorkforce.ts): its
+ *  warn and crit are out of reach (this and up, high = bad), so it never breaches;
+ *  it's shown in the plain text colour, with no target. */
+export const KPI_INFO_THRESHOLD = 999999
+export const isInfoKpi = (th: { warn: number; crit: number; direction: 'asc' | 'desc' }) =>
+  th.direction === 'asc' && th.warn >= KPI_INFO_THRESHOLD && th.crit >= KPI_INFO_THRESHOLD
+
 export function getKpiColorClass(
   value: number,
   th: { warn: number; crit: number; direction: 'asc' | 'desc'; excludeZero?: boolean }
 ): string {
   if (isNaN(value)) return 'text-muted'
+  if (isInfoKpi(th)) return 'text-main'
   if (th.excludeZero && value === 0) return 'text-success'
   if (th.direction === 'desc') {
     // Low = Bad: boundary values fall in the BETTER zone

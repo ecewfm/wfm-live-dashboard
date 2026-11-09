@@ -18,6 +18,7 @@ const BUILTIN_KEYS: string[] = ALARM_SOUNDS.map(s => s.key).filter(k => k !== 'n
 const NEWER_COLUMN_GROUPS: string[][] = [
   ['ring_mode'],
   ['warning_sound_kind', 'warning_builtin_key', 'warning_volume'],
+  ['muted_accounts'],   // sql/zoho_only_accounts.sql
 ]
 
 export async function POST(req: Request) {
@@ -66,6 +67,14 @@ export async function POST(req: Request) {
       const v = Number(b.warningVolume)
       if (!Number.isFinite(v) || v < 0 || v > 1) throw new AuthError(400, 'Warning volume must be between 0 and 1.')
       patch.warning_volume = v
+    }
+    // Accounts the alarm leaves out — ids, kept as given (an id that's since
+    // been removed is harmless).
+    if (b.mutedAccounts !== undefined) {
+      if (!Array.isArray(b.mutedAccounts) || b.mutedAccounts.some((x: unknown) => typeof x !== 'string')) {
+        throw new AuthError(400, 'mutedAccounts must be a list of account ids.')
+      }
+      patch.muted_accounts = [...new Set(b.mutedAccounts as string[])]
     }
 
     const db = admin()
