@@ -4,7 +4,7 @@
 // the settings shown in the modal (saved or not). A one-off — it doesn't count as
 // that hour's automatic report. See sendHourlyReportNow() in lib/hourlyCliq.ts.
 //
-// Body: { accountId, channel, config: { tz?, mode?, hiddenGroups? } }.
+// Body: { accountId, channel, config: { tz?, mode?, hiddenGroups?, picturePerGroup? } }.
 // Super users and RTAs (the roles that edit Settings); an RTA only for an
 // account assigned to them.
 
@@ -27,6 +27,7 @@ export async function POST(req: Request) {
       tz: typeof c.tz === 'string' ? c.tz : undefined,
       mode: c.mode === 'avg' || c.mode === 'worst' || c.mode === 'last' ? c.mode : undefined,
       hiddenGroups: Array.isArray(c.hiddenGroups) ? c.hiddenGroups.filter((g: unknown) => typeof g === 'string') : undefined,
+      picturePerGroup: c.picturePerGroup === true,
     }
     return json(await sendHourlyReportNow(accountId, { channel, config }))
   } catch (e) {

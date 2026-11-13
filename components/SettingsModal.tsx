@@ -2693,6 +2693,7 @@ function HourlyCliqSection({ accountId, channel, cliqOn, value, groups, onChange
   const hidden = new Set(cfg.hiddenGroups)
   const off = !cfg.enabled
   const noChannel = !channel.trim()
+  const shownGroups = groups.filter(g => !hidden.has(g.id)).length
 
   const toggleGroup = (id: string) => {
     const n = new Set(hidden)
@@ -2705,7 +2706,7 @@ function HourlyCliqSection({ accountId, channel, cliqOn, value, groups, onChange
     try {
       const r = await apiFetch('/api/cliq/hourly-report-now', {
         method: 'POST',
-        body: JSON.stringify({ accountId, channel, config: { tz: cfg.tz, mode: cfg.mode, hiddenGroups: cfg.hiddenGroups } }),
+        body: JSON.stringify({ accountId, channel, config: { tz: cfg.tz, mode: cfg.mode, hiddenGroups: cfg.hiddenGroups, picturePerGroup: cfg.picturePerGroup } }),
       })
       setResult({ ok: r?.status !== 'failed', lines: r?.log?.length ? r.log : [String(r?.status ?? 'Done')] })
     } catch (e: any) {
@@ -2721,7 +2722,8 @@ function HourlyCliqSection({ accountId, channel, cliqOn, value, groups, onChange
         A couple of minutes after every hour, posts the hour that just ended to the Cliq channel above: its
         <strong> Scheduled HC</strong>, <strong>Actual HC</strong>{' '}and <strong>Attendance %</strong>{' '}from
         Zoho and each KPI tile&apos;s value, then a picture of the day&apos;s hourly table so far — the same table
-        as the <strong>Hourly</strong>{' '}page. An hour with nobody scheduled or logged in and no KPI readings is
+        as the <strong>Hourly</strong>{' '}page, or one picture per KPI group with <strong>One picture per KPI
+        group</strong>{' '}on. An hour with nobody scheduled or logged in and no KPI readings is
         skipped. <strong>Enable Cliq Notifications</strong>{' '}and <strong>Test Mode</strong>{' '}above apply, like
         the breach alerts.
       </p>
@@ -2755,6 +2757,22 @@ function HourlyCliqSection({ accountId, channel, cliqOn, value, groups, onChange
               </select>
             </td>
           </tr>
+          {groups.length > 1 && (
+            <tr style={{ opacity: off ? 0.5 : 1 }}>
+              <td>
+                <div className="sm-metric">One picture per KPI group</div>
+                <div className="sm-metric-sub">
+                  {cfg.picturePerGroup
+                    ? `${shownGroups > 1 ? `${shownGroups} pictures` : 'One picture'} an hour — each group on its own, with the hours and head count`
+                    : 'Off — one picture with every group side by side'}
+                </div>
+              </td>
+              <td style={{ textAlign: 'center' }}>
+                <input type="checkbox" aria-label="One picture per KPI group" checked={cfg.picturePerGroup}
+                  onChange={() => set({ picturePerGroup: !cfg.picturePerGroup })} />
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
 

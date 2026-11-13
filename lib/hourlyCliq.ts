@@ -6,16 +6,18 @@
 //   1. a message with the hour that just ended — Scheduled HC, Actual HC,
 //      Attendance % and every KPI tile — plus the day so far;
 //   2. right under it, a picture of the day's hourly table up to that hour
-//      (lib/hourlyCliqImage.tsx).
+//      (lib/hourlyCliqImage.tsx) — or, with "One picture per KPI group" on
+//      (HourlyCliqConfig.picturePerGroup, per the user 2026-11-13), one picture
+//      per KPI group, each with the hours and head count, in the card's order.
 // The numbers are the Hourly page's: the same report (getHourlyReport) and the
 // same row / cell functions (lib/hourlyReport.ts). Same channel, global "Enable
 // Cliq Notifications" and Test Mode as the breach alerts. Every message is in
-// the Loggings tab (kind cliq, details.type 'hourly'); the picture isn't.
+// the Loggings tab (kind cliq, details.type 'hourly'); the pictures aren't.
 //
 // The cron (/api/cliq/hourly-report) runs every minute, and from SEND_FROM_MIN to
-// SEND_UNTIL_MIN minutes past the hour sends the accounts that are due,
-// HOURLY_PER_RUN at a time: Cliq allows 20 uploads a minute, and the breach scan
-// may post up to 15 pictures in the same minute. wfm_hourly_cliq_sent
+// SEND_UNTIL_MIN minutes past the hour sends the accounts that are due, about
+// HOURLY_UPLOADS_PER_RUN pictures a minute: Cliq allows 20 uploads a minute, and
+// the breach scan may post up to 15 pictures in the same minute. wfm_hourly_cliq_sent
 // (sql/hourly_report.sql) holds one row per account per hour, written BEFORE
 // sending, so an hour's report never goes out twice; a failed one is tried again
 // (MAX_TRIES in all). "Send the last hour now" in Settings (sendHourlyReportNow)
@@ -41,7 +43,10 @@ export const HOURLY_CLIQ_TABLE = 'wfm_hourly_cliq_sent'
 const HOUR_MS = 3600e3
 export const SEND_FROM_MIN = 2         // the hour's last KPI reading (:59) is in by then
 export const SEND_UNTIL_MIN = 30       // a report this late isn't worth sending any more
-export const HOURLY_PER_RUN = 4        // 15 breach pictures + 4 stays under Cliq's 20 uploads a minute
+// Pictures a minute: 15 breach pictures + 4 stays under Cliq's 20 uploads a minute. An
+// account with a picture per KPI group counts each one; an account with more pictures
+// than this still goes, on its own minute.
+export const HOURLY_UPLOADS_PER_RUN = 4
 export const MAX_TRIES = 3
 const RETRY_AFTER_MS = 2 * 60e3
 const KEEP_DAYS = 30
@@ -140,13 +145,34 @@ function withDefaults(d: HourlyCliqDeps): Required<HourlyCliqDeps> {
 const errText = (e: unknown) => e instanceof Error ? e.message : String(e)
 
 // ── One account's report for one hour ─────────────────────────────────────────
+export interface HourlyPicture {
+  image: HourlyImageInput
+  fileName: string
+  label: string           // "hourly table", or the KPI group's name
+}
 export interface BuiltHourlyReport {
   hourText: string        // "10:00–11:00 ET"
   message: string
   summaryParts: string[]  // the Loggings line
-  image: HourlyImageInput
-  fileName: string
+  pictures: HourlyPicture[]  // posted under the message, in this order
 }
+
+/** The KPI groups in the report: the card's groups that have tiles, less the hidden ones.
+ *  Trimmed: some saved group names / tile labels end in a space ("OOM "). */
+function reportGroups(a: HourlyCliqAccount, cfg: Required<HourlyCliqConfig>) {
+  const hidden = new Set(cfg.hiddenGroups)
+  return kpiCardGroups(a.ds, undefined, a.kpi).filter(g => g.tiles.length && !hidden.has(g.id))
+    .map(g => ({ ...g, name: g.name.trim(), tiles: g.tiles.map(t => ({ ...t, label: t.label.trim() })) }))
+}
+
+/** How many pictures the account's report posts: one per KPI group in it when that's on, else one. */
+export function hourlyPictureCount(a: HourlyCliqAccount): number {
+  const cfg = hourlyCliqOf(a.ds)
+  return cfg.picturePerGroup ? Math.max(1, reportGroups(a, cfg).length) : 1
+}
+
+/** "Service Recovery & Escalations" → "service-recovery-escalations", for a file name. */
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'group'
 
 /** The message and picture for the hour starting at `hourStart` — null when nothing happened in it
  *  (nobody scheduled or logged in, no KPI reading). */
@@ -166,11 +192,7 @@ export async function buildHourlyCliqReport(
   if (!row || !rowHasData(row)) return null
   const shown = trimHourlyRows(upTo)
 
-  const hidden = new Set(cfg.hiddenGroups)
-  // Trimmed: some saved group names / tile labels end in a space ("OOM ").
-  const groups = kpiCardGroups(a.ds, undefined, a.kpi).filter(g => g.tiles.length && !hidden.has(g.id))
-    .map(g => ({ ...g, name: g.name.trim(), tiles: g.tiles.map(t => ({ ...t, label: t.label.trim() })) }))
-  const tiles = groups.flatMap(g => g.tiles.map(t => ({ g, t })))
+  const groups = reportGroups(a, cfg)
   const anySchedule = report.people.some(p => p.shifts.length > 0)
   const day = dayHeads(upTo.map(r => r.heads))
   const zone = tzShortLabel(tz)
@@ -214,27 +236,37 @@ export async function buildHourlyCliqReport(
   lines.push('', `📅 Day so far (${dayText}): Scheduled ${anySchedule ? day.scheduled : '—'} · Actual ${day.actual ?? '—'} · Attendance ${pctText(day.attendance) || '—'}`)
   if (testMode) lines.push('', '⚠️ This is a TEST message. Disable Test Mode in Settings > Zoho Integrations when ready.')
 
-  const image: HourlyImageInput = {
-    accountId: a.id, displayName: name, dateLabel, tzLabel: zone, modeLabel, testMode,
-    groups: groups.map(g => ({ id: g.id, name: g.name, tiles: g.tiles.map(t => ({ key: t.key, label: t.label })) })),
-    rows: shown.map(r => {
-      const n = attendanceOf(r.heads)
-      return {
-        label: r.label, highlight: r.start === hourStart,
-        scheduled: scheduled(r), actual: r.heads.started ? String(actualOf(r.heads)) : '', attendance: pctText(n), attTone: attendanceTone(n),
-        kpi: tiles.map(({ g, t }) => hourlyKpiCell(r.kpi, g.id, t, cfg.mode)),
-      }
-    }),
-    total: {
-      scheduled: anySchedule ? String(day.scheduled) : '', actual: day.actual === null ? '' : String(day.actual), attendance: pctText(day.attendance),
-      kpi: tiles.map(({ g, t }) => hourlyTotalKpi(upTo, g.id, t, cfg.mode)),
-    },
-    footNote: `TOTAL = the day so far, ${dayText}. Scheduled HC: scheduled for at least half the hour · Actual HC: logged in for at least half of it.`,
+  // A picture of the table with `gs`'s KPI columns — every picture has the hours and the head count.
+  const tableOf = (gs: typeof groups, part?: HourlyImageInput['part']): HourlyImageInput => {
+    const tiles = gs.flatMap(g => g.tiles.map(t => ({ g, t })))
+    return {
+      accountId: a.id, displayName: name, dateLabel, tzLabel: zone, modeLabel, testMode, part,
+      groups: gs.map(g => ({ id: g.id, name: g.name, tiles: g.tiles.map(t => ({ key: t.key, label: t.label })) })),
+      rows: shown.map(r => {
+        const n = attendanceOf(r.heads)
+        return {
+          label: r.label, highlight: r.start === hourStart,
+          scheduled: scheduled(r), actual: r.heads.started ? String(actualOf(r.heads)) : '', attendance: pctText(n), attTone: attendanceTone(n),
+          kpi: tiles.map(({ g, t }) => hourlyKpiCell(r.kpi, g.id, t, cfg.mode)),
+        }
+      }),
+      total: {
+        scheduled: anySchedule ? String(day.scheduled) : '', actual: day.actual === null ? '' : String(day.actual), attendance: pctText(day.attendance),
+        kpi: tiles.map(({ g, t }) => hourlyTotalKpi(upTo, g.id, t, cfg.mode)),
+      },
+      footNote: `TOTAL = the day so far, ${dayText}. Scheduled HC: scheduled for at least half the hour · Actual HC: logged in for at least half of it.`,
+    }
   }
-  return {
-    hourText, message: lines.join('\n'), summaryParts: [...hc, ...kpiParts], image,
-    fileName: `${a.id}-hourly-${date}-${clockIn(hourStart, tz).replace(':', '')}.png`,
-  }
+  const fileBase = `${a.id}-hourly-${date}-${clockIn(hourStart, tz).replace(':', '')}`
+  // One picture per group only when there are several — one group is one picture either way.
+  const pictures: HourlyPicture[] = cfg.picturePerGroup && groups.length > 1
+    ? groups.map((g, i) => ({
+      image: tableOf([g], { name: g.name, index: i + 1, count: groups.length }),
+      fileName: `${fileBase}-${i + 1}-${slug(g.name)}.png`,
+      label: g.name,
+    }))
+    : [{ image: tableOf(groups), fileName: `${fileBase}.png`, label: 'hourly table' }]
+  return { hourText, message: lines.join('\n'), summaryParts: [...hc, ...kpiParts], pictures }
 }
 
 /** Build and send one account's report for one hour: the message, then the picture under it. */
@@ -257,6 +289,7 @@ export async function sendHourlyCliqReport(
     details: {
       type: 'hourly', channel, testMode: opts.testMode, message: built.message,
       hour: new Date(hourStart).toISOString(), hourText: built.hourText, tz: cfg.tz, kpiMode: cfg.mode,
+      pictures: built.pictures.length,
     },
   })
   try {
@@ -268,15 +301,20 @@ export async function sendHourlyCliqReport(
   }
   l(`${a.id}: hourly report for ${built.hourText} sent to Cliq #${channel}.`)
   await log('sent')
-  // The picture only once the message went through; a picture that fails is a log line, not a failed report.
-  try {
-    await d.sendFile(channel, await d.render(built.image), built.fileName, 'image/png')
-    l(`${a.id}: hourly table picture posted.`)
-    return { status: 'sent', note: '' }
-  } catch (e) {
-    l(`${a.id}: hourly table picture not posted — ${errText(e)}`)
-    return { status: 'sent', note: `picture not posted — ${errText(e)}` }
+  // The pictures only once the message went through, one after another so they land in order.
+  // A picture that fails is a log line and a note, not a failed report — the next one still goes.
+  const missed: string[] = []
+  for (const [i, p] of built.pictures.entries()) {
+    const which = built.pictures.length > 1 ? `picture ${i + 1} of ${built.pictures.length} (${p.label})` : 'hourly table picture'
+    try {
+      await d.sendFile(channel, await d.render(p.image), p.fileName, 'image/png')
+      l(`${a.id}: ${which} posted.`)
+    } catch (e) {
+      l(`${a.id}: ${which} not posted — ${errText(e)}`)
+      missed.push(`${built.pictures.length > 1 ? which : 'picture'} not posted — ${errText(e)}`)
+    }
   }
+  return { status: 'sent', note: missed.join('; ') }
 }
 
 // ── The cron: every account that's due, a few at a time ──────────────────────
@@ -317,7 +355,16 @@ export async function runHourlyCliqReports(deps: HourlyCliqDeps = {}): Promise<H
     return !c || (c.status === 'failed' && c.attempts < MAX_TRIES && now - Date.parse(c.updated_at) >= RETRY_AFTER_MS)
   })
   if (!due.length) { l(`Every account's report for ${hourIso} is done.`); return out }
-  const batch = due.slice(0, HOURLY_PER_RUN)
+  // This minute's share: due accounts in order while their pictures fit HOURLY_UPLOADS_PER_RUN —
+  // always at least one, so an account with more pictures than that isn't stuck.
+  const batch: HourlyCliqAccount[] = []
+  let uploads = 0
+  for (const a of due) {
+    const n = hourlyPictureCount(a)
+    if (batch.length && uploads + n > HOURLY_UPLOADS_PER_RUN) break
+    batch.push(a)
+    uploads += n
+  }
   if (due.length > batch.length) l(`${due.length - batch.length} more account(s) next minute — Cliq allows 20 uploads a minute.`)
 
   // One at a time: they share the Zoho caches, and the uploads stay spread out.

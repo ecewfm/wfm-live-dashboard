@@ -424,6 +424,7 @@ export function hourlyCliqOf(ds: { hourlyCliq?: HourlyCliqConfig } | null | unde
     tz: c?.tz && isHourlyTz(c.tz) ? c.tz : DEFAULT_HOURLY_TZ,
     mode: c?.mode === 'avg' || c?.mode === 'worst' ? c.mode : 'last',
     hiddenGroups: Array.isArray(c?.hiddenGroups) ? c.hiddenGroups : [],
+    picturePerGroup: c?.picturePerGroup === true,
   }
 }
 

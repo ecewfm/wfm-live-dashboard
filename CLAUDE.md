@@ -1008,9 +1008,10 @@ Worst) and which KPI groups to include. Saved as `DataSourceConfig.hourlyCliq`
   was switched onto them, so the two can't drift). An hour with nobody scheduled or
   logged in and no KPI reading is skipped (not sent, not logged).
 - **When** — `/api/cliq/hourly-report` (Vercel Cron, every minute, `CRON_SECRET`)
-  works only 2–30 minutes past the hour (`SEND_FROM_MIN` / `SEND_UNTIL_MIN`), at
-  most `HOURLY_PER_RUN` (4) accounts a minute, one at a time: Cliq allows 20 uploads
-  a minute and the breach scan can post 15 pictures in the same minute.
+  works only 2–30 minutes past the hour (`SEND_FROM_MIN` / `SEND_UNTIL_MIN`), about
+  `HOURLY_UPLOADS_PER_RUN` (4) pictures a minute, one account at a time: Cliq allows
+  20 uploads a minute and the breach scan can post 15 pictures in the same minute.
+  (Was 4 accounts a minute until "One picture per KPI group" — see below.)
 - **Never twice** — `wfm_hourly_cliq_sent` (`sql/hourly_report.sql` section 4 —
   **run that file again once**; until then the cron logs the hint and sends
   nothing): one row per account per hour, claimed BEFORE sending (insert; a unique
@@ -1036,6 +1037,37 @@ Worst) and which KPI groups to include. Saved as `DataSourceConfig.hourlyCliq`
   production (all 9 accounts with a Cliq channel: messages + real pictures, nothing
   written, Cliq faked); the Settings section, send-now, Save and the Loggings row on
   the production build (25, light + dark); the Hourly page re-run (42).
+
+### One picture per KPI group (2026-11-13)
+
+Per the user: the one picture with every group side by side is too wide in Cliq
+(Ashley Digital: Sales / Support / Service Recovery … KPI Performance shrink to an
+unreadable strip). New per-account switch, **off by default** (nothing changes until
+it's ticked): Settings → Zoho Integrations → Hourly report to Cliq → **One picture
+per KPI group** (shown when the account has 2+ KPI groups) —
+`HourlyCliqConfig.picturePerGroup`, `hourlyCliqOf()` fills `false`.
+
+- On: the same message, then one picture per KPI group in the report (hidden groups
+  left out), in the card's order, posted one after another. Each picture is the
+  same table — Interval, the head count columns, TOTAL, footer — with only that
+  group's tile columns, and the group's name + "1/3" in an orange pill in the
+  title. Only 1 group left → one ordinary picture (no pill, old file name).
+- `buildHourlyCliqReport()` returns `pictures: HourlyPicture[]` (was `image` +
+  `fileName`); file names `{id}-hourly-{date}-{hhmm}-{n}-{group slug}.png`.
+  `hourlyPictureCount()` is what the cron counts.
+- A picture that fails is a log line ("picture 2 of 3 (Support KPI Performance) not
+  posted — …") and part of the claim row's note; the others still go and the report
+  is still `sent`. The single-picture wording is unchanged. Loggings `details.pictures`.
+- The cron's minute: due accounts in order while their pictures fit
+  `HOURLY_UPLOADS_PER_RUN` (4), always at least one — an account with more groups
+  than that goes on its own minute (it can then pass Cliq's 20 only in a minute
+  the breach scan also posts 15+ pictures; a refused upload is just a missed picture).
+- The picture now also widens to fit its title (`titlePx`, up to 1100px) and a
+  group's columns to fit the group's name (up to 300px of text) — both modes.
+- "Send the last hour now" sends `picturePerGroup` as shown (saved or not).
+- Verified with fakes and real renders (21: off unchanged, split cells = the one
+  picture's, order, hidden / single group, a failed picture, the per-minute cap, a
+  6-group account, send-now).
 
 ## Accounts run from Zoho alone — no CRM (2026-11-09)
 

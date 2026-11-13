@@ -35,6 +35,9 @@ export interface HourlyImageInput {
   total: { scheduled: string; actual: string; attendance: string; kpi: string[] }
   footNote: string         // "TOTAL = the day so far (8:00–11:00 ET) · sent 11:02 AM"
   testMode: boolean
+  // One of several pictures, one per KPI group (HourlyCliqConfig.picturePerGroup):
+  // the group's name and "1/3" go in the title.
+  part?: { name: string; index: number; count: number }
 }
 
 const H = { title: 48, groupRow: 24, colRow: 32, row: 28, total: 30, footer: 44 }
@@ -51,9 +54,25 @@ const ATT_COLOR: Record<CellTone, string | null> = { ok: null, warn: C.warning, 
 
 interface Layout { interval: number; hc: number[]; tiles: number[]; width: number }
 
+const titleText = (input: HourlyImageInput) => `Hourly Report — ${input.displayName}`
+const partText = (p: NonNullable<HourlyImageInput['part']>) => `${p.name} · ${p.index}/${p.count}`
+const metaText = (input: HourlyImageInput) => `${input.dateLabel} · ${input.tzLabel} · KPI: ${input.modeLabel}`
+
+// About how wide the title bar's contents are, so a narrow table (one KPI group)
+// is widened until its title fits — up to TITLE_MAX_W; past that the name ends in "…".
+function titlePx(input: HourlyImageInput): number {
+  const px = (s: string, size: number, bold = false) => textPx(s) * size / 12 * (bold ? 1.06 : 1)
+  let w = 32 + 17 + 8 + px(titleText(input), 14, true)                      // padding, icon, title
+  if (input.displayName !== input.accountId) w += 6 + px(`(${input.accountId})`, 10)
+  if (input.part) w += 10 + 16 + px(partText(input.part), 11, true)       // the group pill
+  if (input.testMode) w += 10 + 16 + px('TEST', 10, true)
+  return w + 12 + px(metaText(input), 11)
+}
+const TITLE_MAX_W = 1100
+
 // Each column fitted to its header and its values (12px text, 10px capitals in
 // the header), 44–150px of text for a KPI column; a table narrower than MIN_W
-// is widened in proportion.
+// (or than its title) is widened in proportion.
 function layout(input: HourlyImageInput): Layout {
   const fit = (label: string, values: string[], min = 0, max = Infinity) =>
     Math.min(max, Math.max(min, headerPx(label), ...values.map(v => textPx(v)))) + CELL_PAD
@@ -65,8 +84,18 @@ function layout(input: HourlyImageInput): Layout {
   ]
   const tiles = input.groups.flatMap(g => g.tiles).map((t, i) =>
     fit(t.label, [input.total.kpi[i] ?? '', ...input.rows.map(r => r.kpi[i]?.text ?? '')], 44, 150))
+  // A group's columns are at least as wide as its name over them (up to 300px of text; past that "…").
+  let first = 0
+  for (const g of input.groups) {
+    const n = g.tiles.length
+    const sum = tiles.slice(first, first + n).reduce((a, b) => a + b, 0)
+    const need = Math.min(300, headerPx(g.name)) + CELL_PAD
+    if (n && sum < need) for (let i = first; i < first + n; i++) tiles[i] *= need / sum
+    first += n
+  }
   const natural = interval + hc.reduce((a, b) => a + b, 0) + tiles.reduce((a, b) => a + b, 0)
-  const k = natural < MIN_W ? MIN_W / natural : 1
+  const minW = Math.max(MIN_W, Math.min(TITLE_MAX_W, Math.ceil(titlePx(input))))
+  const k = natural < minW ? minW / natural : 1
   const r = (n: number) => Math.round(n * k)
   const out = { interval: r(interval), hc: hc.map(r), tiles: tiles.map(r) }
   return { ...out, width: out.interval + out.hc.reduce((a, b) => a + b, 0) + out.tiles.reduce((a, b) => a + b, 0) }
@@ -113,10 +142,16 @@ function Table({ input, L }: { input: HourlyImageInput; L: Layout }) {
         <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, flexShrink: 1 }}>
           <Icon name="buildings" size={17} color={C.primary} />
           <div style={{ display: 'block', marginLeft: 8, fontSize: 14, fontWeight: 700, color: '#ffffff', letterSpacing: 0.3, ...oneLine }}>
-            {`Hourly Report — ${input.displayName}`}
+            {titleText(input)}
           </div>
           {input.displayName !== input.accountId && (
             <div style={{ display: 'block', marginLeft: 6, fontSize: 10, color: C.muted, ...oneLine }}>{`(${input.accountId})`}</div>
+          )}
+          {input.part && (
+            <div style={{
+              display: 'flex', flexShrink: 0, marginLeft: 10, padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 700,
+              color: C.primary, background: 'rgba(217,122,53,0.14)', border: '1px solid rgba(217,122,53,0.40)',
+            }}>{partText(input.part)}</div>
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, marginLeft: 12 }}>
@@ -126,7 +161,7 @@ function Table({ input, L }: { input: HourlyImageInput; L: Layout }) {
               color: C.warning, background: 'rgba(255,209,102,0.15)', border: '1px solid rgba(255,209,102,0.35)',
             }}>TEST</div>
           )}
-          <div style={{ display: 'flex', fontSize: 11, color: C.muted }}>{`${input.dateLabel} · ${input.tzLabel} · KPI: ${input.modeLabel}`}</div>
+          <div style={{ display: 'flex', fontSize: 11, color: C.muted }}>{metaText(input)}</div>
         </div>
       </div>
 
@@ -205,6 +240,7 @@ function withoutEmoji(input: HourlyImageInput): HourlyImageInput {
   return {
     ...input,
     displayName: noEmoji(input.displayName),
+    ...(input.part ? { part: { ...input.part, name: noEmoji(input.part.name) } } : {}),
     groups: input.groups.map(g => ({ ...g, name: noEmoji(g.name), tiles: g.tiles.map(t => ({ ...t, label: noEmoji(t.label) })) })),
     rows: input.rows.map(r => ({ ...r, kpi: r.kpi.map(c => ({ ...c, text: noEmoji(c.text) })) })),
     total: { ...input.total, kpi: input.total.kpi.map(noEmoji) },

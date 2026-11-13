@@ -425,6 +425,10 @@ export interface HourlyCliqConfig {
   tz?: string                          // one of HOURLY_TIMEZONES; unset = Eastern
   mode?: 'last' | 'avg' | 'worst'      // which KPI value (KpiMode); unset = end of hour
   hiddenGroups?: string[]              // KPI group ids left out of the report
+  // One picture per KPI group (each with the hours and head count) instead of
+  // one wide table with every group side by side — per the user, 2026-11-13.
+  // Unset = one picture.
+  picturePerGroup?: boolean
 }
 
 export interface AgentFilter {
