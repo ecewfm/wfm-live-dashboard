@@ -11,7 +11,9 @@
 import { requireRole, errorResponse, json, AuthError } from '@/lib/authServer'
 import { sendHourlyReportNow } from '@/lib/hourlyCliq'
 
-export const maxDuration = 60
+// Builds the report, then draws and uploads one picture per KPI group — 60 s cut off
+// Ashley Digital's after the 2nd of 3 pictures (2026-11-13). Vercel Pro allows 300.
+export const maxDuration = 300
 
 export async function POST(req: Request) {
   try {

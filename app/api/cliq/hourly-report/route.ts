@@ -9,8 +9,10 @@
 
 import { runHourlyCliqReports } from '@/lib/hourlyCliq'
 
-// Can pull Zoho's time logs / schedules for the day first, then draw and upload pictures.
-export const maxDuration = 120
+// Can pull Zoho's time logs / schedules for the day first, then draw and upload pictures —
+// several a minute with "One picture per KPI group" (each takes seconds to draw).
+// Was 120; Vercel Pro allows 300.
+export const maxDuration = 300
 
 export async function GET(request: Request) {
   const cronSecret = process.env.CRON_SECRET

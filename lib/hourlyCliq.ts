@@ -49,6 +49,10 @@ export const SEND_UNTIL_MIN = 30       // a report this late isn't worth sending
 export const HOURLY_UPLOADS_PER_RUN = 4
 export const MAX_TRIES = 3
 const RETRY_AFTER_MS = 2 * 60e3
+// A claim still 'sending' this long after it was taken belongs to a run that was cut
+// off (the route's maxDuration is 300 s) — retried like a failed one. Pictures are drawn
+// before anything is sent, so a run cut off while drawing has posted nothing.
+export const STUCK_AFTER_MS = 6 * 60e3
 const KEEP_DAYS = 30
 
 export interface HourlyCliqAccount { id: string; ds: DataSourceConfig; kpi: Thresholds; channel: string | null }
@@ -99,10 +103,10 @@ export function supabaseHourlyCliqStore(): HourlyCliqStore {
         check(error, 'claiming the hourly report')
         return true
       }
-      // A retry: only while the row is still the failed one this run saw.
+      // A retry (a failed claim, or one stuck 'sending'): only while the row is still the one this run saw.
       const { data, error } = await db().from(HOURLY_CLIQ_TABLE)
         .update({ status: 'sending', attempts: prev.attempts + 1, updated_at: atIso })
-        .eq('account_id', accountId).eq('hour_start', hourIso).eq('status', 'failed').eq('attempts', prev.attempts)
+        .eq('account_id', accountId).eq('hour_start', hourIso).eq('status', prev.status).eq('attempts', prev.attempts)
         .select('account_id')
       check(error, 'claiming the hourly report')
       return (data ?? []).length > 0
@@ -292,6 +296,24 @@ export async function sendHourlyCliqReport(
       pictures: built.pictures.length,
     },
   })
+  // Every picture is drawn BEFORE anything is sent. Drawing is the slow part (seconds a
+  // picture), and Ashley Digital's 3 group pictures drawn between uploads ran past the
+  // send's time limit after picture 2 (2026-11-13) — the third never went. Drawn first,
+  // a send cut off by the limit has posted nothing, and the uploads go out back to back.
+  // A picture that fails is a log line and a note, not a failed report — the rest still go.
+  const many = built.pictures.length > 1
+  const which = (i: number, p: HourlyPicture) => many ? `picture ${i + 1} of ${built.pictures.length} (${p.label})` : 'hourly table picture'
+  const missed: string[] = []
+  const drawn: (Uint8Array | null)[] = []
+  for (const [i, p] of built.pictures.entries()) {
+    try {
+      drawn.push(await d.render(p.image))
+    } catch (e) {
+      drawn.push(null)
+      l(`${a.id}: ${which(i, p)} not drawn — ${errText(e)}`)
+      missed.push(`${many ? which(i, p) : 'picture'} not drawn — ${errText(e)}`)
+    }
+  }
   try {
     await d.sendMessage(channel, built.message)
   } catch (e) {
@@ -302,16 +324,15 @@ export async function sendHourlyCliqReport(
   l(`${a.id}: hourly report for ${built.hourText} sent to Cliq #${channel}.`)
   await log('sent')
   // The pictures only once the message went through, one after another so they land in order.
-  // A picture that fails is a log line and a note, not a failed report — the next one still goes.
-  const missed: string[] = []
   for (const [i, p] of built.pictures.entries()) {
-    const which = built.pictures.length > 1 ? `picture ${i + 1} of ${built.pictures.length} (${p.label})` : 'hourly table picture'
+    const png = drawn[i]
+    if (!png) continue
     try {
-      await d.sendFile(channel, await d.render(p.image), p.fileName, 'image/png')
-      l(`${a.id}: ${which} posted.`)
+      await d.sendFile(channel, png, p.fileName, 'image/png')
+      l(`${a.id}: ${which(i, p)} posted.`)
     } catch (e) {
-      l(`${a.id}: ${which} not posted — ${errText(e)}`)
-      missed.push(`${built.pictures.length > 1 ? which : 'picture'} not posted — ${errText(e)}`)
+      l(`${a.id}: ${which(i, p)} not posted — ${errText(e)}`)
+      missed.push(`${many ? which(i, p) : 'picture'} not posted — ${errText(e)}`)
     }
   }
   return { status: 'sent', note: missed.join('; ') }
@@ -352,7 +373,9 @@ export async function runHourlyCliqReports(deps: HourlyCliqDeps = {}): Promise<H
 
   const due = accounts.filter(a => {
     const c = claims.get(a.id)
-    return !c || (c.status === 'failed' && c.attempts < MAX_TRIES && now - Date.parse(c.updated_at) >= RETRY_AFTER_MS)
+    return !c || (c.attempts < MAX_TRIES && (
+      (c.status === 'failed' && now - Date.parse(c.updated_at) >= RETRY_AFTER_MS) ||
+      (c.status === 'sending' && now - Date.parse(c.updated_at) >= STUCK_AFTER_MS)))
   })
   if (!due.length) { l(`Every account's report for ${hourIso} is done.`); return out }
   // This minute's share: due accounts in order while their pictures fit HOURLY_UPLOADS_PER_RUN —

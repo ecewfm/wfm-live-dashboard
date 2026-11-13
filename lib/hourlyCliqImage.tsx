@@ -42,6 +42,11 @@ export interface HourlyImageInput {
 
 const H = { title: 48, groupRow: 24, colRow: 32, row: 28, total: 30, footer: 44 }
 const CELL_PAD = 24, MIN_W = 560, MAX_IMAGE_PX = 4000
+// Pixels in one picture. Drawing time grows with them, and a report can post several
+// (one per KPI group): Ashley Digital's 12-column groups took ~9.5 s each at 2x and
+// ~5.6 s at 1.5x (2026-11-13), and 3 of them at 2x ran past the send's time limit.
+// Small tables still get the full 2x.
+const MAX_PIXELS = 2_600_000
 const HC_LABELS = ['Scheduled HC', 'Actual HC', 'Attendance %']
 const GROUP_LINE = '1px solid #3a3a3a'
 const TONE: Record<CellTone, { color: string; background: string } | null> = {
@@ -261,8 +266,9 @@ export async function renderHourlyTablePng(input: HourlyImageInput): Promise<Uin
 async function draw(input: HourlyImageInput): Promise<Uint8Array> {
   const L = layout(input)
   const page = { width: L.width + 2 + PAD * 2, height: height(input) + PAD * 2 }
-  // 2x like the card, less for a very wide table so the file stays a sensible size.
-  const scale = Math.max(1, Math.min(SCALE, MAX_IMAGE_PX / page.width))
+  // 2x like the card, less for a very wide or big table so it stays quick to draw
+  // and a sensible size (never under 1x).
+  const scale = Math.max(1, Math.min(SCALE, MAX_IMAGE_PX / page.width, Math.sqrt(MAX_PIXELS / (page.width * page.height))))
   const px = { width: Math.round(page.width * scale), height: Math.round(page.height * scale) }
   const res = new ImageResponse(
     (
