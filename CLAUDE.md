@@ -1065,6 +1065,15 @@ per KPI group** (shown when the account has 2+ KPI groups) —
 - The picture now also widens to fit its title (`titlePx`, up to 1100px) and a
   group's columns to fit the group's name (up to 300px of text) — both modes.
 - "Send the last hour now" sends `picturePerGroup` as shown (saved or not).
+- **Time limits (fix, 2026-11-13).** Drawing is slow on Vercel, about 20 s a picture at 2x for
+  Ashley Digital's 12-column groups. "Send the last hour now" (then `maxDuration` 60) was cut off
+  after picture 2 of 3, so only 2 reached Cliq. The automatic one (then 120) got all 3 with about
+  8 s to spare. Now: both routes `maxDuration = 300`; every picture is **drawn before the message
+  is sent**, so a run cut off has posted nothing and the uploads go back to back; a picture is capped
+  at `MAX_PIXELS` (2.6 Mpx — Ashley Digital's groups draw at ~1.5x, ~6 s locally instead of ~9.5 s;
+  small tables still 2x); and a claim still `sending` after `STUCK_AFTER_MS` (6 min) is retried
+  like a failed one (`MAX_TRIES` still applies). A picture that fails to draw is skipped and noted
+  ("picture 2 of 3 (…) not drawn — …"), the rest still go.
 - Verified with fakes and real renders (21: off unchanged, split cells = the one
   picture's, order, hidden / single group, a failed picture, the per-minute cap, a
   6-group account, send-now).
