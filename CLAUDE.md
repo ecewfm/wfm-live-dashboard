@@ -1195,6 +1195,40 @@ count, against the agents actually logged in on that timeline.
   EarnIn - Fraud, IAA Release Agents, PLS T&T, Resident Home Accounting, Resident Home Sales.
   Works once BOTH apps are deployed; either alone changes nothing.
 
+## Leave: planned leave out of the scheduled head count, sick leave in (2026-11-16)
+
+Per the user: VL, ML and every other leave EXCEPT SL are planned, so they're left out of
+the scheduled head count; SL (unplanned) stays in and counts as absence.
+
+- **Where leave comes from** — WFM Live's time-log Note marker (`[VL in Hours][8]`) only ever
+  carries VL and SL (scan Nov 9–16: VL 453, SL 47, nothing else). ML, Suspension, MedLOA,
+  Birthday Leave, VTO, SPL, LOA… exist only as Zoho's APPROVED leave requests — and those people
+  ARE on the Daily Schedule with a shift (Nov 12/13/16: 35 of 40 ML, 14 of 14 Suspension…), so
+  they used to count as scheduled no-shows. vCORE already pulls those requests (app
+  `ece-attendance-manila`, report `Leaves_For_Approval_All_Statuses`, approved only, cached per
+  date in its `zoho_leaves`); it now hands them over at **`POST /api/live/leaves {dates}`**
+  (same secret as `/api/live/kpis`; refreshes its cache from Zoho when 15+ min old for
+  today/yesterday). `fetchRestLeaves` (`lib/workforceRest.ts`, 12 s timeout, answers reused 60 s)
+  → `mergeLeaves(leavesOf(notes), approved)` — an approved request wins (type, half, hours).
+  vCORE unreachable / not configured → notes only, as before (logged).
+- **The rule** — `countedShift()` (`lib/zohoWorkforce.ts`): no leave or SICK (`isSickLeave`:
+  SL, "SL in Hours", Sick Leave, HD-SL) → the whole shift counts; PLANNED half day → the shift
+  minus that half (its hours, else half the shift); PLANNED whole day → left out unless they
+  logged in during it. Applied in `computeAccountKpis` (all eight card tiles; `onLeave` = planned
+  whole days only) and in `getHourlyReport` (the Hourly page's / hourly Cliq's Scheduled HC; log
+  line "Leave: N shift(s) on planned leave left out …"). Agent Status's "Not Logged In" list
+  still leaves out anyone on ANY leave who hasn't logged in (`onLeave`) — nothing to act on.
+- **REST-fed cards** follow the same rule on vCORE's side (`liveKpisOf`, its `isSickLeave` in
+  `src/lib/attendance.ts`): a sick agent stays in Scheduled Now / Not Logged In / Absenteeism, and
+  only their real time counts as logged in (the SL overlay `attachLeaves` draws is ignored).
+- Effect on 2026-11-16 (read-only dry runs, same instant, old vs new code): 5 of 22 Zoho-fed
+  cards changed — Earnin Scheduled Now 135→131, attendance 90.8→92.4%, absenteeism 11.2→8.6%;
+  ILS attendance 94.7→99.2%, absenteeism 4.8→0%; 7Cs, IAA Release Agents, Prefix smaller.
+  Hourly: Earnin day Scheduled HC 195→180 (28 planned-leave shifts out, 4 halved), attendance
+  84.5→91.6%; Coalition 11:00 29→27 (= the card). REST-fed: nobody on SL today → no change.
+- Verified: 16 rule checks here, 8 on vCORE's side, the dry runs above; tsc + both builds.
+  Needs BOTH apps deployed for the approved leaves (WFM Live alone = notes, with SL now kept in).
+
 ## Formula KPI tiles — a tile worked out from several values (2026-11-16)
 
 Per the user: instead of binding a tile to ONE cell, work it out from several —

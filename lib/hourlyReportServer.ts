@@ -29,6 +29,8 @@ import { getZohoAccessToken } from './zohoAuth'
 import { kpiCardGroups, freshestAcrossSources, fetchKpiData, supabaseTableFetcher } from './breaches'
 import { migrateDataSource, mergeKpiThresholds } from './utils'
 import type { AccountData, DataSourceConfig } from './types'
+import { countedShift, leavesOf, mergeLeaves } from './zohoWorkforce'
+import { fetchRestLeaves, type RestLeaves } from './workforceRest'
 import {
   supabaseAuxStore, refreshZohoLogDates, fetchReport, isDue, isInProgress,
   ZOHO_AUX_PULL_MINUTES, YESTERDAY_PULL_MINUTES, PRIMARY_TZ,
@@ -253,7 +255,11 @@ export async function loadZohoSchedules(
 // ── 3. The page's data (HourlyReport, lib/hourlyReport.ts) ────────────────────
 export async function getHourlyReport(
   accountId: string, date: string, tz: string,
-  deps: { store?: HourlyStore; auxStore?: AuxStore; getToken?: () => Promise<string>; fetch?: FetchLike; now?: () => number } = {},
+  deps: {
+    store?: HourlyStore; auxStore?: AuxStore; getToken?: () => Promise<string>; fetch?: FetchLike; now?: () => number
+    /** Zoho's approved leave requests for some dates — vCORE's /api/live/leaves by default. */
+    leaves?: (dates: string[]) => Promise<RestLeaves>
+  } = {},
 ): Promise<HourlyReport> {
   const store = deps.store ?? supabaseHourlyStore()
   const auxStore = deps.auxStore ?? supabaseAuxStore()
@@ -298,6 +304,13 @@ export async function getHourlyReport(
     l(`Zoho schedules: their table is missing — ${HOURLY_SQL_HINT}.`)
   }
 
+  // The day's leave — time-log notes plus Zoho's approved requests via vCORE (per the user,
+  // 2026-11-16): PLANNED leave isn't scheduled head count (a whole day drops the shift, a half
+  // day cuts it), SICK leave stays in — the card's own rule, countedShift in lib/zohoWorkforce.ts.
+  const approved = await (deps.leaves ?? (ds => fetchRestLeaves(ds, { now })))(zDates)
+  if (!approved.ok && approved.reason !== 'not configured') l(`Approved leaves from Workforce REST: ${approved.reason} — using the time-log notes only (VL / SL).`)
+  const leaves = mergeLeaves(leavesOf(sessions), approved.ok ? approved.leaves : null)
+
   // Everyone on the account, by name: their shifts and their sessions.
   const byPerson = new Map<string, HourlyPerson>()
   const matched = new Map<string, string>()
@@ -313,10 +326,21 @@ export async function getHourlyReport(
     on.forEach(a => matched.set(normalizeAccount(a), a))
     person(s.employee).sessions.push([Date.parse(s.login), s.logout ? Date.parse(s.logout) : null])
   }
+  let leftOut = 0, cut = 0
   for (const row of scheduleRows) {
     matched.set(row.account_norm, row.account)
-    for (const sh of row.payload ?? []) person(sh.employee).shifts.push([Date.parse(sh.start), Date.parse(sh.end)])
+    const date = String(row.log_date).slice(0, 10)
+    for (const sh of row.payload ?? []) {
+      const p = person(sh.employee)
+      const shift = { norm: normalizeName(sh.employee), date, start: Date.parse(sh.start), end: Date.parse(sh.end) }
+      const spans: [number, number][] = p.sessions.map(x => [x[0], sessionEnd(x, now)])
+      const counted = countedShift(shift, spans, leaves, now)
+      if (!counted) { leftOut++; continue }
+      if (counted.start !== shift.start || counted.end !== shift.end) cut++
+      p.shifts.push([counted.start, counted.end])
+    }
   }
+  if (leftOut || cut) l(`Leave: ${leftOut} shift(s) on planned leave left out of Scheduled HC${cut ? `, ${cut} cut to the half worked` : ''} (sick leave stays in).`)
   const touches = (s: number, e: number) => e > win.start && s < win.end
   const people = [...byPerson.values()]
     .map(p => ({ ...p, shifts: p.shifts.filter(([s, e]) => touches(s, e)), sessions: p.sessions.filter(x => touches(x[0], sessionEnd(x, now))) }))

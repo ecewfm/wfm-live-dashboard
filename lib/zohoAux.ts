@@ -53,11 +53,11 @@ import {
   type ZohoCrmMismatchRow, type ZohoNow, type ZohoCrmMatchInfo,
 } from './zohoCrmMatch'
 import {
-  ZOHO_KPI_TABLE, readsZohoKpis, accountShifts, scopedShifts, scheduledOffNow, computeAccountKpis, zohoKpiRows, byPerson, leavesOf,
+  ZOHO_KPI_TABLE, readsZohoKpis, accountShifts, scopedShifts, scheduledOffNow, computeAccountKpis, zohoKpiRows, byPerson, leavesOf, mergeLeaves,
   type ZohoKpiRow, type ZohoKpiValues,
 } from './zohoWorkforce'
 import type { ScheduleCacheRow } from './hourlyReport'
-import { fetchRestKpis, restAccountName, restKpiConfig, type RestKpi } from './workforceRest'
+import { fetchRestKpis, fetchRestLeaves, restAccountName, restKpiConfig, type RestKpi } from './workforceRest'
 
 const CREATOR_API_BASE = 'https://www.zohoapis.com/creator/v2.1'
 export const ZOHO_AUX_CACHE_TABLE = 'wfm_zoho_activity'
@@ -477,6 +477,10 @@ export async function runZohoAuxSync(
     : null
 
   const today = dateInTz(now, PRIMARY_TZ), yesterday = addDays(today, -1)
+  // Zoho's APPROVED leave requests (every type — ML, Suspension, Birthday… never appear in
+  // time-log notes) from vCORE, so planned leave is left out of the scheduled head count
+  // (per the user, 2026-11-16; countedShift in lib/zohoWorkforce.ts). Asked alongside the pulls.
+  const leavesPending = restKpiConfig() ? fetchRestLeaves([yesterday, today], { now }) : null
   const { sync, pulled } = await refreshZohoLogDates(
     [[today, ZOHO_AUX_PULL_MINUTES], [yesterday, YESTERDAY_PULL_MINUTES]],
     { force: opts.force, now, log: l }, { store, getToken, fetch: f },
@@ -505,7 +509,10 @@ export async function runZohoAuxSync(
   }
   const sessionsByPerson = byPerson(sessions)
   const breaksByPerson = byPerson(breaks)
-  const leaves = leavesOf(sessions)
+  const approved = leavesPending ? await leavesPending : null
+  if (approved && !approved.ok) l(`Approved leaves from Workforce REST: ${approved.reason} — using the time-log notes only (VL / SL).`)
+  else if (approved?.ok) l(`Approved leaves from Workforce REST: ${approved.leaves.length} for ${yesterday} / ${today} (planned leave is out of the scheduled head count; sick leave stays in).`)
+  const leaves = mergeLeaves(leavesOf(sessions), approved?.ok ? approved.leaves : null)
   const rest = restPending ? await restPending : null
 
   const accounts: AuxSyncResult['accounts'] = []

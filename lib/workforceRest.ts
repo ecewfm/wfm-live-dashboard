@@ -31,7 +31,7 @@
 // Either one unset = off: every account stays on Zoho, exactly as before.
 
 import type { DataSourceConfig } from './types'
-import type { ZohoKpiValues } from './zohoWorkforce'
+import type { ZohoKpiValues, ApprovedLeave } from './zohoWorkforce'
 
 /** vCORE's Zoho data older than this → fall back (the same 15 min this app allows its own). */
 export const REST_MAX_AGE_MIN = 15
@@ -148,4 +148,73 @@ export async function fetchRestKpis(
     out.set(a.key, { ok: true, account: String(r.account ?? a.name), values, zohoAgeMin, agents: Number(r.agents) || 0, breaks })
   }
   return out
+}
+
+// ── Approved leaves (per the user, 2026-11-16) ────────────────────────────────
+// WFM Live's own leave comes from time-log notes, which only ever say VL or SL.
+// vCORE pulls Zoho's approved leave requests (every type: VL, SL, ML, Suspension,
+// Birthday, MedLOA, …) and hands them over at /api/live/leaves, so planned leave
+// can be left out of the scheduled head count (lib/zohoWorkforce.ts countedShift).
+// Same config and secret as the KPIs. Never throws: a failure is a reason, and the
+// caller keeps the notes alone, exactly as before.
+
+export type RestLeaves =
+  | { ok: true; leaves: ApprovedLeave[]; refreshedAt: Record<string, string | null> }
+  | { ok: false; reason: string }
+
+const LEAVES_TIMEOUT_MS = 12_000
+/** One answer per set of dates is reused this long — the Hourly page and the minute sync both ask. */
+const LEAVES_CACHE_MS = 60_000
+const leavesCache = new Map<string, { at: number; res: RestLeaves }>()
+
+export async function fetchRestLeaves(
+  dates: string[],
+  opts: { now: number; env?: Record<string, string | undefined>; fetch?: RestFetch; timeoutMs?: number; cacheMs?: number },
+): Promise<RestLeaves> {
+  const cfg = restKpiConfig(opts.env)
+  if (!cfg) return { ok: false, reason: 'not configured' }
+  const want = [...new Set(dates.filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)))].sort()
+  if (!want.length) return { ok: true, leaves: [], refreshedAt: {} }
+  const key = want.join(',')
+  const hit = leavesCache.get(key)
+  if (hit && opts.now - hit.at < (opts.cacheMs ?? LEAVES_CACHE_MS) && hit.res.ok) return hit.res
+
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? LEAVES_TIMEOUT_MS)
+  let res: RestLeaves
+  try {
+    const r = await (opts.fetch ?? (fetch as unknown as RestFetch))(`${cfg.url}/api/live/leaves`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.secret}` },
+      body: JSON.stringify({ dates: want }),
+      signal: ctrl.signal,
+    })
+    const body = (await r.json().catch(() => null)) as {
+      error?: string
+      results?: Record<string, { refreshedAt?: string | null; rows?: { employee_norm?: unknown; leave_type?: unknown; label?: unknown; half?: unknown; hours?: unknown }[] }>
+    } | null
+    if (!r.ok) {
+      res = { ok: false, reason: `answered HTTP ${r.status}${body?.error ? ` (${body.error})` : ''}` }
+    } else {
+      const leaves: ApprovedLeave[] = []
+      const refreshedAt: Record<string, string | null> = {}
+      for (const d of want) {
+        const day = body?.results?.[d]
+        refreshedAt[d] = day?.refreshedAt ?? null
+        for (const x of Array.isArray(day?.rows) ? day!.rows : []) {
+          const employeeNorm = typeof x?.employee_norm === 'string' ? x.employee_norm : ''
+          const type = typeof x?.label === 'string' && x.label ? x.label : typeof x?.leave_type === 'string' ? x.leave_type : ''
+          if (!employeeNorm || !type) continue
+          leaves.push({ date: d, employeeNorm, type, half: typeof x.half === 'string' ? x.half : '', hours: typeof x.hours === 'number' ? x.hours : null })
+        }
+      }
+      res = { ok: true, leaves, refreshedAt }
+    }
+  } catch (e) {
+    res = { ok: false, reason: ctrl.signal.aborted ? `no answer within ${Math.round((opts.timeoutMs ?? LEAVES_TIMEOUT_MS) / 1000)} s` : `unreachable — ${e instanceof Error ? e.message : String(e)}` }
+  } finally {
+    clearTimeout(timer)
+  }
+  if (res.ok) leavesCache.set(key, { at: opts.now, res })
+  return res
 }

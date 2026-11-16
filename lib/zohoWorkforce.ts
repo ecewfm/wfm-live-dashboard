@@ -23,11 +23,21 @@
 //     Flex's people sit in Chat, Email, Phones, Special Task…), and without the
 //     plan a planned one can't be told from an unplanned one.
 // As in vCORE, adherence is only for people who worked; a no-show counts in
-// Absenteeism instead. A shift whose day has a leave in the time log's Note
-// ("[VL in Hours][8]" — vCORE's leave marker) and no login is leave, not a
-// no-show: it's left out of every tile. vCORE also reads an approved-leaves
-// report; this doesn't (one more Zoho pull), so a leave only in that report
-// still counts as a no-show.
+// Absenteeism instead.
+//
+// LEAVE (per the user, 2026-11-16): a day's leave comes from the time log's Note
+// ("[VL in Hours][8]" — vCORE's leave marker; in practice only VL and SL) and from
+// Zoho's APPROVED leave requests, which vCORE pulls and hands over
+// (/api/live/leaves, fetchRestLeaves in lib/workforceRest.ts) — the only place ML,
+// Suspension, Birthday, MedLOA, VTO, … show up. The approved request wins (it has
+// the half and hours). Then:
+//   · PLANNED leave (anything but sick) is out of the scheduled head count: a whole
+//     day with no login → the shift is left out of every tile; a half day → the
+//     shift loses that half (the hours given, else half the shift). countedShift().
+//   · SICK leave (isSickLeave) stays in: unplanned, so the person is scheduled and
+//     counts as absent (Not Logged In, a no-show) unless they work.
+// Agent Status's "Not Logged In" list still leaves out anyone on any leave who
+// hasn't logged in (onLeave) — nothing to act on.
 
 import {
   normalizeName, normalizeAccount, allowanceMinutesOf, breakCategory, zohoAccountsSeen, MAX_OPEN_SESSION_HOURS,
@@ -113,11 +123,75 @@ export function byPerson<T extends { employee: string }>(items: T[]): Map<string
   return out
 }
 
-/** Leaves noted in the time logs, keyed `${normalized name}|${date}` → the leave ("VL", "SL", …). */
-export function leavesOf(sessions: ZohoSession[]): Map<string, string> {
-  const out = new Map<string, string>()
-  for (const s of sessions) if (s.leave && s.date) out.set(`${normalizeName(s.employee)}|${s.date}`, s.leave)
+// ── Leave ─────────────────────────────────────────────────────────────────────
+/** A person's leave on one date. `half` '' = the whole day. */
+export interface LeaveInfo {
+  type: string                    // "VL", "SL", "ML", "Suspension", …
+  sick: boolean                   // isSickLeave(type)
+  half: '' | '1st' | '2nd'
+  hours: number | null            // the leave's hours when Zoho gives them (a half day's length)
+  source: 'note' | 'approved'     // the time log's Note, or an approved leave request (via vCORE)
+}
+
+/**
+ * Sick leave — the one UNPLANNED leave ("SL", "SL in Hours", "Sick Leave"). It stays in
+ * the scheduled head count; every other leave is planned and is left out (per the user,
+ * 2026-11-16). vCORE has the same test (isSickLeave in its src/lib/attendance.ts).
+ */
+export function isSickLeave(type: string): boolean {
+  const n = String(type ?? '').replace(/\s+in\s+hours?$/i, '').trim().toLowerCase()
+  return n === 'sl' || n.startsWith('sl ') || n.startsWith('sl-') || n === 'hd-sl' || /\bsick\b/.test(n)
+}
+
+const halfOf = (h: unknown): LeaveInfo['half'] => {
+  const s = String(h ?? '').trim().toLowerCase()
+  return s.startsWith('1') ? '1st' : s.startsWith('2') ? '2nd' : ''
+}
+
+/** Leaves noted in the time logs, keyed `${normalized name}|${date}`. */
+export function leavesOf(sessions: ZohoSession[]): Map<string, LeaveInfo> {
+  const out = new Map<string, LeaveInfo>()
+  for (const s of sessions) {
+    if (!s.leave || !s.date) continue
+    out.set(`${normalizeName(s.employee)}|${s.date}`, { type: s.leave, sick: isSickLeave(s.leave), half: '', hours: null, source: 'note' })
+  }
   return out
+}
+
+/** One approved leave request, as vCORE hands it over (fetchRestLeaves). */
+export interface ApprovedLeave { date: string; employeeNorm: string; type: string; half: string; hours: number | null }
+
+/** The time-log notes plus the approved requests — a request wins (it knows the type, half and hours). */
+export function mergeLeaves(notes: Map<string, LeaveInfo>, approved: ApprovedLeave[] | null | undefined): Map<string, LeaveInfo> {
+  const out = new Map(notes)
+  for (const a of approved ?? []) {
+    if (!a.employeeNorm || !a.date || !a.type) continue
+    out.set(`${a.employeeNorm}|${a.date}`, {
+      type: a.type, sick: isSickLeave(a.type), half: halfOf(a.half),
+      hours: typeof a.hours === 'number' && Number.isFinite(a.hours) && a.hours > 0 ? a.hours : null, source: 'approved',
+    })
+  }
+  return out
+}
+
+/**
+ * The part of a shift that counts toward the scheduled head count, given the day's leave.
+ * null = none of it (a planned whole-day leave and no login during the shift).
+ *   · no leave, or SICK leave → the whole shift (sick stays in the head count)
+ *   · planned HALF day        → the shift minus that half (its hours if Zoho gave them, else half the shift)
+ *   · planned whole day       → nothing — unless they logged in during it after all, then all of it
+ */
+export function countedShift<T extends { norm: string; date: string; start: number; end: number }>(
+  sh: T, spans: Span[], leaves: Map<string, LeaveInfo> | undefined, now: number,
+): T | null {
+  const lv = leaves?.get(`${sh.norm}|${sh.date}`)
+  if (!lv || lv.sick) return sh
+  if (lv.half) {
+    const dur = lv.hours ? lv.hours * HOUR_MS : (sh.end - sh.start) / 2
+    const cut = lv.half === '1st' ? { ...sh, start: Math.min(sh.end, sh.start + dur) } : { ...sh, end: Math.max(sh.start, sh.end - dur) }
+    return cut.end > cut.start ? cut : null
+  }
+  return covered(spans, sh.start, Math.max(sh.start, Math.min(sh.end, now))) > 0 ? sh : null
 }
 
 // ── Which shifts are "today" ──────────────────────────────────────────────────
@@ -199,8 +273,9 @@ export function judgeShift(sh: { start: number; end: number }, spans: Span[], br
   return { started, dueMs, attendedMs, worked, lateMs, notLoggedInMs, overBreakMs }
 }
 
-/** A shift on leave: its day has a leave noted (leavesOf) and they haven't logged in during it. */
-function onLeave(sh: ScopedShift, spans: Span[], leaves: Map<string, string> | undefined, now: number): boolean {
+/** A shift on leave (any kind, sick too): its day has a leave and they haven't logged in during it.
+ *  Agent Status's "Not Logged In" list leaves these out — the head count is countedShift()'s job. */
+function onLeave(sh: ScopedShift, spans: Span[], leaves: Map<string, LeaveInfo> | undefined, now: number): boolean {
   return !!leaves?.has(`${sh.norm}|${sh.date}`) && covered(spans, sh.start, Math.max(sh.start, Math.min(sh.end, now))) === 0
 }
 
@@ -215,7 +290,7 @@ function onLeave(sh: ScopedShift, spans: Span[], leaves: Map<string, string> | u
  */
 export function scheduledOffNow(
   shifts: ScopedShift[], sessionsByPerson: Map<string, ZohoSession[]>, current: Map<string, CurrentAux>, now: number,
-  leaves?: Map<string, string>,
+  leaves?: Map<string, LeaveInfo>,
 ): Map<string, CurrentAux> {
   const out = new Map<string, CurrentAux>()
   const onNow = shifts.filter(s => s.start <= now && now < s.end).sort((a, b) => a.start - b.start)
@@ -247,7 +322,7 @@ export interface ZohoKpiValues {
   shiftsToday: number       // incl. leave
   started: number
   noShows: number
-  onLeave: number           // shifts on leave (leavesOf), left out of everything above
+  onLeave: number           // shifts on PLANNED whole-day leave (countedShift), left out of everything above — sick leave isn't
 }
 
 export function computeAccountKpis(input: {
@@ -256,14 +331,17 @@ export function computeAccountKpis(input: {
   breaksByPerson: Map<string, ZohoBreak[]>
   current: Map<string, CurrentAux>     // everyone logged in right now (computeCurrentAux)
   peopleOnAccount: Iterable<string>    // the account's people in Zoho's logs (normalized names)
-  leaves?: Map<string, string>         // leavesOf()
+  leaves?: Map<string, LeaveInfo>      // leavesOf() + mergeLeaves()
   now: number
 }): ZohoKpiValues {
   const { sessionsByPerson, breaksByPerson, current, now } = input
   const spansOf = new Map<string, Span[]>()
   const spans = (k: string) => spansOf.get(k) ?? spansOf.set(k, sessionSpans(sessionsByPerson.get(k) ?? [], now)).get(k)!
-  const leave = input.shifts.filter(sh => onLeave(sh, spans(sh.norm), input.leaves, now))
-  const shifts = input.shifts.filter(sh => !leave.includes(sh))
+  // Planned leave is out of the scheduled head count — a whole day drops the shift, a half day
+  // cuts it; sick leave stays in (countedShift, per the user 2026-11-16).
+  const counted = input.shifts.map(sh => countedShift(sh, spans(sh.norm), input.leaves, now))
+  const leave = input.shifts.filter((_, i) => counted[i] === null)
+  const shifts = counted.filter((sh): sh is ScopedShift => sh !== null)
   const scheduledNow = new Set(shifts.filter(s => s.start <= now && now < s.end).map(s => s.norm))
   const everyone = new Set([...input.peopleOnAccount, ...input.shifts.map(s => s.norm)])
   let loggedIn = 0, onBreak = 0
