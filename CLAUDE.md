@@ -1229,6 +1229,19 @@ the scheduled head count; SL (unplanned) stays in and counts as absence.
 - Verified: 16 rule checks here, 8 on vCORE's side, the dry runs above; tsc + both builds.
   Needs BOTH apps deployed for the approved leaves (WFM Live alone = notes, with SL now kept in).
 
+### Hourly → "On Leave" column (2026-11-16)
+
+Per the user: a leave counter on the Hourly report. `HourHeads.onLeave` (`lib/hourlyReport.ts`) =
+people whose leave covers at least half the hour (`HC_SHARE`, the Scheduled HC rule) — ANY leave,
+sick too (SL is also still in Scheduled HC, as absent; planned isn't). Counted for future hours too
+(leave is known ahead). `HourlyPerson.leaves` comes from `leavePart()` (`lib/zohoWorkforce.ts`):
+half day → that half, whole day → the shift unless they logged in during it. `dayHeads().onLeave` =
+different people on leave (TOTAL). `getHourlyReport` keeps people who are only on leave (no shift
+left, no login) so they're counted. Shown on the Hourly page (4th Head count column, the hour's
+details list "On leave" with types and times, CSV column) and in the hourly Cliq report (message
+"On leave N" in the hour and day lines; picture `HC_LABELS` + the column). Live check 2026-11-16:
+KMicro 1 (Ali Negapatan Farzin, VL) 11:00–19:00; Coalition 2; Earnin up to 14/hour, 24 in the day.
+
 ### Agent Status → "On Leave (Zoho)" on every account (2026-11-16)
 
 Per the user: see who's on leave today in Agent Status, on ALL accounts — CRM ones too.

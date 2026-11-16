@@ -132,12 +132,12 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
 
   const downloadCsv = () => {
     const tiles = shownGroups.flatMap(g => g.tiles.map(t => ({ g, t })))
-    const head = ['Interval', 'Scheduled HC', 'Actual HC', 'Attendance %', ...tiles.map(({ g, t }) => `${g.name} — ${t.label}`)]
+    const head = ['Interval', 'Scheduled HC', 'Actual HC', 'Attendance %', 'On Leave', ...tiles.map(({ g, t }) => `${g.name} — ${t.label}`)]
     const body = rows.map(r => [
-      r.label, r.heads.scheduled.length, r.heads.started ? actualOf(r.heads) : '', pctText(attendanceOf(r.heads)),
+      r.label, r.heads.scheduled.length, r.heads.started ? actualOf(r.heads) : '', pctText(attendanceOf(r.heads)), r.heads.onLeave.length,
       ...tiles.map(({ g, t }) => cell(r.kpi, g, t).text),
     ])
-    const foot = ['TOTAL', total.scheduled, total.actual ?? '', pctText(total.attendance), ...tiles.map(({ g, t }) => totalKpi(g, t))]
+    const foot = ['TOTAL', total.scheduled, total.actual ?? '', pctText(total.attendance), total.onLeave, ...tiles.map(({ g, t }) => totalKpi(g, t))]
     const blob = new Blob([toCsv([head, ...body, foot])], { type: 'text/csv;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -151,7 +151,8 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
   const zohoDate = fits ? dateInTz((report.window.start + report.window.end) / 2, ZOHO_CLOCK_TZ) : ''
   const pulled = fits ? report.pulls[zohoDate] : undefined
   const at = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'not yet'
-  const colCount = 4 + shownGroups.reduce((n, g) => n + g.tiles.length, 0)
+  const colCount = 5 + shownGroups.reduce((n, g) => n + g.tiles.length, 0)
+  const anyLeave = total.onLeave > 0
 
   return (
     <div className="hr-page">
@@ -202,7 +203,7 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
         <div className="hr-info">
           <span><i className="bx bx-buildings" /> Zoho account: <strong>{(report.matchedAccounts.length ? report.matchedAccounts : report.zohoAccounts).join(', ')}</strong>
             {!report.zohoAccountsFromSetting && <span className="text-muted"> (this account&apos;s name)</span>}</span>
-          <span><i className="bx bx-group" /> {people.length} {people.length === 1 ? 'person' : 'people'} scheduled or logged in</span>
+          <span><i className="bx bx-group" /> {people.length} {people.length === 1 ? 'person' : 'people'} scheduled, logged in or on leave</span>
           <span><i className="bx bx-time-five" /> Hours in {tzLabel}</span>
           {pulled && <span className="text-muted">Zoho time logs {pulled.timeLogs === null && date > today ? '—' : `pulled ${at(pulled.timeLogs)}`} · schedules pulled {at(pulled.schedules)}</span>}
         </div>
@@ -236,13 +237,14 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
             <thead>
               <tr>
                 <th rowSpan={2} className="hr-int">Interval</th>
-                <th colSpan={3} className="hr-gh hr-hc">Head count (Zoho)</th>
+                <th colSpan={4} className="hr-gh hr-hc">Head count (Zoho)</th>
                 {shownGroups.map(g => <th key={g.id} colSpan={g.tiles.length} className="hr-gh hr-gs">{g.name}</th>)}
               </tr>
               <tr>
                 <th className="hr-hc" title="People whose Zoho daily schedule covers at least half of the hour">Scheduled HC</th>
                 <th className="hr-hc" title="People logged in to the ECE Time Tracker for at least half of their scheduled time in the hour (half the hour if they weren't scheduled)">Actual HC</th>
                 <th className="hr-hc" title="The scheduled people who were there, out of those due so far">Attendance %</th>
+                <th className="hr-hc" title="People on leave for at least half of the hour (Zoho's approved leave and time-log notes, any type). Planned leave isn't in Scheduled HC; sick leave (SL) still is, as absent.">On Leave</th>
                 {shownGroups.map(g => g.tiles.map((t, i) => <th key={`${g.id}:${t.key}`} className={i === 0 ? 'hr-gs' : ''}>{t.label}</th>))}
               </tr>
             </thead>
@@ -262,6 +264,7 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
                       <td className="hr-num">{anySchedule ? r.heads.scheduled.length : ''}</td>
                       <td className="hr-num">{r.heads.started ? actualOf(r.heads) : ''}</td>
                       <td className={`hr-num${ATT_CLASS[attendanceTone(att)]}`}>{pctText(att)}</td>
+                      <td className="hr-num">{anySchedule || anyLeave ? r.heads.onLeave.length : ''}</td>
                       {shownGroups.map(g => g.tiles.map((t, i) => {
                         const c = cell(r.kpi, g, t)
                         return <td key={`${g.id}:${t.key}`} className={`hr-num ${c.cls}${i === 0 ? ' hr-gs' : ''}`}>{c.text}</td>
@@ -283,6 +286,7 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
                   <td className="hr-num" title="Different people scheduled during the day">{anySchedule ? total.scheduled : ''}</td>
                   <td className="hr-num" title="Different people there during the day">{total.actual ?? ''}</td>
                   <td className="hr-num" title="Scheduled hours attended, out of the day's scheduled hours so far">{pctText(total.attendance)}</td>
+                  <td className="hr-num" title="Different people on leave during the day">{anySchedule || anyLeave ? total.onLeave : ''}</td>
                   {shownGroups.map(g => g.tiles.map((t, i) => (
                     <td key={`${g.id}:${t.key}`} className={`hr-num${i === 0 ? ' hr-gs' : ''}`}>{totalKpi(g, t)}</td>
                   )))}
@@ -294,7 +298,7 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
       </div>
 
       <div className="hr-notes">
-        <p><strong>Scheduled HC</strong> — people whose Zoho daily schedule covers at least half of the hour. <strong>Actual HC</strong> — people logged in to the ECE Time Tracker for at least half of their scheduled time in the hour (half the hour if they weren&apos;t scheduled — overtime, or in early). <strong>Attendance %</strong> — the scheduled people who were there, out of those due so far. <strong>TOTAL</strong> — different people across the day; attendance over all the day&apos;s scheduled hours.</p>
+        <p><strong>Scheduled HC</strong> — people whose Zoho daily schedule covers at least half of the hour. <strong>Actual HC</strong> — people logged in to the ECE Time Tracker for at least half of their scheduled time in the hour (half the hour if they weren&apos;t scheduled — overtime, or in early). <strong>Attendance %</strong> — the scheduled people who were there, out of those due so far. <strong>On Leave</strong> — people on leave for at least half of the hour (Zoho&apos;s approved leave and time-log notes, any type, half days for their half); planned leave isn&apos;t in Scheduled HC, sick leave (SL) still is, counted as absent. <strong>TOTAL</strong> — different people across the day; attendance over all the day&apos;s scheduled hours.</p>
         <p><strong>KPI columns</strong> — this account&apos;s KPI tiles, read by the webapp every minute (the CRMs keep no history, so hours before the webapp started reading them are blank, and so is any minute the account&apos;s data was out of sync). <strong>End of hour</strong> is what the tile showed at the end of the hour — the TOTAL row, at the end of the day; <strong>Average</strong> averages the hour&apos;s readings; <strong>Worst</strong> is its worst reading by the tile&apos;s thresholds. Colours follow the tile&apos;s thresholds.</p>
       </div>
     </div>
@@ -320,10 +324,23 @@ function HourDetail({ heads, byName, tz, now }: { heads: HourHeads; byName: Map<
       </ul>
     </div>
   )
-  const empty = !heads.scheduled.length && !heads.unscheduled.length
+  const empty = !heads.scheduled.length && !heads.unscheduled.length && !heads.onLeave.length
   return (
     <div className="hr-detail">
-      {empty && <div className="text-muted">Nobody scheduled or logged in this hour.</div>}
+      {empty && <div className="text-muted">Nobody scheduled, logged in or on leave this hour.</div>}
+      {heads.onLeave.length > 0 && (
+        <div className="hr-list">
+          <div className="lg-block-title">On leave ({heads.onLeave.length})</div>
+          <ul>
+            {heads.onLeave.map(n => {
+              const p = byName.get(n)
+              const types = [...new Set((p?.leaves ?? []).map(l => l.type))].join(', ')
+              const when = (p?.leaves ?? []).map(l => `${clockIn(l.span[0], tz)}–${clockIn(l.span[1], tz)}`).join(', ')
+              return <li key={n}><span>{n}</span><span className="text-muted"> · {types}{when ? ` · ${when}` : ''}</span></li>
+            })}
+          </ul>
+        </div>
+      )}
       {!heads.started && list('Scheduled', heads.scheduled, '', 'shift')}
       {heads.started && list('Scheduled, not there', heads.absent, 'bad', 'both')}
       {heads.started && list('Scheduled and there', heads.present, 'ok', 'both')}

@@ -176,7 +176,12 @@ export const scheduleRowAccounts = (r: Record<string, unknown>, field: string | 
 // ── Head count ────────────────────────────────────────────────────────────────
 // One person on the account for the day: their shifts and their Time Tracker
 // sessions (UTC ms; a session's logout is null while they're still logged in).
-export interface HourlyPerson { name: string; shifts: [number, number][]; sessions: [number, number | null][] }
+export interface HourlyPerson {
+  name: string; shifts: [number, number][]; sessions: [number, number | null][]
+  /** The scheduled time their leave covers (any leave, sick too — lib/zohoWorkforce.ts leavePart),
+   *  with the leave as shown ("VL", "SL (1st half, 4h)") — the On Leave count. */
+  leaves?: { type: string; span: [number, number] }[]
+}
 
 // Someone counts in an hour when they're there for at least this share of it:
 // scheduled for half the hour → Scheduled HC; logged in for half of the time
@@ -224,16 +229,20 @@ export interface HourHeads {
   absent: string[]        // …and not (only people already due)
   upcoming: string[]      // …not due yet (this hour, their shift starts later in it)
   unscheduled: string[]   // there, not scheduled this hour (overtime, early, a rest day)
+  /** On leave for at least half the hour (any leave — planned is out of `scheduled`, sick stays
+   *  in it as absent; per the user, 2026-11-16). Known ahead, so counted for future hours too. */
+  onLeave: string[]
 }
 
 export function headsForHour(people: HourlyPerson[], h0: number, h1: number, now: number): HourHeads {
   const started = h0 < now
   const judgedEnd = Math.min(h1, now)
-  const out: HourHeads = { started, scheduled: [], present: [], absent: [], upcoming: [], unscheduled: [] }
+  const out: HourHeads = { started, scheduled: [], present: [], absent: [], upcoming: [], unscheduled: [], onLeave: [] }
   for (const p of people) {
     const shifts = mergeSpans(p.shifts)
     const isScheduled = covered(shifts, h0, h1) >= (h1 - h0) * HC_SHARE
     if (isScheduled) out.scheduled.push(p.name)
+    if (p.leaves?.length && covered(mergeSpans(p.leaves.map(l => l.span)), h0, h1) >= (h1 - h0) * HC_SHARE) out.onLeave.push(p.name)
     if (!started) continue
     const sessions = mergeSpans(p.sessions.map(s => [s[0], sessionEnd(s, now)] as [number, number]))
     if (isScheduled) {
@@ -246,7 +255,7 @@ export function headsForHour(people: HourlyPerson[], h0: number, h1: number, now
       if (there > 0 && there >= (judgedEnd - h0) * HC_SHARE) out.unscheduled.push(p.name)
     }
   }
-  for (const k of ['scheduled', 'present', 'absent', 'upcoming', 'unscheduled'] as const) out[k].sort((a, b) => a.localeCompare(b))
+  for (const k of ['scheduled', 'present', 'absent', 'upcoming', 'unscheduled', 'onLeave'] as const) out[k].sort((a, b) => a.localeCompare(b))
   return out
 }
 
@@ -260,17 +269,18 @@ export function attendanceOf(h: HourHeads): number | null {
 
 /** The TOTAL row: distinct people scheduled / there during the day, and attendance over all the
  *  day's hours (scheduled hours attended ÷ scheduled hours due — so half a day missed shows). */
-export function dayHeads(hours: HourHeads[]): { scheduled: number; actual: number | null; attendance: number | null } {
-  const scheduled = new Set<string>(), actual = new Set<string>()
+export function dayHeads(hours: HourHeads[]): { scheduled: number; actual: number | null; attendance: number | null; onLeave: number } {
+  const scheduled = new Set<string>(), actual = new Set<string>(), onLeave = new Set<string>()
   let present = 0, due = 0
   for (const h of hours) {
     h.scheduled.forEach(n => scheduled.add(n))
     h.present.forEach(n => actual.add(n))
     h.unscheduled.forEach(n => actual.add(n))
+    ;(h.onLeave ?? []).forEach(n => onLeave.add(n))
     present += h.present.length
     due += h.present.length + h.absent.length
   }
-  return { scheduled: scheduled.size, actual: hours.some(h => h.started) ? actual.size : null, attendance: due ? (present / due) * 100 : null }
+  return { scheduled: scheduled.size, actual: hours.some(h => h.started) ? actual.size : null, attendance: due ? (present / due) * 100 : null, onLeave: onLeave.size }
 }
 
 // ── KPI readings, per hour ────────────────────────────────────────────────────
@@ -383,7 +393,7 @@ export function hourlyRows(report: Pick<HourlyReport, 'window' | 'people' | 'kpi
 }
 
 /** Anything in the hour — someone scheduled or there, or a KPI reading. */
-export const rowHasData = (r: HourlyRow) => r.heads.scheduled.length > 0 || actualOf(r.heads) > 0 || (!!r.kpi && Object.keys(r.kpi).length > 0)
+export const rowHasData = (r: HourlyRow) => r.heads.scheduled.length > 0 || actualOf(r.heads) > 0 || (r.heads.onLeave?.length ?? 0) > 0 || (!!r.kpi && Object.keys(r.kpi).length > 0)
 
 /** Only the stretch of the day with something in it (every hour when none has). */
 export function trimHourlyRows(rows: HourlyRow[]): HourlyRow[] {

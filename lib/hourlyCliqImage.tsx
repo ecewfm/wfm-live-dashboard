@@ -22,6 +22,7 @@ export interface HourlyImageRow {
   label: string            // "10:00"
   highlight: boolean       // the hour being reported
   scheduled: string; actual: string; attendance: string; attTone: CellTone
+  onLeave?: string        // people on leave for at least half the hour (blank = column left out)
   kpi: HourlyImageCell[]   // every shown tile, group by group
 }
 export interface HourlyImageInput {
@@ -32,7 +33,7 @@ export interface HourlyImageInput {
   modeLabel: string        // "End of hour"
   groups: { id: string; name: string; tiles: { key: string; label: string }[] }[]
   rows: HourlyImageRow[]
-  total: { scheduled: string; actual: string; attendance: string; kpi: string[] }
+  total: { scheduled: string; actual: string; attendance: string; onLeave?: string; kpi: string[] }
   footNote: string         // "TOTAL = the day so far (8:00–11:00 ET) · sent 11:02 AM"
   testMode: boolean
   // One of several pictures, one per KPI group (HourlyCliqConfig.picturePerGroup):
@@ -47,7 +48,7 @@ const CELL_PAD = 24, MIN_W = 560, MAX_IMAGE_PX = 4000
 // ~5.6 s at 1.5x (2026-11-13), and 3 of them at 2x ran past the send's time limit.
 // Small tables still get the full 2x.
 const MAX_PIXELS = 2_600_000
-const HC_LABELS = ['Scheduled HC', 'Actual HC', 'Attendance %']
+const HC_LABELS = ['Scheduled HC', 'Actual HC', 'Attendance %', 'On Leave']
 const GROUP_LINE = '1px solid #3a3a3a'
 const TONE: Record<CellTone, { color: string; background: string } | null> = {
   ok:   { color: C.success, background: 'rgba(77,202,133,0.12)' },
@@ -86,6 +87,7 @@ function layout(input: HourlyImageInput): Layout {
     fit(HC_LABELS[0], [input.total.scheduled, ...input.rows.map(r => r.scheduled)]),
     fit(HC_LABELS[1], [input.total.actual, ...input.rows.map(r => r.actual)]),
     fit(HC_LABELS[2], [input.total.attendance, ...input.rows.map(r => r.attendance)]),
+    fit(HC_LABELS[3], [input.total.onLeave ?? '', ...input.rows.map(r => r.onLeave ?? '')]),
   ]
   const tiles = input.groups.flatMap(g => g.tiles).map((t, i) =>
     fit(t.label, [input.total.kpi[i] ?? '', ...input.rows.map(r => r.kpi[i]?.text ?? '')], 44, 150))
@@ -207,6 +209,7 @@ function Table({ input, L }: { input: HourlyImageInput; L: Layout }) {
             <Cell w={L.hc[0]} line>{r.scheduled}</Cell>
             <Cell w={L.hc[1]}>{r.actual}</Cell>
             <Cell w={L.hc[2]} style={att ? { color: att, fontWeight: 700 } : {}}>{r.attendance}</Cell>
+            <Cell w={L.hc[3]}>{r.onLeave ?? ''}</Cell>
             {r.kpi.map((c, i) => {
               const t = TONE[c.tone]
               return <Cell key={i} w={L.tiles[i]} line={starts.has(i)} style={t ? { ...t, fontWeight: c.tone === 'bad' ? 700 : 600 } : {}}>{c.text}</Cell>
@@ -224,6 +227,7 @@ function Table({ input, L }: { input: HourlyImageInput; L: Layout }) {
         <Cell w={L.hc[0]} line>{total.scheduled}</Cell>
         <Cell w={L.hc[1]}>{total.actual}</Cell>
         <Cell w={L.hc[2]}>{total.attendance}</Cell>
+        <Cell w={L.hc[3]}>{total.onLeave ?? ''}</Cell>
         {total.kpi.map((t, i) => <Cell key={i} w={L.tiles[i]} line={starts.has(i)}>{t}</Cell>)}
       </div>
 

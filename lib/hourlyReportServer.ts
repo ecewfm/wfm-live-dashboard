@@ -29,7 +29,7 @@ import { getZohoAccessToken } from './zohoAuth'
 import { kpiCardGroups, freshestAcrossSources, fetchKpiData, supabaseTableFetcher } from './breaches'
 import { migrateDataSource, mergeKpiThresholds } from './utils'
 import type { AccountData, DataSourceConfig } from './types'
-import { countedShift, leavesOf, mergeLeaves } from './zohoWorkforce'
+import { countedShift, leavePart, leavesOf, mergeLeaves } from './zohoWorkforce'
 import { fetchRestLeaves, type RestLeaves } from './workforceRest'
 import {
   supabaseAuxStore, refreshZohoLogDates, fetchReport, isDue, isInProgress,
@@ -334,6 +334,9 @@ export async function getHourlyReport(
       const p = person(sh.employee)
       const shift = { norm: normalizeName(sh.employee), date, start: Date.parse(sh.start), end: Date.parse(sh.end) }
       const spans: [number, number][] = p.sessions.map(x => [x[0], sessionEnd(x, now)])
+      // The On Leave count — any leave's part of the shift (sick too), whether or not it's out of Scheduled HC.
+      const lp = leavePart(shift, spans, leaves, now)
+      if (lp) (p.leaves ??= []).push({ type: lp.type, span: [lp.start, lp.end] })
       const counted = countedShift(shift, spans, leaves, now)
       if (!counted) { leftOut++; continue }
       if (counted.start !== shift.start || counted.end !== shift.end) cut++
@@ -343,8 +346,11 @@ export async function getHourlyReport(
   if (leftOut || cut) l(`Leave: ${leftOut} shift(s) on planned leave left out of Scheduled HC${cut ? `, ${cut} cut to the half worked` : ''} (sick leave stays in).`)
   const touches = (s: number, e: number) => e > win.start && s < win.end
   const people = [...byPerson.values()]
-    .map(p => ({ ...p, shifts: p.shifts.filter(([s, e]) => touches(s, e)), sessions: p.sessions.filter(x => touches(x[0], sessionEnd(x, now))) }))
-    .filter(p => p.shifts.length || p.sessions.length)
+    .map(p => ({
+      ...p, shifts: p.shifts.filter(([s, e]) => touches(s, e)), sessions: p.sessions.filter(x => touches(x[0], sessionEnd(x, now))),
+      ...(p.leaves ? { leaves: p.leaves.filter(l => touches(l.span[0], l.span[1])) } : {}),
+    }))
+    .filter(p => p.shifts.length || p.sessions.length || p.leaves?.length)
     .sort((a, b) => a.name.localeCompare(b.name))
 
   let kpiHours: HourlyReport['kpiHours'] = []

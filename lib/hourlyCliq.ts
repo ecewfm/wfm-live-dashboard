@@ -212,6 +212,7 @@ export async function buildHourlyCliqReport(
     `Scheduled ${anySchedule ? row.heads.scheduled.length : '—'}`,
     `Actual ${actualOf(row.heads)}`,
     `Attendance ${pctText(att) || '—'}`,
+    `On leave ${row.heads.onLeave.length}`,   // any leave, half the hour or more (per the user, 2026-11-16)
   ]
 
   const lines = [
@@ -237,7 +238,7 @@ export async function buildHourlyCliqReport(
     }
     if (!anyReading) lines.push('No KPI readings this hour — the account\'s data was out of sync.')
   }
-  lines.push('', `📅 Day so far (${dayText}): Scheduled ${anySchedule ? day.scheduled : '—'} · Actual ${day.actual ?? '—'} · Attendance ${pctText(day.attendance) || '—'}`)
+  lines.push('', `📅 Day so far (${dayText}): Scheduled ${anySchedule ? day.scheduled : '—'} · Actual ${day.actual ?? '—'} · Attendance ${pctText(day.attendance) || '—'} · On leave ${day.onLeave}`)
   if (testMode) lines.push('', '⚠️ This is a TEST message. Disable Test Mode in Settings > Zoho Integrations when ready.')
 
   // A picture of the table with `gs`'s KPI columns — every picture has the hours and the head count.
@@ -251,14 +252,16 @@ export async function buildHourlyCliqReport(
         return {
           label: r.label, highlight: r.start === hourStart,
           scheduled: scheduled(r), actual: r.heads.started ? String(actualOf(r.heads)) : '', attendance: pctText(n), attTone: attendanceTone(n),
+          onLeave: String(r.heads.onLeave.length),
           kpi: tiles.map(({ g, t }) => hourlyKpiCell(r.kpi, g.id, t, cfg.mode)),
         }
       }),
       total: {
         scheduled: anySchedule ? String(day.scheduled) : '', actual: day.actual === null ? '' : String(day.actual), attendance: pctText(day.attendance),
+        onLeave: String(day.onLeave),
         kpi: tiles.map(({ g, t }) => hourlyTotalKpi(upTo, g.id, t, cfg.mode)),
       },
-      footNote: `TOTAL = the day so far, ${dayText}. Scheduled HC: scheduled for at least half the hour · Actual HC: logged in for at least half of it.`,
+      footNote: `TOTAL = the day so far, ${dayText}. Scheduled HC: scheduled for at least half the hour · Actual HC: logged in for at least half of it · On Leave: on leave half the hour or more (SL also counts in Scheduled HC, as absent).`,
     }
   }
   const fileBase = `${a.id}-hourly-${date}-${clockIn(hourStart, tz).replace(':', '')}`

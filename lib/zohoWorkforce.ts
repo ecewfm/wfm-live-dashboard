@@ -177,6 +177,28 @@ export function mergeLeaves(notes: Map<string, LeaveInfo>, approved: ApprovedLea
   return out
 }
 
+/**
+ * The scheduled time a day's leave covers — the Hourly page's On Leave count (per the user,
+ * 2026-11-16). Any leave, sick included. A half day → that half (its hours, else half the
+ * shift); a whole day → the whole shift, unless they logged in during it after all (then null,
+ * the same rule as countedShift). null = no leave.
+ */
+export function leavePart<T extends { norm: string; date: string; start: number; end: number }>(
+  sh: T, spans: Span[], leaves: Map<string, LeaveInfo> | undefined, now: number,
+): { type: string; start: number; end: number } | null {
+  const lv = leaves?.get(`${sh.norm}|${sh.date}`)
+  if (!lv) return null
+  const type = leaveStatusText(lv)
+  if (lv.half) {
+    const dur = lv.hours ? lv.hours * HOUR_MS : (sh.end - sh.start) / 2
+    return lv.half === '1st'
+      ? { type, start: sh.start, end: Math.min(sh.end, sh.start + dur) }
+      : { type, start: Math.max(sh.start, sh.end - dur), end: sh.end }
+  }
+  if (covered(spans, sh.start, Math.max(sh.start, Math.min(sh.end, now))) > 0) return null
+  return { type, start: sh.start, end: sh.end }
+}
+
 // ── Who's on leave today, for Agent Status (per the user, 2026-11-16) ─────────
 /** One person on leave on `date`, with every Zoho account they can be matched to. */
 export interface LeaveEntry { norm: string; employee: string; date: string; info: LeaveInfo; accounts: Set<string> }
