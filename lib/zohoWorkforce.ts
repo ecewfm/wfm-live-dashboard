@@ -41,8 +41,8 @@
 
 import {
   normalizeName, normalizeAccount, allowanceMinutesOf, breakCategory, zohoAccountsSeen, MAX_OPEN_SESSION_HOURS,
-  ZOHO_MISSING_STATUS, ZOHO_LEFT_EARLY_STATUS,
-  type ZohoSession, type ZohoBreak, type CurrentAux,
+  ZOHO_MISSING_STATUS, ZOHO_LEFT_EARLY_STATUS, ZOHO_LEAVE_CATEGORY,
+  type ZohoSession, type ZohoBreak, type CurrentAux, type ZohoAgentStatusRow,
 } from './zohoAuxShared'
 import { pctText, type ScheduleCacheRow } from './hourlyReport'
 import { DEFAULT_DATA_SOURCE, KPI_INFO_THRESHOLD, type StatusThresholds } from './utils'
@@ -158,20 +158,83 @@ export function leavesOf(sessions: ZohoSession[]): Map<string, LeaveInfo> {
   return out
 }
 
-/** One approved leave request, as vCORE hands it over (fetchRestLeaves). */
-export interface ApprovedLeave { date: string; employeeNorm: string; type: string; half: string; hours: number | null }
+/** One approved leave request, as vCORE hands it over (fetchRestLeaves). `account` = the
+ *  employee's Zoho account (Employee.AccountHR), `employee` = their Zoho name. */
+export interface ApprovedLeave { date: string; employeeNorm: string; type: string; half: string; hours: number | null; employee?: string; account?: string }
+
+const approvedInfo = (a: ApprovedLeave): LeaveInfo => ({
+  type: a.type, sick: isSickLeave(a.type), half: halfOf(a.half),
+  hours: typeof a.hours === 'number' && Number.isFinite(a.hours) && a.hours > 0 ? a.hours : null, source: 'approved',
+})
 
 /** The time-log notes plus the approved requests — a request wins (it knows the type, half and hours). */
 export function mergeLeaves(notes: Map<string, LeaveInfo>, approved: ApprovedLeave[] | null | undefined): Map<string, LeaveInfo> {
   const out = new Map(notes)
   for (const a of approved ?? []) {
     if (!a.employeeNorm || !a.date || !a.type) continue
-    out.set(`${a.employeeNorm}|${a.date}`, {
-      type: a.type, sick: isSickLeave(a.type), half: halfOf(a.half),
-      hours: typeof a.hours === 'number' && Number.isFinite(a.hours) && a.hours > 0 ? a.hours : null, source: 'approved',
-    })
+    out.set(`${a.employeeNorm}|${a.date}`, approvedInfo(a))
   }
   return out
+}
+
+// ── Who's on leave today, for Agent Status (per the user, 2026-11-16) ─────────
+/** One person on leave on `date`, with every Zoho account they can be matched to. */
+export interface LeaveEntry { norm: string; employee: string; date: string; info: LeaveInfo; accounts: Set<string> }
+
+/**
+ * Everyone with a leave on `date` — approved requests (via vCORE) and time-log notes; the
+ * request wins on the details. Their Zoho account(s) (normalizeAccount): the request's
+ * Employee.AccountHR, the accounts on their time logs, and the account of their schedule
+ * row that day — so a person shows on the account they're scheduled under too.
+ */
+export function leaveEntriesFor(
+  date: string, sessions: ZohoSession[], approved: ApprovedLeave[] | null | undefined, scheduleRows: ScheduleCacheRow[] | null | undefined,
+): LeaveEntry[] {
+  const by = new Map<string, LeaveEntry>()
+  for (const s of sessions) {
+    if (!s.leave || s.date !== date) continue
+    const norm = normalizeName(s.employee)
+    if (!norm) continue
+    const e = by.get(norm) ?? { norm, employee: s.employee, date, info: { type: s.leave, sick: isSickLeave(s.leave), half: '', hours: null, source: 'note' }, accounts: new Set<string>() }
+    for (const acc of s.accounts ?? []) { const k = normalizeAccount(acc); if (k) e.accounts.add(k) }
+    by.set(norm, e)
+  }
+  for (const a of approved ?? []) {
+    if (a.date !== date || !a.employeeNorm || !a.type) continue
+    const e = by.get(a.employeeNorm) ?? { norm: a.employeeNorm, employee: a.employee || a.employeeNorm, date, info: approvedInfo(a), accounts: new Set<string>() }
+    e.info = approvedInfo(a)
+    if (a.employee) e.employee = a.employee
+    const k = a.account ? normalizeAccount(a.account) : ''
+    if (k) e.accounts.add(k)
+    by.set(a.employeeNorm, e)
+  }
+  for (const row of scheduleRows ?? []) {
+    if (String(row.log_date).slice(0, 10) !== date) continue
+    for (const sh of row.payload ?? []) {
+      const e = by.get(normalizeName(sh.employee))
+      if (e && row.account_norm) e.accounts.add(row.account_norm)
+    }
+  }
+  return [...by.values()]
+}
+
+/** "VL" · "ML" · "SL (1st half, 4h)" — what the Status column shows. */
+export function leaveStatusText(i: LeaveInfo): string {
+  return i.half ? `${i.type} (${i.half} half${i.hours ? `, ${i.hours}h` : ''})` : i.type
+}
+
+/** The On Leave (Zoho) rows for one account: everyone in `entries` on one of its Zoho account keys. */
+export function leaveStatusRows(
+  accountId: string, keys: Iterable<string>, entries: LeaveEntry[], sinceIso: string, nowIso: string,
+): ZohoAgentStatusRow[] {
+  const keySet = new Set(keys)
+  return entries
+    .filter(e => [...e.accounts].some(k => keySet.has(k)))
+    .sort((a, b) => a.employee.localeCompare(b.employee))
+    .map(e => ({
+      id: `${accountId}:leave:${e.norm}`, account_id: accountId, agent_name: e.employee, zoho_name: e.employee,
+      status: leaveStatusText(e.info), category: ZOHO_LEAVE_CATEGORY, since: sinceIso, source: e.info.source, updated_at: nowIso,
+    }))
 }
 
 /**

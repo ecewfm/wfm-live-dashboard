@@ -8,7 +8,7 @@
 
 import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags, KpiUnit, KpiGroup, GroupTile, CellBinding, KpiGroupSource } from './types'
 import { extractPercent, parseDurationToSeconds, formatSeconds, extractKpiValue, formatKpiThresholdLabel, resolveCell, getKpiColorClass, getExtraTileColorClass, type StatusThresholds } from './utils'
-import { ZOHO_AUX_TABLE, ZOHO_AUX_SECTION_LABEL, normalizeName } from './zohoAuxShared'
+import { ZOHO_AUX_TABLE, ZOHO_AUX_SECTION_LABEL, ZOHO_LEAVE_SECTION_LABEL, ZOHO_LEAVE_CATEGORY, normalizeName } from './zohoAuxShared'
 import { evaluateKpiFormula, type FormulaResult } from './kpiFormula'
 import {
   ZOHO_CRM_MISMATCH_TABLE, ZOHO_CRM_MISMATCH_METRIC, zohoCrmMatchActive, mismatchWarnMins, mismatchCritMins,
@@ -44,6 +44,9 @@ export function normalizeAgentRow(row: Record<string, any>, src: AgentSource): R
     const t = Date.parse(String(row[src.durationSinceCol] ?? ''))
     if (Number.isFinite(t)) out._durationSecs = String(Math.max(0, Math.round((Date.now() - t) / 1000)))
   }
+  // Someone on leave today (the On Leave (Zoho) section): no duration, never a
+  // breach (buildBreaches skips them), own timer key — see the helpers below.
+  if (src.leaveRows) { out._onLeave = true; out._duration = ''; out._durationSecs = '' }
   Object.keys(src.extraCols || {}).forEach(key => {
     const colName = src.extraCols[key]
     if (colName) out[`_extra_${key}`] = String(row[colName] ?? '')
@@ -53,6 +56,22 @@ export function normalizeAgentRow(row: Record<string, any>, src: AgentSource): R
     if (metricCol) out[`_extraMetric_${key}`] = String(row[metricCol] ?? '')
   })
   return out
+}
+
+/** A source's raw rows → its agents: its rowFilter (AgentSource.rowFilter), then normalizeAgentRow.
+ *  The ONE step components/Dashboard.tsx and lib/cliqScan.ts both call on a fetched source. */
+export function agentRowsOf(src: AgentSource, rows: Record<string, any>[]): Record<string, any>[] {
+  return rows.filter(r => sourceRowMatches(src, r)).map(r => normalizeAgentRow(r, src))
+}
+
+/** Whether a raw row belongs to this source (its AgentSource.rowFilter; no filter = every row). */
+export function sourceRowMatches(src: AgentSource, r: Record<string, any>): boolean {
+  const f = src.rowFilter
+  if (!f?.col) return true
+  const v = String(r[f.col] ?? '')
+  if (f.equals !== undefined && v !== f.equals) return false
+  if (f.notEquals !== undefined && v === f.notEquals) return false
+  return true
 }
 
 // ── The primary ("legacy") agent source ─────────────────────────────────────
@@ -89,7 +108,7 @@ export function legacyAgentSource(ds: DataSourceConfig): AgentSource | null {
 //    Duration is "Ticket solved"): that setting is about the account's own CRM
 //    column. Without this, Zoho breaks there showed "--" and never breached.
 export function agentTimerKey(accountId: string, a: Record<string, any>): string {
-  return `${accountId}:${String(a._name ?? '')}${a._durationFromSince ? '#zoho' : ''}`
+  return `${accountId}:${String(a._name ?? '')}${a._onLeave ? '#leave' : a._durationFromSince ? '#zoho' : ''}`
 }
 
 /** Seconds in the current status: the live ticking timer when there is one
@@ -103,6 +122,7 @@ export function agentElapsedSecs(agentTimers: Record<string, number>, accountId:
 
 /** This row's Duration is not elapsed time (shown as scraped, never ticked or minute-thresholded). */
 export function durationIsStatic(ds: DataSourceConfig, a: Record<string, any>): boolean {
+  if (a._onLeave) return true   // on leave: nothing to time — shown as "--", never ticked
   return !!ds.agentDurationStatic && !a._durationFromSince
 }
 
@@ -117,6 +137,23 @@ export function zohoAuxAgentSource(ds: DataSourceConfig): AgentSource | null {
     accountCol: 'account_id', nameCol: 'agent_name', statusCol: 'status',
     durationCol: '', durationSecsCol: '', durationSinceCol: 'since',
     groupByCol: '', extraCols: {},
+    // The same table holds the On Leave (Zoho) rows — they have their own section.
+    rowFilter: { col: 'category', notEquals: ZOHO_LEAVE_CATEGORY },
+  }
+}
+
+// ── The On Leave (Zoho) section (per the user, 2026-11-16) ──────────────────
+// On EVERY account, CRM ones too, whatever its Zoho toggle: the people on its
+// Zoho account(s) who have a leave today — Zoho's approved requests (via
+// Workforce REST) and time-log notes — written each minute by lib/zohoAux.ts
+// (leaveStatusRows in lib/zohoWorkforce.ts). Status = the leave ("VL", "ML",
+// "SL (1st half, 4h)"…); no duration; never a breach.
+export function zohoLeaveAgentSource(): AgentSource {
+  return {
+    id: 'zoho_leave', label: ZOHO_LEAVE_SECTION_LABEL, table: ZOHO_AUX_TABLE,
+    accountCol: 'account_id', nameCol: 'agent_name', statusCol: 'status',
+    durationCol: '', durationSecsCol: '', groupByCol: '', extraCols: {},
+    rowFilter: { col: 'category', equals: ZOHO_LEAVE_CATEGORY }, leaveRows: true,
   }
 }
 
@@ -132,6 +169,7 @@ export function agentSourcesFor(ds: DataSourceConfig, opts: { includeZohoAux?: b
   if (opts.includeZohoAux !== false) {
     const zoho = zohoAuxAgentSource(ds)
     if (zoho) out.push(zoho)
+    out.push(zohoLeaveAgentSource())   // every account
   }
   return out
 }
@@ -153,7 +191,14 @@ export function applyAgentFilter<T extends Record<string, any>>(agents: T[], ds:
   if (!agentFilterActive(ds)) return agents
   const listed = new Set((ds.agentFilter!.names || []).map(agentFilterKey))
   const include = ds.agentFilter!.mode === 'include'
-  return agents.filter(a => listed.has(agentFilterKey(a._name)) === include)
+  return agents.filter(a => {
+    const hit = listed.has(agentFilterKey(a._name))
+    // On Leave (Zoho) rows carry the ZOHO full name, which an include list of CRM
+    // names never matches — so an include list doesn't hide them; an exclude list
+    // naming the person still does.
+    if (a._onLeave) return include ? true : !hit
+    return hit === include
+  })
 }
 
 // ── Which KPI tables does this account's config actually need? ────────────
@@ -809,6 +854,7 @@ export function buildBreaches(
   // Agent status breaches — agents are pre-normalized in fetchAccount to
   // _name/_status/_duration regardless of single-table vs agentSources.
   accountData.agents.forEach(a => {
+    if (a._onLeave) return   // On Leave (Zoho): information only, never a breach
     const status = String(a._status ?? '')
     const name   = String(a._name ?? '')
     // Carried on every row this agent produces (see BreachRow.group).

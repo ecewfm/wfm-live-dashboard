@@ -22,7 +22,7 @@
 // time trigger.
 
 import { supabase } from './supabase'
-import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, agentSourcesFor, applyAgentFilter, fetchKpiData, supabaseTableFetcher, fetchZohoCrmMismatches, collectRtaKpiSignals, breachTableExtraCols, breachExtraFields, kpiCardGroups, type BreachRow, type RtaKpiSignal } from './breaches'
+import { buildBreaches, computeAgentFreeze, AGENT_FREEZE_THRESHOLD, type AgentFreezeState, mostRecentUpdatedAt, freshestAcrossSources, agentRowsOf, agentSourcesFor, applyAgentFilter, fetchKpiData, supabaseTableFetcher, fetchZohoCrmMismatches, collectRtaKpiSignals, breachTableExtraCols, breachExtraFields, kpiCardGroups, type BreachRow, type RtaKpiSignal } from './breaches'
 import { isDataStale } from './utils'
 import { sendCliqChannelMessage, sendCliqChannelFile } from './zohoCliq'
 import { renderAccountCardPng } from './cliqCardImage'
@@ -53,7 +53,7 @@ async function fetchAgentSource(src: AgentSource, accountId: string): Promise<an
   const accountCol = src.accountCol || 'account_id'
   const { data, error } = await supabase.from(src.table as any).select('*').eq(accountCol, accountId)
   if (error || !data) return []
-  return (data as any[]).map(r => normalizeAgentRow(r, src))
+  return agentRowsOf(src, data as any[])   // the source's row filter + normalizeAgentRow — shared with Dashboard.tsx
 }
 
 // Exported so app/api/zoho/test-rta-log/route.ts can compute an account's

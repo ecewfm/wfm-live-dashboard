@@ -15,7 +15,7 @@ import {
 // Cliq/RTA scan resolve with — imported rather than re-implemented here so
 // the editor's idea of which table a slot binds against cannot disagree with
 // what the runtime actually reads (that mismatch yields '--' with no error).
-import { effectiveKpiSource, kpiSourceKey, agentSourcesFor, agentFilterKey, kpiCardGroups, isFormulaTile, explainTileFormula, formulaTileChoices, fetchKpiData } from '@/lib/breaches'
+import { effectiveKpiSource, kpiSourceKey, agentSourcesFor, agentFilterKey, sourceRowMatches, kpiCardGroups, isFormulaTile, explainTileFormula, formulaTileChoices, fetchKpiData } from '@/lib/breaches'
 import { checkFormula, formulaOperands, nextOperandId, parseFormula, FORMULA_FUNCTIONS, type FormulaResult } from '@/lib/kpiFormula'
 import { HOURLY_TIMEZONES, KPI_MODES, hourlyCliqOf } from '@/lib/hourlyReport'
 import { apiFetch } from '@/lib/authClient'
@@ -3406,13 +3406,15 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
       const found = new Map<string, FoundAgent>()
       await Promise.all(agentSrcList.map(async src => {
         if (!src.table || !src.nameCol) return
-        const cols = [src.nameCol, src.statusCol, src.groupByCol].filter(Boolean).map(c => encodeURIComponent(c!)).join(',')
+        // rowFilter's column too, so two sections sharing a table (Zoho Breaks & Aux / On Leave) split as on the dashboard.
+        const cols = [...new Set([src.nameCol, src.statusCol, src.groupByCol, src.rowFilter?.col].filter(Boolean))].map(c => encodeURIComponent(c!)).join(',')
         try {
           const res = await fetch(`${statSupaUrl}/rest/v1/${src.table}?select=${cols}&${encodeURIComponent(src.accountCol || 'account_id')}=eq.${encodeURIComponent(accountId)}&limit=5000`,
             { headers: { apikey: statSupaKey, Authorization: `Bearer ${statSupaKey}` } })
           const rows = res.ok ? await res.json() : []
           if (!Array.isArray(rows)) return
           for (const r of rows) {
+            if (!sourceRowMatches(src, r)) continue
             const name = String(r[src.nameCol] ?? '').trim()
             if (!name) continue
             const key = agentFilterKey(name)

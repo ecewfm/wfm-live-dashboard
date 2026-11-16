@@ -239,6 +239,8 @@ body {
 .pill-nav         { background: rgba(201,92,92,0.12); color: var(--danger); }
 .pill-offline     { background: rgba(104,125,117,0.1); color: var(--text-muted); border-color: var(--border); }
 .pill-meeting     { background: rgba(75,139,156,0.12); color: var(--info); }
+/* On Leave (Zoho) rows — excused, not working: dashed, muted (lib/breaches.ts zohoLeaveAgentSource) */
+.pill-leave       { background: transparent; border: 1px dashed var(--border); color: var(--text-muted); font-style: italic; }
 /* --info / --purple have no dark-mode values, so these read too dim on dark */
 .dark .pill-acw   { background: rgba(185,163,208,0.15); color: #b9a3d0; }
 .dark .pill-ringing, .dark .pill-meeting { background: rgba(124,196,214,0.13); color: #7cc4d6; }

@@ -48,6 +48,10 @@ export const ZOHO_AUX_SOURCES: ZohoAuxSource[] = [
  *  (its Logged In people too — the section keeps its name). */
 export const ZOHO_AUX_TABLE = 'wfm_zoho_agent_status'
 export const ZOHO_AUX_SECTION_LABEL = 'Zoho Breaks & Aux'
+/** People on leave today (per the user, 2026-11-16) — on EVERY account, CRM ones too. Their rows sit
+ *  in the same table (ZOHO_AUX_TABLE) with this category; lib/zohoWorkforce.ts leaveStatusRows(). */
+export const ZOHO_LEAVE_SECTION_LABEL = 'On Leave (Zoho)'
+export const ZOHO_LEAVE_CATEGORY = 'leave'
 
 // ── Per-account settings (lives in wfm_settings.data_source.zohoAux) ──────────
 export interface ZohoAuxConfig {

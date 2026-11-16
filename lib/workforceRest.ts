@@ -191,7 +191,7 @@ export async function fetchRestLeaves(
     })
     const body = (await r.json().catch(() => null)) as {
       error?: string
-      results?: Record<string, { refreshedAt?: string | null; rows?: { employee_norm?: unknown; leave_type?: unknown; label?: unknown; half?: unknown; hours?: unknown }[] }>
+      results?: Record<string, { refreshedAt?: string | null; rows?: { employee_norm?: unknown; employee?: unknown; account?: unknown; leave_type?: unknown; label?: unknown; half?: unknown; hours?: unknown }[] }>
     } | null
     if (!r.ok) {
       res = { ok: false, reason: `answered HTTP ${r.status}${body?.error ? ` (${body.error})` : ''}` }
@@ -205,7 +205,10 @@ export async function fetchRestLeaves(
           const employeeNorm = typeof x?.employee_norm === 'string' ? x.employee_norm : ''
           const type = typeof x?.label === 'string' && x.label ? x.label : typeof x?.leave_type === 'string' ? x.leave_type : ''
           if (!employeeNorm || !type) continue
-          leaves.push({ date: d, employeeNorm, type, half: typeof x.half === 'string' ? x.half : '', hours: typeof x.hours === 'number' ? x.hours : null })
+          leaves.push({
+            date: d, employeeNorm, type, half: typeof x.half === 'string' ? x.half : '', hours: typeof x.hours === 'number' ? x.hours : null,
+            employee: typeof x.employee === 'string' ? x.employee : '', account: typeof x.account === 'string' ? x.account : '',
+          })
         }
       }
       res = { ok: true, leaves, refreshedAt }

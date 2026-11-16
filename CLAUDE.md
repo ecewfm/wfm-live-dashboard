@@ -1229,6 +1229,35 @@ the scheduled head count; SL (unplanned) stays in and counts as absence.
 - Verified: 16 rule checks here, 8 on vCORE's side, the dry runs above; tsc + both builds.
   Needs BOTH apps deployed for the approved leaves (WFM Live alone = notes, with SL now kept in).
 
+### Agent Status → "On Leave (Zoho)" on every account (2026-11-16)
+
+Per the user: see who's on leave today in Agent Status, on ALL accounts — CRM ones too.
+
+- **Rows** — the minute sync (`runZohoAuxSync`) works out today's leave org-wide
+  (`leaveEntriesFor`: approved requests via vCORE + time-log notes, request wins) and writes
+  each account's people (`leaveStatusRows`) into `wfm_zoho_agent_status` with `category: 'leave'`,
+  id `{account}:leave:{name}`, status `VL` / `ML` / `SL (1st half, 4h)`. Matched to an account by
+  any of the person's Zoho accounts: the request's Employee.AccountHR, their time logs'
+  account, their schedule row's account — against the account's Zoho Account keys
+  (`accountKeysFor`). Accounts with Breaks & Aux on write them together with their other rows;
+  every other account that still exists (wfm_accounts) gets its own `replaceAccountRows`, 8 at
+  a time. `clearAccountsExcept` moved to the END of the run (keep = Breaks & Aux on, or leave
+  rows written). No SQL — same table, `category` is free text.
+- **Section** — `zohoLeaveAgentSource()` (`lib/breaches.ts`) is in `agentSourcesFor()` for every
+  account (not in the CRM-only list, `includeZohoAux: false`). It and the Breaks & Aux source share
+  the table, split by the new `AgentSource.rowFilter` (`category` = / ≠ `leave`), applied by
+  `agentRowsOf()` — now the ONE fetch→agents step in both Dashboard.tsx and cliqScan.ts (and
+  `sourceRowMatches` in Settings' Agent Filter tab). `AgentSource.leaveRows` → `_onLeave`:
+  no duration ("--", `durationIsStatic`), own timer key (`#leave`), skipped by `buildBreaches`
+  (never a breach / alarm / Cliq / RTA Log), left out of "Previously Seen Statuses", dashed
+  muted `pill-leave`. Agent Filter: an include list (CRM names) doesn't hide them; an exclude
+  list naming the person does.
+- Dry run 2026-11-16 (read-only, live caches): 130 people on leave org-wide; 27 accounts got a
+  list — Walmart 35, Earnin 21, Flex 13, Wyze 8, IAA Release Agents 7, Ashley Phones 6, … incl.
+  CRM accounts with Zoho off (Flex, Wyze, Ashley Phones/Chat, Hippo, Homebase, Eden Health,
+  ZenBusiness, PerfectServe); Coalition: Jeric Silaya Canoy, Snooky Alesna Jumamoy (VL). 15
+  checks (sections, filter split, no breach, Agent Filter, matching), build passes.
+
 ## Formula KPI tiles — a tile worked out from several values (2026-11-16)
 
 Per the user: instead of binding a tile to ONE cell, work it out from several —

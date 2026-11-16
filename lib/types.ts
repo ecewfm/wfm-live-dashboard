@@ -536,6 +536,14 @@ export interface AgentSource {
   // used by the Zoho Breaks & Aux section, whose rows only change when Zoho
   // does (lib/zohoAuxShared.ts).
   durationSinceCol?: string
+  // Optional: only the rows whose `col` equals / doesn't equal a value — how two
+  // sections read one table (wfm_zoho_agent_status: Zoho Breaks & Aux = every row
+  // but category 'leave'; On Leave (Zoho) = only those). Applied by
+  // agentRowsOf() in lib/breaches.ts, the one place rows become agents.
+  rowFilter?: { col: string; equals?: string; notEquals?: string }
+  // The rows are people ON LEAVE today (the On Leave (Zoho) section, per the user
+  // 2026-11-16): shown with no duration, never a breach.
+  leaveRows?: boolean
 }
 
 // ── Custom Agent Status table columns ─────────────────────────────────────────

@@ -10,7 +10,7 @@ import { useAuth } from './AuthGate'
 import { visibleAccountsFor, can, ROLE_LABELS } from '@/lib/authEmail'
 import type { AccountData, Thresholds, DataSourceConfig, KpiGroup, AgentSource, DashboardLayout, PanelRect, HeaderColors, CliqGlobalSettings, ZohoLookups } from '@/lib/types'
 import { DEFAULT_ZOHO_LOOKUPS } from '@/lib/types'
-import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, applyAgentFilter, agentTimerKey, agentElapsedSecs, durationIsStatic, mostRecentUpdatedAt, freshestAcrossSources, normalizeAgentRow, fetchKpiSourceRows, fetchZohoCrmMismatches, makeKpiCellResolver, kpiCardGroups, type BreachRow } from '@/lib/breaches'
+import { buildBreaches, sectionBreaches, breachTableExtraCols, breachColumnChoices, agentSourcesFor, applyAgentFilter, agentTimerKey, agentElapsedSecs, durationIsStatic, mostRecentUpdatedAt, freshestAcrossSources, agentRowsOf, fetchKpiSourceRows, fetchZohoCrmMismatches, makeKpiCellResolver, kpiCardGroups, type BreachRow } from '@/lib/breaches'
 import { playAlarm } from '@/lib/alarmSounds'
 import {
   loadAlarmSettings, preloadAlarm, evaluateAlarm, describeEvent, mergePending, startAlarmLoop, stopAlarmLoop, ringOnce,
@@ -76,7 +76,7 @@ async function fetchAgentSource(src: AgentSource, accId: string): Promise<any[]>
   }
 
   const rows = (res.data as any[]) ?? []
-  return rows.map(r => normalizeAgentRow(r, src))
+  return agentRowsOf(src, rows)   // the source's row filter + normalizeAgentRow — shared with lib/cliqScan.ts
 }
 
 // ── Main Dashboard component ──────────────────────────────────────────────────
@@ -239,7 +239,8 @@ export default function Dashboard() {
       // actually something new (the common case, after the first few
       // cycles, is nothing new at all). See SettingsModal.tsx's "Previously
       // Seen Statuses" section for why this exists.
-      const liveStatuses = Array.from(new Set(agents.map(a => String(a._status ?? '').trim()).filter(Boolean)))
+      // A leave ("VL", "ML"…) isn't a status to set thresholds for — On Leave (Zoho) rows are left out.
+      const liveStatuses = Array.from(new Set(agents.filter(a => !a._onLeave).map(a => String(a._status ?? '').trim()).filter(Boolean)))
       const alreadyKnown = knownStatusesRef.current[accId] ?? []
       const newStatuses = liveStatuses.filter(s => !alreadyKnown.includes(s))
       if (newStatuses.length > 0) {
@@ -1664,7 +1665,7 @@ function DashboardPage({ accountId, accountData, breaches, calledOut, calledOutM
                     return (
                       <tr key={`${groupName}-${i}`}>
                         <td style={{ fontWeight: 600 }}>{name}</td>
-                        <td><span className={getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
+                        <td><span className={a._onLeave ? 'pill pill-leave' : getStatusPillClass(String(a._status ?? ''))}>{String(a._status || '—')}</span></td>
                         <td style={{ fontVariantNumeric: 'tabular-nums' }}>{durationDisplay}</td>
                         {extraCols.map(col => (
                           <td key={col.key}>{String(a[`_extra_${col.key}`] ?? '')}</td>

@@ -54,9 +54,10 @@ import {
 } from './zohoCrmMatch'
 import {
   ZOHO_KPI_TABLE, readsZohoKpis, accountShifts, scopedShifts, scheduledOffNow, computeAccountKpis, zohoKpiRows, byPerson, leavesOf, mergeLeaves,
+  leaveEntriesFor, leaveStatusRows,
   type ZohoKpiRow, type ZohoKpiValues,
 } from './zohoWorkforce'
-import type { ScheduleCacheRow } from './hourlyReport'
+import { dayWindow, type ScheduleCacheRow } from './hourlyReport'
 import { fetchRestKpis, fetchRestLeaves, restAccountName, restKpiConfig, type RestKpi } from './workforceRest'
 
 const CREATOR_API_BASE = 'https://www.zohoapis.com/creator/v2.1'
@@ -450,8 +451,9 @@ export async function runZohoAuxSync(
   const kpiOn = all.filter(a => readsZohoKpis(a.ds))
   const using = all.filter(a => a.ds?.zohoAux?.enabled || readsZohoKpis(a.ds))
   // An account that turned this off stops showing it at once anyway (the
-  // dashboard only adds the section while it's on); clear its rows too.
-  await store.clearAccountsExcept(auxOn.map(a => a.id))
+  // dashboard only adds the section while it's on); its rows are cleared at the
+  // END of the run — every account can have On Leave (Zoho) rows in this table
+  // now (per the user, 2026-11-16), so which ones to keep is only known then.
   // Same for the Zoho ↔ CRM check (its rows are ignored while it's off anyway).
   // Only worth a log line when some account uses it — before then the table may
   // not even exist yet.
@@ -464,6 +466,7 @@ export async function runZohoAuxSync(
     if (kpiOn.length) l(`Zoho KPI tiles: ${isKpiTableMissing(e) ? `their table is missing — ${KPI_TABLE_HINT}` : e instanceof Error ? e.message : String(e)}`)
   }
   if (using.length === 0) {
+    await store.clearAccountsExcept([])
     l('No account has Zoho Breaks & Aux turned on — nothing pulled from Zoho.')
     return { log, pulled: [], accounts: [] }
   }
@@ -515,6 +518,13 @@ export async function runZohoAuxSync(
   const leaves = mergeLeaves(leavesOf(sessions), approved?.ok ? approved.leaves : null)
   const rest = restPending ? await restPending : null
 
+  // On Leave (Zoho) — who's on leave TODAY, for every account's Agent Status (per the user,
+  // 2026-11-16), CRM accounts too. Written with the account's other Zoho rows below.
+  const leaveEntries = leaveEntriesFor(today, sessions, approved?.ok ? approved.leaves : null, schedules)
+  const leaveSince = new Date(dayWindow(today, PRIMARY_TZ).start).toISOString()
+  // Accounts whose rows stay at the end of the run: Breaks & Aux on, or On Leave rows written.
+  const keepRows = new Set<string>(auxOn.map(a => a.id))
+
   const accounts: AuxSyncResult['accounts'] = []
   for (const a of using) {
     try {
@@ -522,6 +532,7 @@ export async function runZohoAuxSync(
       // Matched on its Zoho Account setting, else its display name here (and id).
       const asked = zohoAccountNamesOf(a.ds, a.rtaAccountName)
       const keys = accountKeysFor(a.id, displayNames[a.id], asked)
+      const leaveRows = leaveStatusRows(a.id, keys, leaveEntries, leaveSince, nowIso)
       const label = (asked.length ? asked : [displayNames[a.id] || a.id]).map(n => `"${n}"`).join(' / ')
       const people = zohoPeopleOnAccount(sessions, breaks, keys)
       const extra = parseExtraNames(cfg.extraNames)
@@ -543,14 +554,18 @@ export async function runZohoAuxSync(
           scheduledNames = theirShifts.map(s => s.employee)
         }
         const rows = buildAccountStatusRows(a.id, [...people.values(), ...extra, ...scheduledNames], shown, cfg, nowIso)
-        await store.replaceAccountRows(a.id, rows)
+        await store.replaceAccountRows(a.id, [...rows, ...leaveRows])
         entry.loggedIn = rows.filter(r => r.category === 'login').length
         entry.notLoggedIn = rows.filter(r => r.category === 'off').length
         entry.onBreakOrAux = rows.length - entry.loggedIn - entry.notLoggedIn
         parts.push(`${entry.onBreakOrAux} on a break/aux now`)
         if (includeLoggedInOf(cfg)) parts.push(`${entry.loggedIn} logged in on none`)
         if (includeNotLoggedInOf(cfg)) parts.push(schedules ? `${entry.notLoggedIn} scheduled but not logged in` : 'scheduled-but-not-logged-in skipped (no schedules)')
+      } else if (leaveRows.length) {
+        await store.replaceAccountRows(a.id, leaveRows)
+        keepRows.add(a.id)
       }
+      if (leaveRows.length) parts.push(`${leaveRows.length} on leave today`)
 
       if (readsZohoKpis(a.ds)) {
         const fromRest = rest?.get(a.id)
@@ -597,6 +612,31 @@ export async function runZohoAuxSync(
     } catch (e) {
       l(`${a.id}: could not update — ${e instanceof Error ? e.message : String(e)}`)
     }
+  }
+
+  // On Leave (Zoho) for every OTHER account (CRM accounts with Zoho off) — a few at a time.
+  const usingIds = new Set(using.map(a => a.id))
+  // Only accounts that still exist (wfm_accounts) — a removed one's settings row can linger (e.g. 7cs-live).
+  const others = all.filter(a => !usingIds.has(a.id) && displayNames[a.id] !== undefined)
+  const leaveCounts: string[] = []
+  for (let i = 0; i < others.length; i += 8) {
+    await Promise.all(others.slice(i, i + 8).map(async a => {
+      try {
+        const keys = accountKeysFor(a.id, displayNames[a.id], zohoAccountNamesOf(a.ds, a.rtaAccountName))
+        const rows = leaveStatusRows(a.id, keys, leaveEntries, leaveSince, nowIso)
+        if (!rows.length) return
+        await store.replaceAccountRows(a.id, rows)
+        keepRows.add(a.id)
+        leaveCounts.push(`${a.id} ${rows.length}`)
+      } catch (e) {
+        l(`${a.id}: On Leave (Zoho) rows not written — ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }))
+  }
+  l(`On Leave (Zoho) today: ${leaveEntries.length} people on leave org-wide${leaveCounts.length ? `; on accounts without Zoho on: ${leaveCounts.sort().join(', ')}` : ''}.`)
+  // Rows of accounts that turned Zoho off / have no one on leave any more.
+  try { await store.clearAccountsExcept([...keepRows]) } catch (e) {
+    l(`Agent Status Zoho rows: clearing old ones failed — ${e instanceof Error ? e.message : String(e)}`)
   }
   return { log, pulled, accounts }
 }
