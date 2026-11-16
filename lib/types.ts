@@ -261,6 +261,28 @@ export interface GroupTile extends RtaReportFlags {
   // account-wide "Report KPI Tile breaches" toggle (wfm_settings.
   // rta_report_kpi), which was all-or-nothing across every KPI tile. See
   // RtaReportFlags above for the flag semantics.
+  // NEW, optional (per the user, 2026-11-16): when set, the tile's value is
+  // worked out from several values instead of read from `cell` — e.g.
+  // "(A + B) / C * 100" (see KpiFormula below and lib/kpiFormula.ts). `cell` is
+  // left as it was, so turning the formula off (null) goes back to it. The unit
+  // and thresholds above apply to the result, like any tile. Worked out in
+  // makeKpiCellResolver() (lib/breaches.ts), so every reader sees the same value.
+  formula?:     KpiFormula | null
+}
+
+// A formula tile's value (GroupTile.formula). `expr` uses the operands' letters.
+export interface KpiFormula {
+  expr:     string                // e.g. "(A + B) / C * 100"
+  operands: KpiFormulaOperand[]
+}
+// One value in a formula — EITHER a cell in the tile's own table (tile.source →
+// group.source → the account-wide table, the same table a plain cell would be
+// read from), OR another tile's current value (any group on the account, so a
+// formula can mix tables). A tile can't use itself, directly or through others.
+export interface KpiFormulaOperand {
+  id:       string                // 'A' … 'Z'
+  cell?:    CellBinding | null
+  tileRef?: { groupId: string; tileKey: string } | null
 }
 
 export interface DataSourceConfig {

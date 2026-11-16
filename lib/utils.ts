@@ -508,7 +508,9 @@ export function extractPercent(str: string | null | undefined): number {
   // (e.g. a "Breached" ticket count like "1,256") which otherwise parsed as
   // just "1" (parseFloat stops at the first non-numeric character).
   const cleaned = String(str).replace(/\s+/g, '').replace(/,/g, '')
-  const m = cleaned.match(/([\d.]+)%/)
+  // A leading minus is kept ("-5%" is -5, not 5) — a formula tile (lib/kpiFormula.ts)
+  // can show a difference that goes below zero.
+  const m = cleaned.match(/(-?[\d.]+)%/)
   if (m) return parseFloat(m[1])
   const n = parseFloat(cleaned)
   return isNaN(n) ? NaN : n

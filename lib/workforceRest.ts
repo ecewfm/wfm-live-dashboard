@@ -19,6 +19,12 @@
 // configured, unreachable, too slow, no such account, or vCORE's own Zoho data
 // over REST_MAX_AGE_MIN old — keeps the tiles this app works out from Zoho's
 // schedule (computeAccountKpis), and the sync log says why.
+// Also (per the user, 2026-11-16): an account with NO breaks set in vCORE's
+// Adherence today (vCORE's `breaks.planned` 0 — its plannedBreaksOf). Without a
+// break plan vCORE counts every real break as off plan, so its adherence (and the
+// head count / absences that go with that schedule) isn't used: ALL its tiles
+// come from Zoho. An answer without `breaks` (a vCORE from before this) is used
+// as before.
 //
 // Env (server-only): WORKFORCE_REST_URL (e.g. https://ecewfmrest.vercel.app) and
 // WORKFORCE_REST_KPI_SECRET (the same value as vCORE's WFM_LIVE_KPI_SECRET).
@@ -32,8 +38,11 @@ export const REST_MAX_AGE_MIN = 15
 /** The whole request; the minute sync has 60 s and its own Zoho work to do. */
 const REST_TIMEOUT_MS = 25_000
 
+/** vCORE's count of breaks / lunches planned on today's timeline (its plannedBreaksOf). */
+export type RestPlannedBreaks = { planned: number; agentsWithBreaks: number; working: number }
+
 export type RestKpi =
-  | { ok: true; account: string; values: ZohoKpiValues; zohoAgeMin: number; agents: number }
+  | { ok: true; account: string; values: ZohoKpiValues; zohoAgeMin: number; agents: number; breaks: RestPlannedBreaks | null }
   | { ok: false; reason: string }
 
 export type RestFetch = (url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }) =>
@@ -42,7 +51,7 @@ export type RestFetch = (url: string, init: { method: string; headers: Record<st
 /** vCORE's answer (app/api/live/kpis in workforce-rest). */
 type RestAnswer = {
   error?: string
-  results?: Record<string, { ok?: boolean; reason?: string; account?: string; agents?: number; zohoRefreshedAt?: string | null; values?: unknown }>
+  results?: Record<string, { ok?: boolean; reason?: string; account?: string; agents?: number; zohoRefreshedAt?: string | null; breaks?: unknown; values?: unknown }>
 }
 
 export function restKpiConfig(env: Record<string, string | undefined> = process.env): { url: string; secret: string } | null {
@@ -68,6 +77,24 @@ function asValues(raw: unknown): ZohoKpiValues | null {
   for (const k of NUM_KEYS) if (!finite(v[k])) return null
   for (const k of PCT_KEYS) if (v[k] !== null && !finite(v[k])) return null
   return Object.fromEntries([...NUM_KEYS, ...PCT_KEYS].map(k => [k, v[k]])) as unknown as ZohoKpiValues
+}
+
+/** vCORE's `breaks`, checked — null when absent or malformed (an older vCORE: used as before). */
+function asBreaks(raw: unknown): RestPlannedBreaks | null {
+  if (!raw || typeof raw !== 'object') return null
+  const b = raw as Record<string, unknown>
+  const n = (x: unknown) => typeof x === 'number' && Number.isFinite(x) && x >= 0
+  return n(b.planned) && n(b.agentsWithBreaks) && n(b.working)
+    ? { planned: b.planned as number, agentsWithBreaks: b.agentsWithBreaks as number, working: b.working as number }
+    : null
+}
+
+/** Why an account's vCORE tiles aren't used because of its break plan — null = they are. */
+export function noBreaksReason(b: RestPlannedBreaks | null): string | null {
+  if (!b || b.planned > 0) return null
+  return b.working > 0
+    ? `no breaks set in its Adherence today (${b.working} scheduled, none with a break)`
+    : 'no one scheduled and no breaks set in its Adherence today'
 }
 
 /**
@@ -115,7 +142,10 @@ export async function fetchRestKpis(
       out.set(a.key, { ok: false, reason: `its Zoho data is ${Number.isFinite(zohoAgeMin) ? `${Math.round(zohoAgeMin)} min old` : 'not synced today yet'}` })
       continue
     }
-    out.set(a.key, { ok: true, account: String(r.account ?? a.name), values, zohoAgeMin, agents: Number(r.agents) || 0 })
+    const breaks = asBreaks(r.breaks)
+    const noBreaks = noBreaksReason(breaks)
+    if (noBreaks) { out.set(a.key, { ok: false, reason: noBreaks }); continue }
+    out.set(a.key, { ok: true, account: String(r.account ?? a.name), values, zohoAgeMin, agents: Number(r.agents) || 0, breaks })
   }
   return out
 }

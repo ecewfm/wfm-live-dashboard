@@ -9,6 +9,7 @@
 import type { AccountData, Thresholds, DataSourceConfig, AgentSource, RtaReportFlags, KpiUnit, KpiGroup, GroupTile, CellBinding, KpiGroupSource } from './types'
 import { extractPercent, parseDurationToSeconds, formatSeconds, extractKpiValue, formatKpiThresholdLabel, resolveCell, getKpiColorClass, getExtraTileColorClass, type StatusThresholds } from './utils'
 import { ZOHO_AUX_TABLE, ZOHO_AUX_SECTION_LABEL, normalizeName } from './zohoAuxShared'
+import { evaluateKpiFormula, type FormulaResult } from './kpiFormula'
 import {
   ZOHO_CRM_MISMATCH_TABLE, ZOHO_CRM_MISMATCH_METRIC, zohoCrmMatchActive, mismatchWarnMins, mismatchCritMins,
   mismatchRowFresh, type ZohoCrmMismatchRow,
@@ -275,14 +276,38 @@ export function supabaseTableFetcher(client: { from(table: string): any }): KpiS
 export function makeKpiCellResolver(
   ds: DataSourceConfig, group: KpiGroup, accountData: AccountData | undefined
 ): (binding?: CellBinding | null, tile?: GroupTile | null) => string {
+  const read = kpiTileReader(ds, accountData)
+  return (binding, tile) => tile && isFormulaTile(tile)
+    ? read.formula(group, tile).value
+    : read.cell(group, binding, tile)
+}
+
+/** A formula tile (GroupTile.formula) — its value is worked out, not read from `cell`. */
+export function isFormulaTile(t: GroupTile | null | undefined): boolean {
+  return !!t?.formula && typeof t.formula === 'object'
+}
+
+/** Whether a tile has anything to show: a picked cell, or a formula with text in it.
+ *  The breach / RTA Logs passes skip a tile that isn't. */
+export function tileIsBound(t: GroupTile | null | undefined): boolean {
+  if (!t) return false
+  if (isFormulaTile(t)) return typeof t.formula!.expr === 'string' && !!t.formula!.expr.trim()
+  return !!t.cell
+}
+
+// The account's KPI readers — a plain cell, and a formula tile's value with its parts.
+// One instance per account+data, used by makeKpiCellResolver() above and by
+// explainTileFormula() below, so the editor's "Test" works it out exactly as the
+// dashboard and the scan do.
+function kpiTileReader(ds: DataSourceConfig, accountData: AccountData | undefined) {
   const accountRows = accountData?.kpiRows ?? []
-  return (binding, tile) => {
-    const src = effectiveKpiSource(group, tile)
+  const cell = (g: KpiGroup, binding?: CellBinding | null, tile?: GroupTile | null): string => {
+    const src = effectiveKpiSource(g, tile)
 
     // No override anywhere up the chain -> the account-wide table, filtered
     // by this group's LOB value. Byte-for-byte the call every one of those
     // five sites made before this function existed.
-    if (!src) return resolveCell(accountRows, binding ?? undefined, ds.kpiGroupCol, group.groupVal)
+    if (!src) return resolveCell(accountRows, binding ?? undefined, ds.kpiGroupCol, g.groupVal)
 
     // An alternate table's rows. `?? []` mirrors the EXISTING semantics of a
     // source toggled ON with no table picked yet (collectKpiSourceQueries
@@ -302,6 +327,60 @@ export function makeKpiCellResolver(
     // whichever rows a given poll happened to return.
     return resolveCell(rows, binding ?? undefined)
   }
+
+  // A tile's text, whichever kind it is — for a formula operand pointing at another tile.
+  const tileText = (g: KpiGroup, t: GroupTile, seen: Set<string>): string =>
+    isFormulaTile(t) ? formula(g, t, seen).value : cell(g, t.cell, t)
+
+  // `seen` = the tiles already being worked out up this chain — a tile that ends up
+  // using itself (A uses B, B uses A) gets no value instead of looping forever.
+  const formula = (g: KpiGroup, t: GroupTile, seen: Set<string> = new Set()): FormulaResult => {
+    const self = `${g.id}:${t.key}`
+    const chain = new Set(seen).add(self)
+    return evaluateKpiFormula(t.formula, op => {
+      const ref = op.tileRef
+      if (ref?.tileKey) {
+        const id = `${ref.groupId}:${ref.tileKey}`
+        if (chain.has(id)) return ''
+        const g2 = (ds.groups ?? []).find(x => x.id === ref.groupId)
+        if (!g2) return ''
+        const t2 = (Array.isArray(g2.tiles) ? g2.tiles : []).find(x => x?.key === ref.tileKey)
+        if (t2) return tileText(g2, t2, chain)
+        // A tile of a shared-tiles group (sla / wait / aht / abn / an extra tile) — its cell.
+        const legacy = g2.cells?.[ref.tileKey]
+        return legacy ? cell(g2, legacy, null) : ''
+      }
+      return cell(g, op.cell, t)
+    }, t.kpiUnit)
+  }
+
+  return { cell, formula }
+}
+
+/** A formula tile worked out on this data, with each value it used — Settings' "Test with live data". */
+export function explainTileFormula(
+  ds: DataSourceConfig, group: KpiGroup, tile: GroupTile, accountData: AccountData | undefined,
+): FormulaResult {
+  return kpiTileReader(ds, accountData).formula(group, tile)
+}
+
+/** Every tile a formula operand can point at — independent tiles and shared-tiles groups'
+ *  bound slots, as "Group › Tile". */
+export function formulaTileChoices(ds: DataSourceConfig): { groupId: string; tileKey: string; label: string }[] {
+  const out: { groupId: string; tileKey: string; label: string }[] = []
+  for (const g of ds.groups ?? []) {
+    const gname = g.name || 'Group'
+    if (Array.isArray(g.tiles) && g.tiles.length) {
+      for (const t of g.tiles) out.push({ groupId: g.id, tileKey: t.key, label: `${gname} › ${t.label || t.key}` })
+      continue
+    }
+    const fixed: Record<string, string> = { sla: ds.kpiLabels?.sla, wait: ds.kpiLabels?.wait, aht: ds.kpiLabels?.aht, abn: ds.kpiLabels?.abn }
+    for (const k of Object.keys(g.cells ?? {})) {
+      const label = fixed[k] ?? (ds.extraTiles ?? []).find(x => x.key === k)?.label ?? k
+      out.push({ groupId: g.id, tileKey: k, label: `${gname} › ${label}` })
+    }
+  }
+  return out
 }
 
 // ── The Overview card's KPI tiles — what each group shows, its value and its
@@ -428,7 +507,7 @@ export function collectRtaKpiSignals(
 
     if (group.tiles && group.tiles.length) {
       group.tiles.forEach(tile => {
-        if (!tile.cell) return
+        if (!tileIsBound(tile)) return   // a cell, or a formula (lib/kpiFormula.ts)
         push(`${group.id}:${tile.key}`, g, tile.label, rc(tile.cell, tile), tile.targ, tile, tile.kpiUnit, tile)
       })
       return
@@ -689,7 +768,7 @@ export function buildBreaches(
     // other group, instead of sharing ds.kpiLabels/ds.extraTiles/kpiTh.
     if (group.tiles && group.tiles.length) {
       group.tiles.forEach(tile => {
-        if (!tile.cell) return
+        if (!tileIsBound(tile)) return   // a cell, or a formula (lib/kpiFormula.ts)
         checkKpi(rc(tile.cell, tile), tile.targ, tile, g, tile.label, tile.kpiUnit, tile.sendToCliq)
       })
       return

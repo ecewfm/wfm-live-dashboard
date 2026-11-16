@@ -1177,6 +1177,71 @@ count, against the agents actually logged in on that timeline.
   route is closed — 503 — until that is set there).
 - Not changed: the Agent Status section under the card still lists "scheduled but
   not logged in" from Zoho's schedule; CRM accounts are untouched.
+- **No breaks set in vCORE → Zoho (per the user, 2026-11-16).** vCORE now answers
+  `breaks: { planned, agentsWithBreaks, working }` per account (`plannedBreaksOf` in its
+  `src/lib/live-kpis.ts`: breaks/lunches planned on today's timeline among agents working it,
+  rest days and leave aside — vCORE never invents breaks). `planned` 0 → `fetchRestKpis`
+  returns `{ ok: false, reason: 'no breaks set in its Adherence today (N scheduled, none with a
+  break)' }` (`noBreaksReason`), so the sync writes ALL eight tiles from Zoho's schedule with
+  that reason in the log. Without a break plan vCORE counts every real break as off plan
+  (Earnin read 10.1% adherence). An answer with no `breaks` (vCORE not yet updated) or a
+  malformed one is used as before. A REST-fed log line now ends "breaks set for X of Y scheduled".
+  It's account-level: ANY planned break keeps REST (Albert: 1 of 10 people). Re-checked every
+  minute, so an account switches back to REST as soon as breaks are set in vCORE.
+  Scan 2026-11-16 (31 accounts, read-only, vCORE's own builder): REST kept — Albert, Bubble,
+  Clearwater, Minoan, Papaya, Resident Home, Sharebite, Shef, Walmart; → Zoho — 7Cs, Citcon,
+  Coalition, D&L Transport, Earnin, IAA, Illuminz, ILS, KMicro, Lytx, Newport, PLS, Prefix,
+  QuESO, Spireon, Tremendous; already Zoho (no vCORE account by that name) — Ashley (FEX),
+  EarnIn - Fraud, IAA Release Agents, PLS T&T, Resident Home Accounting, Resident Home Sales.
+  Works once BOTH apps are deployed; either alone changes nothing.
+
+## Formula KPI tiles — a tile worked out from several values (2026-11-16)
+
+Per the user: instead of binding a tile to ONE cell, work it out from several —
+e.g. `(A + B) / C * 100`, warning over 4%, critical over 10%. For tiles in an
+**Independent tiles** group (`GroupTile`); shared-tiles groups have no per-tile record.
+
+- **Config** — `GroupTile.formula: { expr, operands: [{ id: 'A', cell } | { id: 'B', tileRef: { groupId, tileKey } }] }`
+  (`lib/types.ts`), in the `data_source` JSONB like every tile, so **no SQL**. `cell` is
+  left alone, so turning the formula off (`formula: null`) goes back to it. The tile's own
+  unit and warn / crit / target / direction / Exclude 0 / Send to Cliq / RTA flags apply to
+  the RESULT, set on the KPI Thresholds tab as for any tile.
+- **Values** — a cell is read from the tile's table (tile.source → group.source →
+  account-wide, `effectiveKpiSource()`, the same table its single cell would use; the row
+  key rule is `pickCell()`'s). A `tileRef` is another tile's current value (any group,
+  independent or shared-tiles), so a formula can mix tables. A tile that ends up using
+  itself (directly or through others) gets no value instead of looping.
+- **The maths** — `lib/kpiFormula.ts`, pure, shared by browser and server. A small parser,
+  never `eval`: numbers, letters A–Z, `+ - * /`, brackets, `min max sum avg abs round(x, d)`;
+  `× ÷` accepted. Usual precedence (`A + B / C` = A + (B/C)). A cell's text becomes a number
+  with `parseOperandValue()`: `85.3%` → 85.3, `$1,256` → 1256, `1:55` / `1h 2m` → SECONDS,
+  blank / `--` / `N/A` → none. The result is formatted in the tile's unit
+  (`formatFormulaResult`): percent `12.35%`, count rounded, duration = seconds → `1m 55s`.
+  No value (blank operand, ÷ 0, unset letter) → `''` → the tile shows `--` and never breaches.
+- **Where it's worked out** — inside `makeKpiCellResolver()` (`lib/breaches.ts`, now built on
+  `kpiTileReader()`), the ONE function every tile is read through, so the Dashboard, Overview
+  card, breaches, Cliq message + picture, Workforce / RTA Logs and the Hourly page all see the
+  same value with no change of their own. `tileIsBound()` replaced the two `if (!tile.cell)`
+  guards (buildBreaches / collectRtaKpiSignals) so a formula tile isn't skipped.
+- `extractPercent()` now keeps a leading minus (`-5%` → -5, was 5) — a formula can go negative.
+- **Settings → Data Sources** — the calculator icon on an independent tile's card turns its
+  formula on (A starts as the cell it had). Its card shows `ƒ (A + B) / C * 100`, red with the
+  reason when something's wrong (`checkFormula`). Below the cards, a **FORMULA** panel per
+  formula tile (`FormulaPanel` in `components/SettingsModal.tsx`): the formula, a live check,
+  each value as "a cell" (Pick cell → click it in the tile's preview, the same arm-then-click
+  as a plain tile: `activeCell.operand`) or "a tile" (dropdown, `formulaTileChoices()`), Add
+  value, **Test with live data** (fetches the account's rows and runs `explainTileFormula()`,
+  the same reader the dashboard uses, showing each value and the coloured result), and "Use
+  one cell instead". Picked cells light up in their preview as "Tile · A". The KPI Thresholds
+  tab shows `ƒ …` under a formula tile's name.
+- Verified (2026-11-16): 48 checks — parser (precedence, brackets, functions, ÷ 0, 10 kinds
+  of typo), value reading and formatting, read-back through `extractKpiValue`, malformed
+  JSONB never throwing, and on Ashley Digital's live rows a formula tile `(A + B) / 2` (A a
+  cell, B a tile) equal to the same sum by hand on the card / Cliq picture / Hourly path,
+  `explainTileFormula`, critical / warning / no breach at the right lines, the RTA heartbeat,
+  and tiles that use each other → `--`. `tsc` and `next build` pass; no lint error on any
+  added line (the files' existing ones are unchanged). **The Settings editor itself was not
+  clicked through** (no login in the test environment).
 
 ## Settings Save no longer writes the default Cliq settings (fixed 2026-11-05)
 

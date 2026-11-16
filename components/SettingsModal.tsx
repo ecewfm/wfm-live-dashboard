@@ -2,19 +2,21 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroupSource, AgentSource, AgentExtraColumn, AgentFilter, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice, KpiUnit, HourlyCliqConfig } from '@/lib/types'
+import type { Thresholds, DataSourceConfig, ExtraTile, CellBinding, GroupTile, KpiGroup, KpiGroupSource, KpiFormula, KpiFormulaOperand, AgentSource, AgentExtraColumn, AgentFilter, CliqGlobalSettings, ZohoLookups, ZohoLookupChoice, KpiUnit, HourlyCliqConfig } from '@/lib/types'
 import type { StatusThresholds } from '@/lib/utils'
 import {
   DEFAULT_THRESHOLDS, DEFAULT_STATUS_THRESHOLDS,
   PRESET_AIRCALL, PRESET_TALKDESK, PRESET_FIVE9, PRESET_UNITERS,
   DEFAULT_KPI_LABELS, genId, newGroup, newGroupTile, newAgentSource,
-  fetchPublicTables, formatMinutesAsClock, parseClockToMinutes
+  fetchPublicTables, formatMinutesAsClock, parseClockToMinutes,
+  extractKpiValue, getKpiColorClass,
 } from '@/lib/utils'
 // effectiveKpiSource is the SAME precedence function the renderers and the
 // Cliq/RTA scan resolve with — imported rather than re-implemented here so
 // the editor's idea of which table a slot binds against cannot disagree with
 // what the runtime actually reads (that mismatch yields '--' with no error).
-import { effectiveKpiSource, kpiSourceKey, agentSourcesFor, agentFilterKey, kpiCardGroups } from '@/lib/breaches'
+import { effectiveKpiSource, kpiSourceKey, agentSourcesFor, agentFilterKey, kpiCardGroups, isFormulaTile, explainTileFormula, formulaTileChoices, fetchKpiData } from '@/lib/breaches'
+import { checkFormula, formulaOperands, nextOperandId, parseFormula, FORMULA_FUNCTIONS, type FormulaResult } from '@/lib/kpiFormula'
 import { HOURLY_TIMEZONES, KPI_MODES, hourlyCliqOf } from '@/lib/hourlyReport'
 import { apiFetch } from '@/lib/authClient'
 import { addAccount, removeAccount, renameAccount, DEFAULT_CLIQ_GLOBAL_SETTINGS, loadZohoFieldOptions, type AccountConfig, type ZohoFieldOption } from '@/lib/settings'
@@ -1437,6 +1439,157 @@ function KpiSourcePanel({ title, color, source, tables, supaUrl, supaKey, accoun
   )
 }
 
+// ── Formula tile editor (per the user, 2026-11-16) ─────────────────────────
+// One panel per tile with a formula (GroupTile.formula): the formula itself and
+// its values A, B, C… — each a cell (armed here, then clicked in whichever
+// preview its tile reads, exactly like a plain tile's cell) or another tile.
+// The rules and the maths are lib/kpiFormula.ts; the value is worked out in
+// makeKpiCellResolver() (lib/breaches.ts), the same place every tile is read,
+// and "Test with live data" calls that same code through explainTileFormula().
+function FormulaPanel({ ds, group, tile, color, accountId, supaUrl, supaKey, armedOperand, tableLabel, onArm, onChange, onOff }: {
+  ds: DataSourceConfig; group: KpiGroup; tile: GroupTile; color: string
+  accountId: string; supaUrl: string; supaKey: string
+  armedOperand: string | null       // the value waiting for a cell click, if any
+  tableLabel: string                // the table its cells are read from
+  onArm: (operandId: string | null) => void
+  onChange: (fn: (f: KpiFormula) => KpiFormula) => void
+  onOff: () => void
+}) {
+  const f = tile.formula as KpiFormula
+  const ops = formulaOperands(f)
+  const parsed = parseFormula(f.expr)
+  const used = new Set(parsed.ok ? parsed.vars : [])
+  const check = checkFormula(f)
+  const next = nextOperandId(f)
+  const choices = formulaTileChoices(ds).filter(c => !(c.groupId === group.id && c.tileKey === tile.key))
+  const [test, setTest] = useState<{ busy: boolean; res?: FormulaResult; err?: string }>({ busy: false })
+  const unit = tile.kpiUnit ?? 'percent'
+  // "≥ 4%" / "≤ 80%" / "≥ 1:55" / "≥ 10" — at or past the line is that colour (getKpiColorClass).
+  const lineText = (v: number) =>
+    `${tile.direction === 'desc' ? '≤' : '≥'} ${unit === 'duration' ? formatMinutesAsClock(v) : unit === 'count' ? v : `${v}%`}`
+
+  const setOp = (id: string, patch: Partial<KpiFormulaOperand>) =>
+    onChange(prev => ({ ...prev, operands: formulaOperands(prev).map(o => o.id === id ? { ...o, ...patch } : o) }))
+  const removeOp = (id: string) => {
+    if (armedOperand === id) onArm(null)
+    onChange(prev => ({ ...prev, operands: formulaOperands(prev).filter(o => o.id !== id) }))
+  }
+  const addOp = () => {
+    if (!next) return
+    onChange(prev => ({ ...prev, operands: [...formulaOperands(prev), { id: next, cell: null }] }))
+    onArm(next)
+  }
+
+  const runTest = async () => {
+    setTest({ busy: true })
+    try {
+      // The account's live rows, fetched the same way the dashboard does, then the
+      // SAME resolver the dashboard and the scan use — so what you see here is what shows.
+      const fetchTable = async (table: string, accountCol: string, acc: string) => {
+        const r = await fetch(`${supaUrl}/rest/v1/${table}?${encodeURIComponent(accountCol)}=eq.${encodeURIComponent(acc)}`,
+          { headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` } })
+        const d = r.ok ? await r.json() : []
+        return Array.isArray(d) ? d : []
+      }
+      const data = await fetchKpiData(ds, accountId, fetchTable)
+      setTest({ busy: false, res: explainTileFormula(ds, group, tile, { ...data, kpi: null, agents: [], status: null, calls: [] }) })
+    } catch (e) {
+      setTest({ busy: false, err: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  const resNum = test.res?.value ? extractKpiValue(test.res.value, tile.kpiUnit).num : NaN
+  const resClass = test.res?.value ? getKpiColorClass(resNum, tile) : 'text-muted'
+
+  return (
+    <div className="ds-formula" style={{ borderLeft: `3px solid ${color}` }}>
+      <div className="ds-formula-head">
+        <i className="bx bx-calculator" style={{ color }} />
+        <div className="ds-section-title" style={{ borderBottom: 'none', padding: 0, margin: 0, color }}>{tile.label || 'Tile'} — FORMULA</div>
+        <span className="ds-formula-src" title="Cells (A, B, …) are read from this table — the tile's own source if it has one, else its group's, else the account's.">cells from {tableLabel}</span>
+        <button className="ds-mode-btn" style={{ marginLeft: 'auto' }} onClick={onOff}
+          title="Stop working this tile out from a formula — it goes back to the one cell it had before (if any). The formula is removed.">
+          <i className="bx bx-undo" /> Use one cell instead
+        </button>
+      </div>
+
+      <div className="ds-formula-row">
+        <span className="ds-mini-label">Formula</span>
+        <input className="ds-formula-input" value={typeof f.expr === 'string' ? f.expr : ''} spellCheck={false}
+          placeholder="(A + B) / C * 100" aria-label={`Formula for ${tile.label}`}
+          onChange={e => { const expr = e.target.value; onChange(prev => ({ ...prev, expr })) }} />
+      </div>
+      <div className={check.error ? 'ds-formula-msg bad' : 'ds-formula-msg ok'}>
+        {check.error
+          ? <><i className="bx bx-error-circle" /> {check.error}</>
+          : <><i className="bx bx-check-circle" /> Shown as {unit === 'duration' ? 'a duration — the result is in SECONDS' : unit === 'count' ? 'a whole number' : 'a percentage'}{' · '}
+              warning {lineText(tile.warn)}, critical {lineText(tile.crit)} — set on the <em>KPI Thresholds</em> tab</>}
+      </div>
+
+      {ops.map(op => {
+        const kind = op.tileRef ? 'tile' : 'cell'
+        const armed = armedOperand === op.id
+        const refKey = op.tileRef ? `${op.tileRef.groupId}|${op.tileRef.tileKey}` : ''
+        return (
+          <div key={op.id} className={`ds-formula-op${armed ? ' armed' : ''}`} style={armed ? { borderColor: color } : undefined}>
+            <span className="ds-formula-id" style={{ background: color }}>{op.id}</span>
+            <select className="ds-select" style={{ minWidth: 0, width: 92 }} value={kind} aria-label={`What ${op.id} is`}
+              onChange={e => {
+                if (e.target.value === 'tile') { setOp(op.id, { cell: null, tileRef: choices[0] ? { groupId: choices[0].groupId, tileKey: choices[0].tileKey } : null }); if (armed) onArm(null) }
+                else setOp(op.id, { tileRef: null })
+              }}>
+              <option value="cell">a cell</option>
+              <option value="tile">a tile</option>
+            </select>
+            {kind === 'cell' ? (
+              <>
+                <span className="ds-formula-bind" style={{ color: op.cell?.valueCol ? color : 'var(--text-muted)' }}>
+                  {op.cell?.valueCol
+                    ? (op.cell.matchVal ? `${op.cell.matchVal} → ${op.cell.valueCol}` : op.cell.valueCol)
+                    : armed ? '← now click a cell in the table' : 'no cell picked'}
+                </span>
+                <button className={`ds-mode-btn${armed ? ' on' : ''}`} onClick={() => onArm(armed ? null : op.id)}
+                  title={`Arm ${op.id}, then click its cell in the ${tableLabel} table`}>
+                  <i className="bx bx-pointer" /> {armed ? 'Cancel' : op.cell?.valueCol ? 'Re-pick' : 'Pick cell'}
+                </button>
+              </>
+            ) : (
+              <select className="ds-select" style={{ flex: 1, minWidth: 160 }} value={refKey} aria-label={`Tile used as ${op.id}`}
+                onChange={e => { const [groupId, tileKey] = e.target.value.split('|'); setOp(op.id, { tileRef: { groupId, tileKey } }) }}>
+                {!refKey && <option value="">Pick a tile…</option>}
+                {choices.map(c => <option key={`${c.groupId}|${c.tileKey}`} value={`${c.groupId}|${c.tileKey}`}>{c.label}</option>)}
+                {refKey && !choices.some(c => `${c.groupId}|${c.tileKey}` === refKey) && <option value={refKey}>(a removed tile)</option>}
+              </select>
+            )}
+            {!used.has(op.id) && <span className="ds-formula-unused" title="This value isn't in the formula above">not used</span>}
+            <button className="ds-x" title={`Remove ${op.id}`} onClick={() => removeOp(op.id)}><i className="bx bx-trash" /></button>
+          </div>
+        )
+      })}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        {next && <button className="ds-add-btn" onClick={addOp}><i className="bx bx-plus" /> Add value {next}</button>}
+        <button className="ds-mode-btn" disabled={test.busy || !!check.error} onClick={runTest}
+          title={check.error ? 'Fix the formula first' : "Work it out now on this account's live rows — the same way the dashboard will"}>
+          <i className={`bx ${test.busy ? 'bx-loader-alt bx-spin' : 'bx-play'}`} /> Test with live data
+        </button>
+        {test.err && <span className="ds-formula-msg bad" style={{ margin: 0 }}>{test.err}</span>}
+        {test.res && (
+          <span className="ds-formula-result">
+            {test.res.parts.map(p => <span key={p.id}><strong>{p.id}</strong> = {p.raw || '(blank)'}{p.num !== null && String(p.num) !== p.raw ? ` → ${p.num}` : ''}</span>)}
+            <span>= <strong className={resClass}>{test.res.value || '--'}</strong></span>
+            {test.res.error && <span className="ds-formula-msg bad" style={{ margin: 0 }}>{test.res.error}</span>}
+          </span>
+        )}
+      </div>
+      <p className="ds-hint" style={{ marginBottom: 0 }}>
+        Use the letters with <code>+ − * /</code> and brackets — <code>* /</code> go first, so <code>A + B / C</code> is A + (B ÷ C); write <code>(A + B) / C</code> for the other.
+        Also {FORMULA_FUNCTIONS.map((fn, i) => <React.Fragment key={fn}>{i ? ', ' : ''}<code>{fn === 'round' ? 'round(A, 1)' : `${fn}(…)`}</code></React.Fragment>)}.
+        A cell is read as its number: <code>85.3%</code> → 85.3, <code>1,256</code> → 1256, a duration (<code>1:55</code>, <code>1h 2m</code>) → seconds.
+        A blank cell or dividing by zero shows <strong>--</strong> and never breaches. Example: <code>(A + B) / C * 100</code> with the unit set to percent, warning 4 and critical 10.
+      </p>
+    </div>
+  )
+}
+
 function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   accountId: string
   ds: DataSourceConfig
@@ -1446,7 +1599,9 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
   const [tables,     setTables]     = useState<string[]>([])
   const [kpiPreview, setKpiPreview] = useState<Record<string, any>[]>([])
   const [agtPreview, setAgtPreview] = useState<Record<string, any>[]>([])
-  const [activeCell, setActiveCell] = useState<{ groupId: string; kpiKey: string } | null>(null)
+  // `operand` set = the armed slot is one value (A, B, …) of a formula tile — the next
+  // cell click goes into tile.formula.operands, not tile.cell (see pickCell).
+  const [activeCell, setActiveCell] = useState<{ groupId: string; kpiKey: string; operand?: string } | null>(null)
   const [activeAgentSlot, setActiveAgentSlot] = useState<string | null>(null)
   const [loadingKpi, setLoadingKpi] = useState(false)
   const [loadingAgt, setLoadingAgt] = useState(false)
@@ -1628,6 +1783,13 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         if (rk) { binding.matchCol = rk; binding.matchVal = String(row[rk] ?? '') }
         return { ...prev, groups: prev.groups.map(g => {
           if (g.id !== cur.groupId) return g
+          // A formula tile's value (A, B, …) — into that operand. Same table and row-key
+          // rule as the tile's own cell above: operands read the tile's table.
+          if (cur.operand && g.tiles && g.tiles.length) {
+            return { ...g, tiles: g.tiles.map(t => t.key === cur.kpiKey && t.formula
+              ? { ...t, formula: { ...t.formula, operands: formulaOperands(t.formula).map(o => o.id === cur.operand ? { ...o, cell: binding, tileRef: null } : o) } }
+              : t) }
+          }
           // Independent-tiles group — bind straight onto that tile's own `cell`.
           if (g.tiles && g.tiles.length) {
             return { ...g, tiles: g.tiles.map(t => t.key === cur.kpiKey ? { ...t, cell: binding } : t) }
@@ -1685,6 +1847,18 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
     setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => g.id === groupId
       ? { ...g, tiles: (g.tiles || []).map(t => t.key === key ? { ...t, label } : t) } : g) }))
   }, [])
+  // A tile's formula (GroupTile.formula) — `fn` gets the current one (null = none)
+  // and returns the new one (null = back to the tile's one cell). Never touches
+  // `cell` or `key` (the RTA Logs baselines are keyed by tile key).
+  const updateTileFormula = useCallback((groupId: string, key: string, fn: (f: KpiFormula | null) => KpiFormula | null) => {
+    setLocalDs(prev => ({ ...prev, groups: prev.groups.map(g => g.id === groupId
+      ? { ...g, tiles: (g.tiles || []).map(t => t.key === key ? { ...t, formula: fn(t.formula ?? null) } : t) } : g) }))
+  }, [])
+  // Turn a tile's formula ON: A starts as the cell it already had, so nothing is lost.
+  const startTileFormula = useCallback((groupId: string, tile: GroupTile) => {
+    updateTileFormula(groupId, tile.key, f => f ?? { expr: 'A', operands: [{ id: 'A', cell: tile.cell ?? null }] })
+    setActiveCell(tile.cell ? null : { groupId, kpiKey: tile.key, operand: 'A' })
+  }, [updateTileFormula])
   const mapAgentCol = useCallback((colName: string) => {
     setActiveAgentSlot(cur => {
       if (cur) setLocalDs(prev => {
@@ -1817,15 +1991,27 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
 
   // Highlight: a preview cell lights up only when it is the EXACT bound cell —
   // matched on both the group value (skill/lob) and the row key (metric).
-  const hiBindings = localDs.groups.flatMap(g =>
-    Object.entries(g.cells).map(([k, b]) => ({
-      color:    tileColor(k),
-      valueCol: b.valueCol,
-      groupVal: localDs.kpiGroupCol ? (g.groupVal ?? null) : null,
-      matchCol: b.matchCol || null,
-      matchVal: (b.matchVal !== undefined && b.matchVal !== '') ? b.matchVal : null,
-    }))
-  ).filter(x => x.valueCol)
+  const hiBindings = [
+    ...localDs.groups.flatMap(g =>
+      Object.entries(g.cells).map(([k, b]) => ({
+        color:    tileColor(k),
+        valueCol: b.valueCol,
+        groupVal: localDs.kpiGroupCol ? (g.groupVal ?? null) : null,
+        matchCol: b.matchCol || null,
+        matchVal: (b.matchVal !== undefined && b.matchVal !== '') ? b.matchVal : null,
+      }))),
+    // Formula tiles reading this account-wide table — their A, B, … cells.
+    ...localDs.groups.flatMap(g => (g.tiles ?? []).flatMap((t, i) =>
+      isFormulaTile(t) && !effectiveKpiSource(g, t)
+        ? formulaOperands(t.formula).filter(o => o.cell?.valueCol).map(o => ({
+            color:    EXTRA_COLORS[i % EXTRA_COLORS.length],
+            valueCol: o.cell!.valueCol,
+            groupVal: localDs.kpiGroupCol ? (g.groupVal ?? null) : null,
+            matchCol: o.cell!.matchCol || null,
+            matchVal: (o.cell!.matchVal !== undefined && o.cell!.matchVal !== '') ? o.cell!.matchVal! : null,
+          }))
+        : [])),
+  ].filter(x => x.valueCol)
 
   const cellColor = (row: Record<string, any>, colName: string, ri: number): string | undefined => {
     for (const bd of hiBindings) {
@@ -1902,6 +2088,23 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
         .dark .ds-th { background:#1a1a1a; }
         .ds-td { padding: 5px 10px; border-bottom: 1px solid var(--border,#e1e6e4); color: var(--text-main,#2c3b36);
           max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; outline-offset: -2px; }
+        .ds-formula { background: var(--bg-card,#fff); border: 1px solid var(--border,#e1e6e4); border-radius: 8px; padding: 10px; margin: 8px 0; }
+        .ds-formula-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+        .ds-formula-src { font-size: 11px; color: var(--text-muted); }
+        .ds-formula-row { display: flex; align-items: center; gap: 8px; }
+        .ds-formula-input { flex: 1; min-width: 180px; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border,#e1e6e4);
+          background: var(--bg-body,#f0f2f1); color: var(--text-main,#2c3b36); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+        .dark .ds-formula-input { background:#111; border-color:#2e2e2e; color:#e0e0e0; }
+        .ds-formula-msg { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-size: 11px; margin: 5px 0 8px; }
+        .ds-formula-msg.ok { color: var(--text-muted); }
+        .ds-formula-msg.bad { color: var(--danger,#c0392b); font-weight: 600; }
+        .ds-formula-op { display: flex; align-items: center; gap: 6px; padding: 4px 6px; margin-bottom: 5px; border: 1px solid transparent; border-radius: 6px; flex-wrap: wrap; }
+        .ds-formula-op.armed { animation: slot-pulse 1s infinite; }
+        .ds-formula-id { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 5px;
+          color: #fff; font-weight: 800; font-size: 12px; flex-shrink: 0; }
+        .ds-formula-bind { flex: 1; min-width: 140px; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ds-formula-unused { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--warning,#d99e35); }
+        .ds-formula-result { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; }
       `}</style>
 
       {/* Presets */}
@@ -1959,9 +2162,17 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
             return (group.tiles ?? []).flatMap((t, i) => {
               const ts = effectiveKpiSource(group, t)
               if (!ts?.table || kpiSourceKey(ts) !== key) return []
+              const color = EXTRA_COLORS[i % EXTRA_COLORS.length]
+              // A formula tile's cells (A, B, …) are read from the tile's table too.
+              if (isFormulaTile(t)) {
+                return formulaOperands(t.formula).filter(o => o.cell?.valueCol).map(o => ({
+                  color, label: `${t.label} · ${o.id}`,
+                  valueCol: o.cell!.valueCol, matchCol: o.cell!.matchCol ?? null, matchVal: o.cell!.matchVal ?? null,
+                }))
+              }
               if (!t.cell?.valueCol) return []
               return [{
-                color: EXTRA_COLORS[i % EXTRA_COLORS.length], label: t.label,
+                color, label: t.label,
                 valueCol: t.cell.valueCol, matchCol: t.cell.matchCol ?? null, matchVal: t.cell.matchVal ?? null,
               }]
             })
@@ -2042,17 +2253,26 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                 // the table the value will be read from.
                 const effSrc = effectiveKpiSource(group, tile ?? null)
                 const effTable = effSrc ? (effSrc.table || '(no table picked)') : (localDs.kpiTable || '(account-wide)')
+                // A formula tile (GroupTile.formula) shows its formula, not a cell —
+                // its values are picked in its FORMULA panel below the cards.
+                const isFormula = !!tile && isFormulaTile(tile)
+                const formulaErr = isFormula ? checkFormula(tile!.formula).error : null
                 const bindDisp = b ? (b.matchVal ? `${b.matchVal} → ${b.valueCol}` : b.valueCol) : (isActive ? '← click a cell' : 'not set')
-                const disp = b ? `${effTable}: ${bindDisp}` : bindDisp
+                const disp = isFormula
+                  ? `ƒ ${tile!.formula!.expr?.trim() || '(no formula yet)'}`
+                  : b ? `${effTable}: ${bindDisp}` : bindDisp
                 // A binding whose valueCol cannot exist in the effective
                 // table is dead — flag it rather than letting it silently
                 // render '--' three screens away on the Overview page.
                 const srcRows = effSrc ? sourcePreviewCols[kpiSourceKey(effSrc)] : null
-                const deadBinding = !!b && !!srcRows && srcRows.length > 0 && !srcRows.includes(b.valueCol)
+                const deadBinding = !isFormula && !!b && !!srcRows && srcRows.length > 0 && !srcRows.includes(b.valueCol)
                 return (
                   <div key={k} className="ds-cellcard"
                     style={{ borderColor: isActive ? color : 'var(--border,#e1e6e4)', animation: isActive ? 'slot-pulse 1s infinite' : 'none' }}
-                    onClick={() => setActiveCell(cur => (cur && cur.groupId === group.id && cur.kpiKey === k) ? null : { groupId: group.id, kpiKey: k })}>
+                    onClick={() => {
+                      if (isFormula) return   // its values are armed in its FORMULA panel
+                      setActiveCell(cur => (cur && cur.groupId === group.id && cur.kpiKey === k) ? null : { groupId: group.id, kpiKey: k })
+                    }}>
                     <div className="ds-cellcard-h" style={{ background: color }}>
                       {/* Editable right on the card you already click to arm cell-picking —
                           stopPropagation so typing here doesn't also arm/disarm the card.
@@ -2088,21 +2308,34 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                           onClick={e => {
                             e.stopPropagation()
                             if (!tile?.source) setGroupTileSource(group.id, k, {})
-                            setActiveCell({ groupId: group.id, kpiKey: k })
+                            // A formula tile's cells are armed one value at a time in its panel —
+                            // arming the card here would pick into its (hidden) single cell.
+                            if (!isFormula) setActiveCell({ groupId: group.id, kpiKey: k })
                           }} />
                       )}
-                      {b && <i className="bx bx-x" title="Clear binding" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); clearCell(group.id, k) }} />}
+                      {/* Formula — work this tile out from several values (lib/kpiFormula.ts).
+                          Turns it ON only; turning it off is "Use one cell instead" in its panel. */}
+                      {isCustom && tile && (
+                        <i className="bx bx-calculator" style={{ cursor: 'pointer', flexShrink: 0, opacity: isFormula ? 1 : 0.55 }}
+                          title={isFormula
+                            ? 'This tile is worked out from a formula — edit it in its FORMULA panel below'
+                            : 'Work this tile out from a formula instead of one cell — e.g. (A + B) / C * 100'}
+                          onClick={e => { e.stopPropagation(); if (!isFormula) startTileFormula(group.id, tile) }} />
+                      )}
+                      {b && !isFormula && <i className="bx bx-x" title="Clear binding" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); clearCell(group.id, k) }} />}
                       {isCustom && <i className="bx bx-trash" title="Remove this tile" style={{ cursor: 'pointer', flexShrink: 0 }} onClick={e => { e.stopPropagation(); removeGroupTile(group.id, k) }} />}
                     </div>
                     <div className="ds-cellcard-v"
-                      title={deadBinding
+                      title={isFormula
+                        ? (formulaErr ? `Formula: ${formulaErr}` : `Worked out from a formula — cells from ${effTable}`)
+                        : deadBinding
                         ? `This tile reads "${effTable}", which has no "${b!.valueCol}" column — so it renders -- on the dashboard. Click the database icon to give this tile its own table.`
                         : `Reads from ${effTable}`}
                       style={{
-                        color: deadBinding ? 'var(--danger,#c0392b)' : (b ? color : 'var(--text-muted)'),
-                        background: deadBinding ? 'rgba(192,57,43,0.12)' : (b ? `${color}12` : 'transparent'),
+                        color: deadBinding || formulaErr ? 'var(--danger,#c0392b)' : (b || isFormula ? color : 'var(--text-muted)'),
+                        background: deadBinding || formulaErr ? 'rgba(192,57,43,0.12)' : (b || isFormula ? `${color}12` : 'transparent'),
                       }}>
-                      {deadBinding && <i className="bx bx-error-circle" style={{ marginRight: 4 }} />}
+                      {(deadBinding || formulaErr) && <i className="bx bx-error-circle" style={{ marginRight: 4 }} />}
                       {disp}
                     </div>
                   </div>
@@ -2132,6 +2365,29 @@ function DataSourcesTab({ accountId, ds: initialDs, onChange }: {
                   onPatch={p => setGroupTileSource(group.id, t.key, p)}
                   onRevert={() => setGroupTileSource(group.id, t.key, null)}
                   onPick={(row, col) => pickCell(row, col)} />
+              )
+            })}
+
+            {/* One FORMULA panel per formula tile (GroupTile.formula). Its cells are picked in
+                whichever preview the tile reads — its own source panel above, the group's, or
+                the account-wide table at the bottom — the same tables a plain cell uses. */}
+            {isCustom && group.tiles!.filter(t => isFormulaTile(t)).map(t => {
+              const i = group.tiles!.findIndex(x => x.key === t.key)
+              const ts = effectiveKpiSource(group, t)
+              return (
+                <FormulaPanel key={`f-${t.key}`} ds={localDs} group={group} tile={t}
+                  color={EXTRA_COLORS[i % EXTRA_COLORS.length]}
+                  accountId={accountId} supaUrl={supaUrl} supaKey={supaKey}
+                  tableLabel={ts ? (ts.table || '(no table picked)') : (localDs.kpiTable || 'the account-wide table')}
+                  armedOperand={activeCell && activeCell.groupId === group.id && activeCell.kpiKey === t.key ? (activeCell.operand ?? null) : null}
+                  onArm={op => setActiveCell(op ? { groupId: group.id, kpiKey: t.key, operand: op } : null)}
+                  onChange={fn => updateTileFormula(group.id, t.key, f => fn(f ?? { expr: '', operands: [] }))}
+                  onOff={() => {
+                    const has = (t.formula?.expr ?? '').trim()
+                    if (has && !window.confirm(`Stop working "${t.label}" out from its formula?\n\n${has}\n\nIt goes back to reading ${t.cell?.valueCol ? `its cell (${t.cell.valueCol})` : 'one cell — pick it on the card'}. The formula is removed.`)) return
+                    setActiveCell(cur => (cur && cur.groupId === group.id && cur.kpiKey === t.key ? null : cur))
+                    updateTileFormula(group.id, t.key, () => null)
+                  }} />
               )
             })}
           </div>
@@ -3641,7 +3897,14 @@ function SettingsContent({ accountId, accounts, kpiThresholds, statusThresholds,
                           const cliqDisabled = !(cliqGlobal.enabled && cliqChan)
                           return (
                             <tr key={tile.key}>
-                              <td><div className="sm-metric">{tile.label}</div></td>
+                              <td>
+                                <div className="sm-metric">{tile.label}</div>
+                                {isFormulaTile(tile) && (
+                                  <div className="sm-metric-sub" title="Worked out from a formula (Data Sources tab) — these lines apply to its result">
+                                    ƒ {tile.formula?.expr?.trim() || '(no formula yet)'}
+                                  </div>
+                                )}
+                              </td>
                               <td>
                                 <KpiUnitSelect value={unit} onChange={u => updateGroupTile(group.id, tile.key, { kpiUnit: u })} />
                               </td>

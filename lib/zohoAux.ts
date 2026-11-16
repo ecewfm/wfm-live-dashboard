@@ -558,7 +558,8 @@ export async function runZohoAuxSync(
         }
         if (fromRest?.ok) {
           // vCORE's timeline is the basis (it checked its own Zoho data's age).
-          await writeKpis(fromRest.values, ` from Workforce REST "${fromRest.account}" (${fromRest.agents} on its timeline)`)
+          const brk = fromRest.breaks ? `, breaks set for ${fromRest.breaks.agentsWithBreaks} of ${fromRest.breaks.working} scheduled` : ''
+          await writeKpis(fromRest.values, ` from Workforce REST "${fromRest.account}" (${fromRest.agents} on its timeline${brk})`)
         } else {
           if (fromRest) parts.push(`Workforce REST: ${fromRest.reason} — using Zoho's schedule`)
           if (!schedules) parts.push('KPI tiles not updated (no schedules)')
