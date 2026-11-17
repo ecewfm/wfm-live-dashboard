@@ -346,10 +346,16 @@ export async function getHourlyReport(
   if (leftOut || cut) l(`Leave: ${leftOut} shift(s) on planned leave left out of Scheduled HC${cut ? `, ${cut} cut to the half worked` : ''} (sick leave stays in).`)
   const touches = (s: number, e: number) => e > win.start && s < win.end
   const people = [...byPerson.values()]
-    .map(p => ({
-      ...p, shifts: p.shifts.filter(([s, e]) => touches(s, e)), sessions: p.sessions.filter(x => touches(x[0], sessionEnd(x, now))),
-      ...(p.leaves ? { leaves: p.leaves.filter(l => touches(l.span[0], l.span[1])) } : {}),
-    }))
+    .map(p => {
+      const shifts = p.shifts.filter(([s, e]) => touches(s, e))
+      // A session in one of those shifts stays even if it ended before the window — an overnight
+      // shift's login and logout from the night before are why its hours here are late / left early.
+      const inAShift = (a: number, b: number) => shifts.some(([s, e]) => b > s && a < e)
+      return {
+        ...p, shifts, sessions: p.sessions.filter(x => touches(x[0], sessionEnd(x, now)) || inAShift(x[0], sessionEnd(x, now))),
+        ...(p.leaves ? { leaves: p.leaves.filter(l => touches(l.span[0], l.span[1])) } : {}),
+      }
+    })
     .filter(p => p.shifts.length || p.sessions.length || p.leaves?.length)
     .sort((a, b) => a.name.localeCompare(b.name))
 

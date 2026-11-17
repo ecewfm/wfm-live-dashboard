@@ -283,6 +283,81 @@ export function dayHeads(hours: HourHeads[]): { scheduled: number; actual: numbe
   return { scheduled: scheduled.size, actual: hours.some(h => h.started) ? actual.size : null, attendance: due ? (present / due) * 100 : null, onLeave: onLeave.size }
 }
 
+// ── What cost attendance, per person, per hour ───────────────────────────────
+// The scheduled time someone missed in an hour, and why (per the user, 2026-11-17 —
+// shown in the Hourly page's hour detail). Judged shift by shift, like the card's
+// judgeShift: before the shift's first login is LATE (NOT LOGGED IN while there's
+// been no login yet), between sessions is LOGGED OUT, after the last logout is LEFT
+// EARLY once the shift is over (LOGGED OUT while it isn't). Any of it that sick
+// leave covers is that leave instead. Breaks don't count — they're taken logged in.
+export type MissKind = 'late' | 'notIn' | 'out' | 'early' | 'leave'
+export interface HourMiss {
+  kind: MissKind
+  /** The scheduled time in the hour (so far) lost to it. */
+  ms: number
+  /** late: how late the shift's first login was in all — it can run past this hour. */
+  shiftLateMs?: number
+  /** leave: its type as shown ("SL", "SL (1st half, 4h)"). */
+  leave?: string
+}
+
+export function missesForHour(p: HourlyPerson, h0: number, h1: number, now: number): HourMiss[] {
+  const end = Math.min(h1, now)
+  if (end <= h0) return []
+  const sessions = mergeSpans(p.sessions.map(s => [s[0], sessionEnd(s, now)] as [number, number]))
+  const out = new Map<string, HourMiss>()
+  const put = (kind: MissKind, ms: number, extra: Partial<HourMiss> = {}) => {
+    if (ms <= 0) return
+    const key = `${kind}:${extra.leave ?? ''}`
+    const m = out.get(key) ?? { kind, ms: 0, ...extra }
+    m.ms += ms
+    if (extra.shiftLateMs !== undefined) m.shiftLateMs = Math.max(m.shiftLateMs ?? 0, extra.shiftLateMs)
+    out.set(key, m)
+  }
+  // [a, b) missed, cut to the hour so far; the part a leave covers goes to the leave.
+  const miss = (kind: MissKind, a: number, b: number, extra: Partial<HourMiss> = {}) => {
+    a = Math.max(a, h0); b = Math.min(b, end)
+    if (b <= a) return
+    let rest = b - a
+    for (const l of p.leaves ?? []) {
+      const ms = Math.max(0, Math.min(l.span[1], b) - Math.max(l.span[0], a))
+      if (ms > 0) { put('leave', ms, { leave: l.type }); rest -= ms }
+    }
+    put(kind, rest, extra)
+  }
+  for (const [s, e] of mergeSpans(p.shifts)) {
+    const due = Math.min(e, now)
+    if (due <= h0 || s >= end) continue
+    const inShift = sessions.map(([a, b]) => [Math.max(a, s), Math.min(b, due)] as [number, number]).filter(([a, b]) => b > a)
+    if (!inShift.length) { miss('notIn', s, due); continue }
+    miss('late', s, inShift[0][0], { shiftLateMs: inShift[0][0] - s })
+    for (let i = 1; i < inShift.length; i++) miss('out', inShift[i - 1][1], inShift[i][0])
+    miss(e <= now ? 'early' : 'out', inShift[inShift.length - 1][1], due)
+  }
+  const ORDER: MissKind[] = ['notIn', 'late', 'out', 'early', 'leave']
+  return [...out.values()].sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind))
+}
+
+export const MISS_LABEL: Record<MissKind, string> = {
+  notIn: 'not logged in', late: 'late', out: 'logged out', early: 'left early', leave: 'on leave',
+}
+
+/** "45s", "4m 12s", "3h 22m" — seconds only under an hour. */
+export function durText(ms: number): string {
+  const t = Math.round(ms / 1000)
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60
+  if (h) return m ? `${h}h ${m}m` : `${h}h`
+  if (m) return s ? `${m}m ${s}s` : `${m}m`
+  return `${s}s`
+}
+
+/** One miss as shown: "late 4m 12s", "late 60m (logged in 3h 22m late)", "SL 60m". */
+export function missText(m: HourMiss): string {
+  const what = m.kind === 'leave' ? (m.leave || MISS_LABEL.leave) : MISS_LABEL[m.kind]
+  const more = m.kind === 'late' && m.shiftLateMs !== undefined && m.shiftLateMs - m.ms >= 1000 ? ` (logged in ${durText(m.shiftLateMs)} late)` : ''
+  return `${what} ${durText(m.ms)}${more}`
+}
+
 // ── KPI readings, per hour ────────────────────────────────────────────────────
 // Every minute, lib/hourlyReportServer.ts reads each account's KPI tiles (the
 // same kpiCardGroups() the Overview card shows) and folds the reading into the

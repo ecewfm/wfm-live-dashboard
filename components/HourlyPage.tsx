@@ -18,9 +18,9 @@ import { addDays, dateInTz } from '@/lib/zohoAuxShared'
 import type { DataSourceConfig, Thresholds } from '@/lib/types'
 import {
   HOURLY_TIMEZONES, DEFAULT_HOURLY_TZ, ZOHO_CLOCK_TZ, KPI_MODES, isHourlyTz, clockIn,
-  actualOf, attendanceOf, dayHeads, sessionEnd, toCsv,
+  actualOf, attendanceOf, dayHeads, sessionEnd, toCsv, missesForHour, missText, durText, MISS_LABEL,
   hourlyRows, trimHourlyRows, hourlyKpiCell, hourlyTotalKpi, attendanceTone, pctText,
-  type KpiMode, type HourHeads, type HourlyPerson, type HourlyReport, type HourlyRow, type KpiHour, type CellTone,
+  type KpiMode, type HourHeads, type HourlyPerson, type HourlyReport, type HourlyRow, type KpiHour, type CellTone, type HourMiss,
 } from '@/lib/hourlyReport'
 
 const REFRESH_MS = 2 * 60 * 1000     // the KPI readings are every minute, Zoho every 5
@@ -272,7 +272,7 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
                     </tr>
                     {isOpen && (
                       <tr className="hr-detail-row">
-                        <td colSpan={colCount}><HourDetail heads={r.heads} byName={byName} tz={tz} now={now} /></td>
+                        <td colSpan={colCount}><HourDetail heads={r.heads} byName={byName} tz={tz} now={now} h0={r.start} h1={r.end} /></td>
                       </tr>
                     )}
                   </Fragment>
@@ -298,20 +298,36 @@ export default function HourlyPage({ accounts, displayNames, account, onAccountC
       </div>
 
       <div className="hr-notes">
-        <p><strong>Scheduled HC</strong> — people whose Zoho daily schedule covers at least half of the hour. <strong>Actual HC</strong> — people logged in to the ECE Time Tracker for at least half of their scheduled time in the hour (half the hour if they weren&apos;t scheduled — overtime, or in early). <strong>Attendance %</strong> — the scheduled people who were there, out of those due so far. <strong>On Leave</strong> — people on leave for at least half of the hour (Zoho&apos;s approved leave and time-log notes, any type, half days for their half); planned leave isn&apos;t in Scheduled HC, sick leave (SL) still is, counted as absent. <strong>TOTAL</strong> — different people across the day; attendance over all the day&apos;s scheduled hours.</p>
+        <p><strong>Scheduled HC</strong> — people whose Zoho daily schedule covers at least half of the hour. <strong>Actual HC</strong> — people logged in to the ECE Time Tracker for at least half of their scheduled time in the hour (half the hour if they weren&apos;t scheduled — overtime, or in early). <strong>Attendance %</strong> — the scheduled people who were there, out of those due so far. <strong>On Leave</strong> — people on leave for at least half of the hour (Zoho&apos;s approved leave and time-log notes, any type, half days for their half); planned leave isn&apos;t in Scheduled HC, sick leave (SL) still is, counted as absent. <strong>TOTAL</strong> — different people across the day; attendance over all the day&apos;s scheduled hours. <strong>Click an hour</strong> — next to each person due, the scheduled time they missed in it and why, to the second: <em>late</em> (before their first login of the shift), <em>not logged in</em> (no login yet), <em>logged out</em> (out mid-shift), <em>left early</em> (out before the shift ended), or their sick leave. Breaks don&apos;t count — they&apos;re taken logged in.</p>
         <p><strong>KPI columns</strong> — this account&apos;s KPI tiles, read by the webapp every minute (the CRMs keep no history, so hours before the webapp started reading them are blank, and so is any minute the account&apos;s data was out of sync). <strong>End of hour</strong> is what the tile showed at the end of the hour — the TOTAL row, at the end of the day; <strong>Average</strong> averages the hour&apos;s readings; <strong>Worst</strong> is its worst reading by the tile&apos;s thresholds. Colours follow the tile&apos;s thresholds.</p>
       </div>
     </div>
   )
 }
 
-// Who was scheduled and who was there in one hour, with each person's shift and Time Tracker times.
-function HourDetail({ heads, byName, tz, now }: { heads: HourHeads; byName: Map<string, HourlyPerson>; tz: string; now: number }) {
-  const shiftText = (p?: HourlyPerson) => (p?.shifts ?? []).map(([s, e]) => `${clockIn(s, tz)}–${clockIn(e, tz)}`).join(', ')
+// Who was scheduled and who was there in one hour, with each person's shift and Time Tracker
+// times — and, for the people due, the scheduled time they missed and why (late, not logged
+// in, logged out, left early, sick leave), to the second.
+function HourDetail({ heads, byName, tz, now, h0, h1 }: { heads: HourHeads; byName: Map<string, HourlyPerson>; tz: string; now: number; h0: number; h1: number }) {
+  // Two Zoho sources can carry the same shift — show it once.
+  const shiftText = (p?: HourlyPerson) => [...new Set((p?.shifts ?? []).map(([s, e]) => `${clockIn(s, tz)}–${clockIn(e, tz)}`))].join(', ')
   const sessionText = (p?: HourlyPerson) => (p?.sessions ?? []).map(s => {
     const end = s[1] === null ? (sessionEnd(s, now) < now ? ' (no logout)' : ' (still in)') : ` – ${clockIn(s[1], tz)}`
     return `in ${clockIn(s[0], tz)}${end}`
   }).join(', ')
+  // The misses of everyone due this hour (there or not).
+  const misses = new Map<string, HourMiss[]>()
+  if (heads.started) for (const n of [...heads.absent, ...heads.present]) {
+    const p = byName.get(n)
+    const m = p ? missesForHour(p, h0, h1, now) : []
+    if (m.length) misses.set(n, m)
+  }
+  const lost = new Map<string, number>()   // the hour's total, by reason
+  for (const ms of misses.values()) for (const m of ms) {
+    const label = m.kind === 'leave' ? (m.leave?.split(' ')[0] || MISS_LABEL.leave) : MISS_LABEL[m.kind]
+    lost.set(label, (lost.get(label) ?? 0) + m.ms)
+  }
+  const lostTotal = [...lost.values()].reduce((a, b) => a + b, 0)
   const list = (title: string, names: string[], cls: string, show: 'both' | 'shift' | 'session') => names.length > 0 && (
     <div className={`hr-list ${cls}`}>
       <div className="lg-block-title">{title} ({names.length})</div>
@@ -319,7 +335,13 @@ function HourDetail({ heads, byName, tz, now }: { heads: HourHeads; byName: Map<
         {names.map(n => {
           const p = byName.get(n)
           const bits = [show !== 'session' && shiftText(p) && `shift ${shiftText(p)}`, show !== 'shift' && sessionText(p)].filter(Boolean)
-          return <li key={n}><span>{n}</span>{bits.length > 0 && <span className="text-muted"> · {bits.join(' · ')}</span>}</li>
+          const why = misses.get(n)
+          return (
+            <li key={n}>
+              <span>{n}</span>{bits.length > 0 && <span className="text-muted"> · {bits.join(' · ')}</span>}
+              {why && <span className="hr-miss">{why.map(m => <span key={`${m.kind}:${m.leave ?? ''}`} className={`hr-miss-chip ${m.kind}`}>{missText(m)}</span>)}</span>}
+            </li>
+          )
         })}
       </ul>
     </div>
@@ -328,6 +350,13 @@ function HourDetail({ heads, byName, tz, now }: { heads: HourHeads; byName: Map<
   return (
     <div className="hr-detail">
       {empty && <div className="text-muted">Nobody scheduled, logged in or on leave this hour.</div>}
+      {lostTotal > 0 && (
+        <div className="hr-lost">
+          <strong>Scheduled time missed this hour: {durText(lostTotal)}</strong>
+          {' — '}{[...lost].sort((a, b) => b[1] - a[1]).map(([label, ms]) => `${label} ${durText(ms)}`).join(' · ')}
+          <span className="text-muted"> · Attendance % counts people: someone is there when logged in for at least half of their scheduled time in the hour.</span>
+        </div>
+      )}
       {heads.onLeave.length > 0 && (
         <div className="hr-list">
           <div className="lg-block-title">On leave ({heads.onLeave.length})</div>
